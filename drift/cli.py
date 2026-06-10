@@ -177,12 +177,12 @@ def verify(
 def chat(
     name: str = typer.Argument(..., help="Contact name to message"),
     relay: str = typer.Option("ws://localhost:8765", "--relay", help="Relay WebSocket URL"),
+    no_tui: bool = typer.Option(False, "--no-tui", help="Plain-text mode (no Textual TUI)"),
 ) -> None:
     """
     Open a conversation with a contact.
 
-    Phase 0: direct WebSocket, static shared key.
-    Phase 1: stealth addresses.
+    Phase 1: stealth addresses with rotating one-time addressing.
     Phase 3: routes over Tor automatically.
     """
     identity = _load_identity()
@@ -193,7 +193,12 @@ def chat(
         raise typer.Exit(1)
 
     their_code = contacts_data[name]["code"]
-    asyncio.run(_chat_async(name, identity, their_code, relay))
+
+    if no_tui:
+        asyncio.run(_chat_async(name, identity, their_code, relay))
+    else:
+        from drift.ui.app import DriftApp
+        DriftApp(identity, name, their_code, relay).run()
 
 
 async def _chat_async(
