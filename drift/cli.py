@@ -12,7 +12,9 @@ Commands:
 
 from __future__ import annotations
 
+import asyncio
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -179,20 +181,66 @@ def chat(
     """
     Open a conversation with a contact.
 
-    Phase 0: direct WebSocket, no rotation.
+    Phase 0: direct WebSocket, static shared key.
     Phase 1: stealth addresses.
     Phase 3: routes over Tor automatically.
     """
-    _load_identity()
+    identity = _load_identity()
     contacts_data = _load_contacts()
 
     if name not in contacts_data:
         console.print(f"[red]Unknown contact:[/red] {name}")
         raise typer.Exit(1)
 
-    console.print(f"[dim]Connecting to relay at {relay} ...[/dim]")
-    console.print("[yellow]Chat UI is Phase 0 — coming soon. Contributions welcome![/yellow]")
-    console.print("[dim]See drift/ui/ to start building.[/dim]")
+    their_code = contacts_data[name]["code"]
+    asyncio.run(_chat_async(name, identity, their_code, relay))
+
+
+async def _chat_async(
+    name: str, identity: Identity, contact_code: str, relay_url: str
+) -> None:
+    from cryptography.exceptions import InvalidTag
+
+    from drift.transport.session import Session
+
+    console.print(f"[dim]Connecting to {relay_url} …[/dim]")
+    try:
+        async with Session(identity, contact_code, relay_url) as session:
+            console.print(
+                f"[green]Connected.[/green] Chatting with [bold]{name}[/bold]. "
+                "Ctrl+C to quit.\n"
+            )
+            recv_task = asyncio.create_task(_receive_loop(session, name))
+            loop = asyncio.get_running_loop()
+            try:
+                while True:
+                    line = await loop.run_in_executor(None, sys.stdin.readline)
+                    if not line:
+                        break
+                    text = line.rstrip("\n")
+                    if text:
+                        await session.send(text)
+                        console.print(f"[bold green]you:[/bold green] {text}")
+            except (KeyboardInterrupt, asyncio.CancelledError):
+                pass
+            finally:
+                recv_task.cancel()
+                try:
+                    await recv_task
+                except (asyncio.CancelledError, InvalidTag):
+                    pass
+    except Exception as exc:
+        console.print(f"[red]Connection error:[/red] {exc}")
+
+
+async def _receive_loop(session: Any, name: str) -> None:
+    from cryptography.exceptions import InvalidTag
+
+    try:
+        async for msg in session.messages():
+            console.print(f"\n[bold cyan]{name}:[/bold cyan] {msg}")
+    except InvalidTag:
+        console.print("\n[red]Authentication failure — message rejected (tampered or wrong key).[/red]")
 
 
 @app.command()
