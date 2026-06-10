@@ -13,16 +13,16 @@ Commands:
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
+from typing import Any
 
 import typer
 from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
 
-from drift.crypto import Identity, b58encode
 from drift import __version__
+from drift.crypto import Identity
 
 app = typer.Typer(
     name="drift",
@@ -45,13 +45,14 @@ def _load_identity() -> Identity:
     return Identity.load(IDENTITY_FILE)
 
 
-def _load_contacts() -> dict:
+def _load_contacts() -> dict[str, Any]:
     if not CONTACTS_FILE.exists():
         return {}
-    return json.loads(CONTACTS_FILE.read_text())
+    result: dict[str, Any] = json.loads(CONTACTS_FILE.read_text())
+    return result
 
 
-def _save_contacts(contacts: dict) -> None:
+def _save_contacts(contacts: dict[str, Any]) -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     CONTACTS_FILE.write_text(json.dumps(contacts, indent=2))
     CONTACTS_FILE.chmod(0o600)
@@ -67,7 +68,10 @@ def init(
 ) -> None:
     """Generate a new DRIFT identity (keypairs stored locally)."""
     if IDENTITY_FILE.exists() and not force:
-        console.print("[yellow]Identity already exists.[/yellow] Use --force to regenerate (this is destructive).")
+        console.print(
+            "[yellow]Identity already exists.[/yellow] "
+            "Use --force to regenerate (this is destructive)."
+        )
         raise typer.Exit(1)
 
     identity = Identity.generate()
@@ -104,7 +108,7 @@ def add(
         scan_pub, spend_pub = Identity.parse_contact_code(code)
     except ValueError as e:
         console.print(f"[red]Invalid contact code:[/red] {e}")
-        raise typer.Exit(1)
+        raise typer.Exit(1) from None
 
     contacts = _load_contacts()
     contacts[name] = {"code": code}
@@ -138,7 +142,10 @@ def verify(
     contacts_data = _load_contacts()
 
     if name not in contacts_data:
-        console.print(f"[red]Unknown contact:[/red] {name}. Run [bold]drift add {name} <code>[/bold] first.")
+        console.print(
+            f"[red]Unknown contact:[/red] {name}. "
+            f"Run [bold]drift add {name} <code>[/bold] first."
+        )
         raise typer.Exit(1)
 
     their_code = contacts_data[name]["code"]
@@ -147,7 +154,7 @@ def verify(
 
     # Safety number: hash of both scan keys (sorted so it's symmetric)
     import hashlib
-    combined = b"drift-safety-v0" + bytes(sorted([my_scan, their_scan], key=lambda b: b.hex()))
+    combined = b"drift-safety-v0" + b"".join(sorted([my_scan, their_scan]))
     digest = hashlib.sha256(combined).digest()
 
     # Encode as 4 English-ish words from a tiny wordlist (proper BIP39 in Phase 1)
