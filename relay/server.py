@@ -21,7 +21,6 @@ Run locally:
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import time
@@ -76,7 +75,9 @@ async def websocket_endpoint(websocket: WebSocket, listen_addr: str) -> None:
     await websocket.accept()
     _subscribers[listen_addr].add(websocket)
 
-    logger.info("Client subscribed addr=%.12s… total=%d", listen_addr, len(_subscribers[listen_addr]))
+    logger.info(
+        "Client subscribed addr=%.12s… total=%d", listen_addr, len(_subscribers[listen_addr])
+    )
 
     # Drain any queued messages for this address
     if listen_addr in _mailbox:
@@ -85,7 +86,7 @@ async def websocket_endpoint(websocket: WebSocket, listen_addr: str) -> None:
             try:
                 await websocket.send_text(json.dumps(envelope))
             except Exception:
-                pass
+                logger.debug("Failed to drain queued envelope to %s", listen_addr)
 
     try:
         while True:
@@ -179,4 +180,4 @@ async def root() -> JSONResponse:
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("relay.server:app", host="0.0.0.0", port=8765, reload=True)
+    uvicorn.run("relay.server:app", host="0.0.0.0", port=8765, reload=True)  # noqa: S104

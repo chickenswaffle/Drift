@@ -22,27 +22,29 @@ Phase 2 will add:
 
 from __future__ import annotations
 
-import os
 import json
-import base64
-from dataclasses import dataclass, field, asdict
+import os
+from dataclasses import dataclass
 from pathlib import Path
-from typing import NamedTuple
 
+from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.asymmetric.x25519 import (
     X25519PrivateKey,
     X25519PublicKey,
 )
-from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from cryptography.hazmat.primitives.hashes import SHA256
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives.serialization import (
     Encoding,
-    PublicFormat,
-    PrivateFormat,
     NoEncryption,
+    PrivateFormat,
+    PublicFormat,
 )
-
+from nacl.bindings import (
+    crypto_aead_xchacha20poly1305_ietf_decrypt,
+    crypto_aead_xchacha20poly1305_ietf_encrypt,
+)
+from nacl.exceptions import CryptoError
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -93,7 +95,7 @@ class Keypair:
     public_key: X25519PublicKey
 
     @classmethod
-    def generate(cls) -> "Keypair":
+    def generate(cls) -> Keypair:
         priv = X25519PrivateKey.generate()
         return cls(private_key=priv, public_key=priv.public_key())
 
@@ -116,7 +118,9 @@ class Keypair:
 # Key derivation
 # ---------------------------------------------------------------------------
 
-def derive_message_key(shared_secret: bytes, salt: bytes | None = None, info: bytes = b"drift-v0-msg") -> bytes:
+def derive_message_key(
+    shared_secret: bytes, salt: bytes | None = None, info: bytes = b"drift-v0-msg"
+) -> bytes:
     """
     HKDF-SHA256: stretch an ECDH shared secret into a 32-byte message key.
     `info` is domain-separated — change it for different derived keys.
@@ -147,8 +151,9 @@ def encrypt(key: bytes, plaintext: bytes, associated_data: bytes = b"") -> bytes
     if len(key) != 32:
         raise ValueError(f"Key must be 32 bytes, got {len(key)}")
     nonce = os.urandom(NONCE_SIZE)
-    cipher = ChaCha20Poly1305(key)
-    ciphertext = cipher.encrypt(nonce, plaintext, associated_data or None)
+    ciphertext = crypto_aead_xchacha20poly1305_ietf_encrypt(
+        plaintext, associated_data, nonce, key
+    )
     return nonce + ciphertext
 
 
@@ -163,8 +168,10 @@ def decrypt(key: bytes, ciphertext_with_nonce: bytes, associated_data: bytes = b
         raise ValueError(f"Key must be 32 bytes, got {len(key)}")
     nonce = ciphertext_with_nonce[:NONCE_SIZE]
     ciphertext = ciphertext_with_nonce[NONCE_SIZE:]
-    cipher = ChaCha20Poly1305(key)
-    return cipher.decrypt(nonce, ciphertext, associated_data or None)
+    try:
+        return crypto_aead_xchacha20poly1305_ietf_decrypt(ciphertext, associated_data, nonce, key)
+    except CryptoError as exc:
+        raise InvalidTag() from exc
 
 
 # ---------------------------------------------------------------------------
@@ -187,7 +194,7 @@ class Identity:
     spend_keypair: Keypair
 
     @classmethod
-    def generate(cls) -> "Identity":
+    def generate(cls) -> Identity:
         return cls(
             scan_keypair=Keypair.generate(),
             spend_keypair=Keypair.generate(),
@@ -198,7 +205,7 @@ class Identity:
         spend_pub = self.spend_keypair.public_b58()
         return f"drift:{scan_pub}.{spend_pub}"
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, str]:
         return {
             "scan_priv": b58encode(self.scan_keypair.private_bytes()),
             "scan_pub": self.scan_keypair.public_b58(),
@@ -212,7 +219,7 @@ class Identity:
         path.chmod(0o600)  # owner-read-only
 
     @classmethod
-    def load(cls, path: Path) -> "Identity":
+    def load(cls, path: Path) -> Identity:
         data = json.loads(path.read_text())
         scan_priv = X25519PrivateKey.from_private_bytes(b58decode(data["scan_priv"]))
         spend_priv = X25519PrivateKey.from_private_bytes(b58decode(data["spend_priv"]))

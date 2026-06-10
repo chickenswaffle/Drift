@@ -10,15 +10,14 @@ import pytest
 from cryptography.exceptions import InvalidTag
 
 from drift.crypto import (
-    Keypair,
     Identity,
+    Keypair,
+    b58decode,
+    b58encode,
+    decrypt,
     derive_message_key,
     encrypt,
-    decrypt,
-    b58encode,
-    b58decode,
 )
-
 
 # ---------------------------------------------------------------------------
 # Base58
