@@ -240,7 +240,10 @@ async def _receive_loop(session: Any, name: str) -> None:
         async for msg in session.messages():
             console.print(f"\n[bold cyan]{name}:[/bold cyan] {msg}")
     except InvalidTag:
-        console.print("\n[red]Authentication failure — message rejected (tampered or wrong key).[/red]")
+        console.print(
+            "\n[red]Authentication failure — message rejected "
+            "(tampered or wrong key).[/red]"
+        )
 
 
 @app.command()

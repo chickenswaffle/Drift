@@ -47,13 +47,19 @@ class Envelope:
     them for JSON transit and decodes them on receipt.  Nothing here
     knows what the bytes contain.
 
-    Phase 1 will extend this with ``ephemeral_pub`` and ``one_time_addr``
-    for stealth-address routing.
+    Phase 1 stealth-address fields (both optional, opaque to transport):
+      ``ephemeral_pub``  — the sender's one-time public key R
+      ``one_time_addr``  — the derived one-time address A_once
+
+    Both are carried verbatim so the receiver can scan for messages
+    addressed to it. The transport layer never interprets them.
     """
 
-    to: str            # destination address — routing key, opaque to transport
+    to: str            # destination/routing key — opaque to transport
     ciphertext: bytes  # encrypted payload — opaque to transport
     timestamp: int = field(default_factory=lambda: int(time.time()))
+    ephemeral_pub: bytes | None = None  # R — stealth ephemeral public key
+    one_time_addr: bytes | None = None  # A_once — stealth one-time address
 
 
 class RelayClient:
@@ -145,6 +151,11 @@ class RelayClient:
             "ct": base64.b64encode(envelope.ciphertext).decode(),
             "ts": envelope.timestamp,
         }
+        # Phase 1: carry stealth-address fields when present.
+        if envelope.ephemeral_pub is not None:
+            payload["R"] = base64.b64encode(envelope.ephemeral_pub).decode()
+        if envelope.one_time_addr is not None:
+            payload["addr"] = base64.b64encode(envelope.one_time_addr).decode()
         try:
             resp = await self._http.post(f"{self._http_base}/send", json=payload)
             resp.raise_for_status()
@@ -210,6 +221,9 @@ class RelayClient:
                     continue
                 try:
                     ciphertext = base64.b64decode(msg["ct"])
+                    # Phase 1 stealth fields are optional; decode when present.
+                    ephemeral_pub = base64.b64decode(msg["R"]) if "R" in msg else None
+                    one_time_addr = base64.b64decode(msg["addr"]) if "addr" in msg else None
                 except ValueError:
                     continue
                 await self._queue.put(
@@ -217,6 +231,8 @@ class RelayClient:
                         to=msg.get("to", ""),
                         ciphertext=ciphertext,
                         timestamp=int(msg.get("ts", 0)),
+                        ephemeral_pub=ephemeral_pub,
+                        one_time_addr=one_time_addr,
                     )
                 )
         except (ConnectionClosed, asyncio.CancelledError):

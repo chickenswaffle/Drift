@@ -117,24 +117,40 @@ async def send_message(envelope: dict[str, Any]) -> JSONResponse:
 
     Expected body (Phase 0):
         {
-            "to":  "<addr_hex>",     // destination address
-            "ct":  "<base58>",       // ciphertext (opaque to relay)
+            "to":  "<addr>",         // routing key (opaque to relay)
+            "ct":  "<base64>",       // ciphertext (opaque to relay)
             "ts":  1234567890        // unix timestamp (for TTL)
         }
 
-    Phase 1 adds:
-        "R":    "<base58>",          // ephemeral public key
-        "addr": "<base58>"           // one-time stealth address (same as "to")
+    Phase 1 stealth fields (optional, opaque to relay):
+        "R":    "<base64>",          // sender's ephemeral public key
+        "addr": "<base64>"           // derived one-time stealth address
 
-    The relay does not validate or inspect "ct". It routes and forgets.
+    The relay never inspects "ct", "R", or "addr" — it routes and forgets.
+    Only the recipient, scanning with their private scan key, can tell
+    which one-time address (and therefore which message) is theirs.
+
+    We rebuild the forwarded record from known fields only, so the relay
+    never re-broadcasts arbitrary client-supplied JSON to other clients.
     """
     to_addr = envelope.get("to", "")
     if not to_addr:
         return JSONResponse({"error": "missing 'to' field"}, status_code=400)
 
-    envelope["_relay_ts"] = time.time()
-    envelope["_id"] = str(uuid4())
+    record: dict[str, Any] = {
+        "to": to_addr,
+        "ct": envelope.get("ct", ""),
+        "ts": envelope.get("ts", 0),
+        "_relay_ts": time.time(),
+        "_id": str(uuid4()),
+    }
+    # Carry Phase 1 stealth-address fields through untouched, if present.
+    if "R" in envelope:
+        record["R"] = envelope["R"]
+    if "addr" in envelope:
+        record["addr"] = envelope["addr"]
 
+    envelope = record
     subscribers = _subscribers.get(to_addr, set())
     delivered = 0
 

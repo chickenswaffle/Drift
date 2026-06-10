@@ -2,8 +2,10 @@
 tests/integration/test_e2e.py — end-to-end encrypted message exchange
 
 Spins up the DRIFT relay in-process, connects two Session instances as
-Alice and Bob, sends a message from Alice, and asserts Bob receives the
-correct plaintext.
+Alice and Bob, and exercises Phase 1 rotating stealth addresses:
+messages flow over a shared broadcast channel, each lands at a fresh
+unlinkable one-time address, and the receiver detects its own messages
+by scanning.
 
 Requires the relay extras: pip install -e ".[dev]"
 Run: pytest tests/integration/ -v
@@ -18,10 +20,11 @@ import pytest
 import uvicorn
 
 import relay.server as relay_module
+from drift.crypto import Identity, Keypair, encrypt
+from drift.crypto.stealth import derive_one_time_address
+from drift.transport.client import Envelope, RelayClient
+from drift.transport.session import STEALTH_CHANNEL, Session
 from relay.server import app as relay_app
-from drift.crypto import Identity
-from drift.transport.session import Session
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -74,13 +77,13 @@ async def relay_url() -> str:  # type: ignore[misc]
 
 
 # ---------------------------------------------------------------------------
-# Tests
+# Delivery
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_alice_sends_bob_receives(relay_url: str) -> None:
-    """Alice encrypts a message; Bob decrypts the correct plaintext."""
+    """Alice sends a stealth-addressed message; Bob scans and decrypts it."""
     alice = Identity.generate()
     bob = Identity.generate()
 
@@ -98,7 +101,11 @@ async def test_alice_sends_bob_receives(relay_url: str) -> None:
 
 @pytest.mark.asyncio
 async def test_bidirectional_exchange(relay_url: str) -> None:
-    """Alice and Bob can each send and receive a message."""
+    """
+    Both clients sit on the same broadcast channel, so each also sees its
+    own outbound message — scanning must skip those and surface only the
+    message actually addressed to it.
+    """
     alice = Identity.generate()
     bob = Identity.generate()
 
@@ -119,28 +126,122 @@ async def test_bidirectional_exchange(relay_url: str) -> None:
     assert alice_received == "pong"
 
 
+# ---------------------------------------------------------------------------
+# Rotating addresses — the Phase 1 property
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_messages_use_rotating_addresses(relay_url: str) -> None:
+    """
+    Two messages to the same contact must land at two distinct one-time
+    addresses with distinct ephemeral keys — unlinkable on the wire — yet
+    both decrypt correctly for the recipient.
+    """
+    alice = Identity.generate()
+    bob = Identity.generate()
+
+    # A passive observer on the broadcast channel — stands in for the relay
+    # operator, who must not be able to link the two messages.
+    observer = RelayClient(relay_url, STEALTH_CHANNEL)
+
+    async with (
+        observer,
+        Session(alice, bob.contact_code(), relay_url) as alice_session,
+        Session(bob, alice.contact_code(), relay_url) as bob_session,
+    ):
+        await alice_session.send("first")
+        await alice_session.send("second")
+
+        # Capture both envelopes as the relay broadcasts them.
+        env1 = await asyncio.wait_for(observer.receive(), timeout=5.0)
+        env2 = await asyncio.wait_for(observer.receive(), timeout=5.0)
+
+        # Wire-level unlinkability: different one-time address + ephemeral key.
+        assert env1.one_time_addr != env2.one_time_addr
+        assert env1.ephemeral_pub != env2.ephemeral_pub
+        # Both still route to the shared channel — the relay learns nothing else.
+        assert env1.to == STEALTH_CHANNEL == env2.to
+
+        # Despite rotation, Bob decrypts both in order.
+        bob_msgs = bob_session.messages()
+        got = [
+            await asyncio.wait_for(bob_msgs.__anext__(), timeout=5.0),
+            await asyncio.wait_for(bob_msgs.__anext__(), timeout=5.0),
+        ]
+
+    assert got == ["first", "second"]
+
+
+@pytest.mark.asyncio
+async def test_non_recipient_cannot_decrypt(relay_url: str) -> None:
+    """
+    A third party (Eve) on the same broadcast channel scans every envelope
+    but never matches a message addressed to Bob — she sees only opaque
+    traffic, never plaintext.
+    """
+    alice = Identity.generate()
+    bob = Identity.generate()
+    eve = Identity.generate()
+
+    async with (
+        Session(alice, bob.contact_code(), relay_url) as alice_session,
+        Session(bob, alice.contact_code(), relay_url) as bob_session,
+        # Eve points her session at Bob's code, but scans with her own keys.
+        Session(eve, bob.contact_code(), relay_url) as eve_session,
+    ):
+        await alice_session.send("for bob only")
+
+        # Bob gets it.
+        bob_msgs = bob_session.messages()
+        assert await asyncio.wait_for(bob_msgs.__anext__(), timeout=5.0) == "for bob only"
+
+        # Eve's scan never matches → her generator yields nothing in time.
+        eve_msgs = eve_session.messages()
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(eve_msgs.__anext__(), timeout=1.0)
+
+
+# ---------------------------------------------------------------------------
+# Integrity — tampered ciphertext for a genuinely-ours address
+# ---------------------------------------------------------------------------
+
+
 @pytest.mark.asyncio
 async def test_tampered_ciphertext_raises_invalid_tag(relay_url: str) -> None:
-    """Injecting garbage ciphertext to a session raises InvalidTag on receive."""
-    import base64
-
-    import httpx
+    """
+    An envelope correctly addressed to Bob (his scan matches) but carrying
+    corrupt ciphertext must raise InvalidTag on receive — a tampered
+    message is rejected, never silently dropped.
+    """
     from cryptography.exceptions import InvalidTag
 
     bob = Identity.generate()
     alice = Identity.generate()
 
+    # Derive a valid one-time address for Bob so his scan succeeds...
+    ephemeral = Keypair.generate()
+    one_time_addr, key = derive_one_time_address(
+        ephemeral.private_bytes(),
+        bob.scan_keypair.public_bytes(),
+        bob.spend_keypair.public_bytes(),
+    )
+    # ...but corrupt the ciphertext after encryption.
+    corrupt = bytearray(encrypt(key, b"surprise"))
+    corrupt[-1] ^= 0xFF  # flip a bit in the auth tag
+
     async with Session(bob, alice.contact_code(), relay_url) as bob_session:
-        # Post garbage ciphertext directly to the relay targeting Bob's listen address.
-        # 24 bytes (nonce-sized header) + 40 bytes of zeros → auth tag mismatch.
-        bob_addr = bob.spend_keypair.public_b58()
-        http_url = relay_url.replace("ws://", "http://")
-        async with httpx.AsyncClient() as http:
-            await http.post(
-                f"{http_url}/send",
-                json={"to": bob_addr, "ct": base64.b64encode(b"\x00" * 64).decode(), "ts": 0},
+        injector = RelayClient(relay_url, "injector")
+        async with injector:
+            await injector.send(
+                Envelope(
+                    to=STEALTH_CHANNEL,
+                    ciphertext=bytes(corrupt),
+                    ephemeral_pub=ephemeral.public_bytes(),
+                    one_time_addr=one_time_addr,
+                )
             )
 
-        bob_msgs = bob_session.messages()
-        with pytest.raises(InvalidTag):
-            await asyncio.wait_for(bob_msgs.__anext__(), timeout=5.0)
+            bob_msgs = bob_session.messages()
+            with pytest.raises(InvalidTag):
+                await asyncio.wait_for(bob_msgs.__anext__(), timeout=5.0)
