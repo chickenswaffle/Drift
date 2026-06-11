@@ -88,10 +88,35 @@ Every individual message is sealed with an AEAD cipher — use **XChaCha20-Poly1
 
 Hiding *content* is solved. Hiding *who talks to whom* is where most messengers quietly fall short. DRIFT layers several defenses:
 
-- **Sealed sender** — the sender's identity is encrypted *inside* the payload, so the relay can't see who sent what.
+- **Sealed sender** — sender-linkable metadata is encrypted *inside* the payload, so the relay sees only the recipient's one-time address and an opaque blob (see the subsection below).
 - **Onion transport over Tor by default** — the relay never sees your real IP. The client should bootstrap Tor automatically so the user never thinks about it. (A mixnet like Nym/Loopix is the stronger, heavier upgrade for defeating timing analysis — a later phase.)
 - **Cover traffic** — the client sends decoy messages on a randomized schedule so that *volume and timing* leak nothing. An observer can't tell a real conversation from silence.
 - **Dead-drop model** — combined with stealth addresses, the relay is a write-only, read-by-scanning bulletin board. There is no "inbox for Alice" to point at.
+
+### Sealed sender (Phase 3b)
+
+DRIFT has no accounts, so the envelope never carried a sender *identity* to begin with. The residual leak was subtler: the Double Ratchet header rode on the wire in the clear, and it contains the sender's current DH ratchet public key — which is **stable across a ratchet epoch**. A relay (or any firehose observer) could therefore group a sender's messages by that key, even with Tor hiding the IP. Sealed sender closes that.
+
+**What the relay sees per message:**
+
+| Field | Contents | Why it's there |
+|-------|----------|----------------|
+| `addr` | the recipient's one-time stealth address `A_once` | routing/detection — only the recipient recognizes it; rotates every message |
+| `ct` | one opaque blob | the actual payload |
+
+The blob is laid out as:
+
+```
+ct = R (32 bytes)  ‖  sealed(ratchet_header)  ‖  ratchet_ciphertext
+```
+
+- `sealed(ratchet_header)` is XChaCha20-Poly1305 over the ratchet header, keyed by `HKDF(s, "drift-sealed-sender-v1")`, where `s` is the stealth ECDH secret that `derive_one_time_address` / `scan_for_message` already compute on both sides. No extra key material or round-trip is added.
+- The recipient's one-time address is bound in as AEAD **associated data**, so the relay cannot move a sealed blob onto a different address without the unseal failing.
+- `ratchet_ciphertext` is the content, already sealed by the ratchet message key.
+
+**What the relay no longer sees:** the ratchet header (the stable, linkable field) and, as separate inspectable wire fields, the sender's ephemeral key. It can no longer link a sender's messages.
+
+**The honest limit — `R` is unavoidably public.** The per-message ephemeral key `R` is *not* encrypted, and cannot be: it is the Diffie–Hellman contribution the recipient needs to derive `s` in the first place, so encrypting it under a key derived from itself is circular. It sits inside the opaque blob rather than as a labeled field, but a determined relay can still read those 32 bytes. This is the same shape as **Signal's sealed sender**, where the outer ephemeral is likewise always public; the sealed part is the *identity*, not the ephemeral. In DRIFT `R` is fresh every message, unlinkable to any other message, and tied to no account — so it reveals nothing about who sent it. What sealed sender removes is the relay's ability to *correlate* a sender's traffic, not the existence of one public ephemeral per message.
 
 ---
 
