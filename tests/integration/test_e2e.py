@@ -1,11 +1,11 @@
 """
 tests/integration/test_e2e.py — end-to-end encrypted message exchange
 
-Spins up the DRIFT relay in-process, connects two Session instances as
-Alice and Bob, and exercises Phase 1 rotating stealth addresses:
-messages flow over a shared broadcast channel, each lands at a fresh
-unlinkable one-time address, and the receiver detects its own messages
-by scanning.
+Spins up the DRIFT relay in-process and drives full Session ↔ Session flow
+through all three layers:
+
+  Phase 1 — rotating stealth addresses (unlinkable one-time addressing)
+  Phase 2 — Double Ratchet content encryption (forward secrecy)
 
 Requires the relay extras: pip install -e ".[dev]"
 Run: pytest tests/integration/ -v
@@ -20,8 +20,7 @@ import pytest
 import uvicorn
 
 import relay.server as relay_module
-from drift.crypto import Identity, Keypair, encrypt
-from drift.crypto.stealth import derive_one_time_address
+from drift.crypto import Identity
 from drift.transport.client import Envelope, RelayClient
 from drift.transport.session import STEALTH_CHANNEL, Session
 from relay.server import app as relay_app
@@ -36,6 +35,19 @@ def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
+
+
+def _alice_and_bob() -> tuple[Identity, Identity]:
+    """
+    Return (alice, bob) where alice is the ratchet *initiator* (lower static
+    spend key). Only the initiator may send the first message, so tests that
+    open with "alice sends" must guarantee alice holds that role.
+    """
+    a = Identity.generate()
+    b = Identity.generate()
+    if a.spend_keypair.public_bytes() > b.spend_keypair.public_bytes():
+        a, b = b, a
+    return a, b
 
 
 # ---------------------------------------------------------------------------
@@ -83,9 +95,8 @@ async def relay_url() -> str:  # type: ignore[misc]
 
 @pytest.mark.asyncio
 async def test_alice_sends_bob_receives(relay_url: str) -> None:
-    """Alice sends a stealth-addressed message; Bob scans and decrypts it."""
-    alice = Identity.generate()
-    bob = Identity.generate()
+    """Alice sends; Bob scans, turns his ratchet, and decrypts."""
+    alice, bob = _alice_and_bob()
 
     async with (
         Session(alice, bob.contact_code(), relay_url) as alice_session,
@@ -102,44 +113,58 @@ async def test_alice_sends_bob_receives(relay_url: str) -> None:
 @pytest.mark.asyncio
 async def test_bidirectional_exchange(relay_url: str) -> None:
     """
-    Both clients sit on the same broadcast channel, so each also sees its
-    own outbound message — scanning must skip those and surface only the
-    message actually addressed to it.
+    Alice (initiator) opens; Bob can only reply after receiving her first
+    message and turning his DH ratchet. Each side also sees its own outbound
+    message on the shared channel and must skip it.
     """
-    alice = Identity.generate()
-    bob = Identity.generate()
+    alice, bob = _alice_and_bob()
 
     async with (
         Session(alice, bob.contact_code(), relay_url) as alice_session,
         Session(bob, alice.contact_code(), relay_url) as bob_session,
     ):
-        await alice_session.send("ping")
-        await bob_session.send("pong")
-
         alice_msgs = alice_session.messages()
         bob_msgs = bob_session.messages()
 
-        bob_received = await asyncio.wait_for(bob_msgs.__anext__(), timeout=5.0)
-        alice_received = await asyncio.wait_for(alice_msgs.__anext__(), timeout=5.0)
+        await alice_session.send("ping")
+        assert await asyncio.wait_for(bob_msgs.__anext__(), timeout=5.0) == "ping"
 
-    assert bob_received == "ping"
-    assert alice_received == "pong"
+        # Bob now has a sending chain and can reply.
+        await bob_session.send("pong")
+        assert await asyncio.wait_for(alice_msgs.__anext__(), timeout=5.0) == "pong"
+
+
+@pytest.mark.asyncio
+async def test_many_messages_each_way(relay_url: str) -> None:
+    """Ten messages each way, interleaved, all the way through the ratchet."""
+    alice, bob = _alice_and_bob()
+
+    async with (
+        Session(alice, bob.contact_code(), relay_url) as alice_session,
+        Session(bob, alice.contact_code(), relay_url) as bob_session,
+    ):
+        alice_msgs = alice_session.messages()
+        bob_msgs = bob_session.messages()
+
+        for i in range(10):
+            await alice_session.send(f"a{i}")
+            assert await asyncio.wait_for(bob_msgs.__anext__(), timeout=5.0) == f"a{i}"
+            await bob_session.send(f"b{i}")
+            assert await asyncio.wait_for(alice_msgs.__anext__(), timeout=5.0) == f"b{i}"
 
 
 # ---------------------------------------------------------------------------
-# Rotating addresses — the Phase 1 property
+# Rotating addresses — the Phase 1 property still holds under the ratchet
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_messages_use_rotating_addresses(relay_url: str) -> None:
     """
-    Two messages to the same contact must land at two distinct one-time
-    addresses with distinct ephemeral keys — unlinkable on the wire — yet
-    both decrypt correctly for the recipient.
+    Two messages must land at two distinct one-time addresses with distinct
+    ephemeral keys — unlinkable on the wire — yet both decrypt in order.
     """
-    alice = Identity.generate()
-    bob = Identity.generate()
+    alice, bob = _alice_and_bob()
 
     # A passive observer on the broadcast channel — stands in for the relay
     # operator, who must not be able to link the two messages.
@@ -162,6 +187,9 @@ async def test_messages_use_rotating_addresses(relay_url: str) -> None:
         assert env1.ephemeral_pub != env2.ephemeral_pub
         # Both still route to the shared channel — the relay learns nothing else.
         assert env1.to == STEALTH_CHANNEL == env2.to
+        # Each carries a ratchet header (the content key schedule).
+        assert env1.ratchet_header is not None
+        assert env2.ratchet_header is not None
 
         # Despite rotation, Bob decrypts both in order.
         bob_msgs = bob_session.messages()
@@ -180,8 +208,7 @@ async def test_non_recipient_cannot_decrypt(relay_url: str) -> None:
     but never matches a message addressed to Bob — she sees only opaque
     traffic, never plaintext.
     """
-    alice = Identity.generate()
-    bob = Identity.generate()
+    alice, bob = _alice_and_bob()
     eve = Identity.generate()
 
     async with (
@@ -203,45 +230,45 @@ async def test_non_recipient_cannot_decrypt(relay_url: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Integrity — tampered ciphertext for a genuinely-ours address
+# Integrity — tampered ciphertext for a genuinely-ours message
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_tampered_ciphertext_raises_invalid_tag(relay_url: str) -> None:
     """
-    An envelope correctly addressed to Bob (his scan matches) but carrying
-    corrupt ciphertext must raise InvalidTag on receive — a tampered
-    message is rejected, never silently dropped.
+    Capture a real Alice→Bob envelope, corrupt its ciphertext, and deliver it
+    to Bob. His scan matches and his ratchet derives the right key, so the
+    corruption is caught — InvalidTag, never a silent drop.
     """
     from cryptography.exceptions import InvalidTag
 
-    bob = Identity.generate()
-    alice = Identity.generate()
+    alice, bob = _alice_and_bob()
 
-    # Derive a valid one-time address for Bob so his scan succeeds...
-    ephemeral = Keypair.generate()
-    one_time_addr, key = derive_one_time_address(
-        ephemeral.private_bytes(),
-        bob.scan_keypair.public_bytes(),
-        bob.spend_keypair.public_bytes(),
-    )
-    # ...but corrupt the ciphertext after encryption.
-    corrupt = bytearray(encrypt(key, b"surprise"))
+    # Alice + a passive observer are connected; Bob is not yet. The real
+    # message is delivered (not queued), so a late-joining Bob won't see it —
+    # leaving the corrupted copy as the only thing he scans.
+    observer = RelayClient(relay_url, STEALTH_CHANNEL)
+    async with observer, Session(alice, bob.contact_code(), relay_url) as alice_session:
+        await alice_session.send("surprise")
+        captured = await asyncio.wait_for(observer.receive(), timeout=5.0)
+
+    assert captured.ratchet_header is not None
+    corrupt = bytearray(captured.ciphertext)
     corrupt[-1] ^= 0xFF  # flip a bit in the auth tag
 
-    async with Session(bob, alice.contact_code(), relay_url) as bob_session:
-        injector = RelayClient(relay_url, "injector")
-        async with injector:
-            await injector.send(
-                Envelope(
-                    to=STEALTH_CHANNEL,
-                    ciphertext=bytes(corrupt),
-                    ephemeral_pub=ephemeral.public_bytes(),
-                    one_time_addr=one_time_addr,
-                )
+    injector = RelayClient(relay_url, "injector")
+    async with Session(bob, alice.contact_code(), relay_url) as bob_session, injector:
+        await injector.send(
+            Envelope(
+                to=STEALTH_CHANNEL,
+                ciphertext=bytes(corrupt),
+                ephemeral_pub=captured.ephemeral_pub,
+                one_time_addr=captured.one_time_addr,
+                ratchet_header=captured.ratchet_header,
             )
+        )
 
-            bob_msgs = bob_session.messages()
-            with pytest.raises(InvalidTag):
-                await asyncio.wait_for(bob_msgs.__anext__(), timeout=5.0)
+        bob_msgs = bob_session.messages()
+        with pytest.raises(InvalidTag):
+            await asyncio.wait_for(bob_msgs.__anext__(), timeout=5.0)
