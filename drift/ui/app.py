@@ -101,6 +101,9 @@ _SECURITY: list[tuple[str, str, bool]] = [
                    "cannot decrypt past or future messages.", True),
     ("⬡ STEALTH", "Stealth addresses — each message goes to a one-time address only "
                    "you can recognise; the relay can't link your messages.", True),
+    ("✉ SEALED", "Sealed sender — the ephemeral key and ratchet header are encrypted "
+                  "inside the payload. The relay sees only your one-time address and "
+                  "an opaque blob; it can't link a sender's messages.", True),
     ("🌐 TOR", "Tor transport — NOT active yet (Phase 3). Your IP is currently "
                "visible to the relay.", False),
 ]
@@ -739,6 +742,7 @@ class CryptoTicker(Static):
         "erase": ("🔥", "#cc7722"),
         "burn": ("🔥", _WN),
         "tor": ("⬡", _S),
+        "sealed": ("✉", _S),
     }
 
     def on_mount(self) -> None:
@@ -756,6 +760,8 @@ class CryptoTicker(Static):
             body = detail
         elif kind == "tor":
             body = f"tor {detail}"
+        elif kind == "sealed":
+            body = detail
         else:  # ratchet
             body = detail
         self.update(f"[#555555]\\[{ts}][/]  [{colour}]{icon} {body}[/]")

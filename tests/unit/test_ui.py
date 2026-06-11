@@ -124,8 +124,8 @@ async def test_header_has_logo_security_pills_and_ticker() -> None:
         assert app.query_one(LogoBox)
         assert app.query_one(CryptoTicker)
         assert app.query_one(InfoPanel)
-        # Four indicators: E2E, RATCHET, STEALTH, TOR.
-        assert len(app.query(SecurityPill)) == 4
+        # Five indicators: E2E, RATCHET, STEALTH, SEALED, TOR.
+        assert len(app.query(SecurityPill)) == 5
 
 
 @pytest.mark.asyncio
@@ -799,3 +799,27 @@ async def test_primary_relay_parsed_from_comma_list() -> None:
     contacts = {"alice": {"code": Identity.generate().contact_code()}}
     app = DriftApp(me, contacts, "ws://r1:8765,ws://r2:8765", active=None)
     assert app._primary_relay == "ws://r1:8765"
+
+
+# --------------------------------------------------------------------------- #
+# Phase 3b — sealed sender pill
+# --------------------------------------------------------------------------- #
+
+
+def test_sealed_pill_present_active_and_between_stealth_and_tor() -> None:
+    labels = [label for label, _tip, _active in _SECURITY]
+    assert "✉ SEALED" in labels
+    # Positioned between STEALTH and TOR.
+    assert labels.index("⬡ STEALTH") < labels.index("✉ SEALED") < labels.index("🌐 TOR")
+    # Sealed sender is intrinsic to the protocol now → active (bright).
+    sealed = next(entry for entry in _SECURITY if entry[0] == "✉ SEALED")
+    assert sealed[2] is True
+
+
+@pytest.mark.asyncio
+async def test_sealed_pill_renders_bright() -> None:
+    async with _app().run_test() as pilot:
+        pills = pilot.app.query(SecurityPill)
+        sealed = next(p for p in pills if p.label == "✉ SEALED")
+        assert sealed._active is True
+        assert "SEALED" in _render(sealed.render())

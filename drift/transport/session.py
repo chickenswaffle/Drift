@@ -64,6 +64,9 @@ from drift.crypto.ratchet import (
     ratchet_decrypt,
     ratchet_encrypt,
 )
+from drift.crypto.sealed import open_header as open_sender_header
+from drift.crypto.sealed import parse as parse_sender
+from drift.crypto.sealed import seal as seal_sender
 from drift.crypto.stealth import derive_one_time_address, scan_for_message
 from drift.transport.client import BurnFrame, Envelope, RelayClient
 from drift.transport.tor import TorClient
@@ -262,9 +265,11 @@ class Session:
         """
         Encrypt and deliver a UTF-8 string to the contact.
 
-        The content is encrypted with a fresh ratchet message key; the
-        envelope is addressed to a fresh stealth one-time address so it is
-        unlinkable on the wire.
+        The content is encrypted with a fresh ratchet message key; the message
+        is addressed to a fresh stealth one-time address so it is unlinkable on
+        the wire. Sealed sender (Phase 3b): the ephemeral key and ratchet header
+        are sealed into one opaque blob, so the only metadata the relay sees is
+        the recipient's one-time address.
         """
         async with self._lock:
             if self._ratchet.sending_chain_key is None:
@@ -274,22 +279,32 @@ class Session:
             self._emit("ratchet", f"sending chain step · msg #{self._ratchet.send_count}")
 
         ephemeral = Keypair.generate()
-        one_time_addr, _ = derive_one_time_address(
+        # derive_one_time_address also returns the per-message stealth key — the
+        # shared secret the recipient recomputes when scanning. We use it to seal
+        # the ratchet header (it was previously discarded). Both sides derive it
+        # identically, so no extra key material rides the wire.
+        one_time_addr, stealth_key = derive_one_time_address(
             ephemeral.private_bytes(),
             self._their_scan_pub,
             self._their_spend_pub,
+        )
+        sealed_blob = seal_sender(
+            stealth_key,
+            ephemeral.public_bytes(),
+            header.to_bytes(),
+            ciphertext,
+            address=one_time_addr,
         )
         self._last_sent_addr = one_time_addr  # tracked for burn_last_message()
         self._emit("send", _addr_digest(one_time_addr))
         await self._client.send(
             Envelope(
                 to=STEALTH_CHANNEL,
-                ciphertext=ciphertext,
-                ephemeral_pub=ephemeral.public_bytes(),
+                ciphertext=sealed_blob,
                 one_time_addr=one_time_addr,
-                ratchet_header=header.to_bytes(),
             )
         )
+        self._emit("sealed", "sender identity sealed")
         self._emit("erase", "message key erased")
 
     async def burn_last_message(self) -> None:
@@ -312,11 +327,13 @@ class Session:
         """
         Async generator yielding decrypted messages addressed to us.
 
-        Each broadcast envelope is first scanned with our scan key to see if
-        it is ours; if so, the ratchet header drives decryption. Envelopes
-        that aren't ours scan to ``None`` and are skipped. A scan match means
-        the message is genuinely ours, so a decrypt failure is real tampering
-        — ``InvalidTag`` is allowed to propagate.
+        Sealed sender (Phase 3b): each envelope carries only the recipient's
+        one-time address and an opaque blob. We unpack the blob's ephemeral key
+        (the one clear value, needed to derive the stealth secret), scan to see
+        if the message is ours, then — only on a match — unseal the ratchet
+        header and decrypt. A scan match means the message is genuinely ours, so
+        any later authentication failure (unsealing the header or the ratchet
+        body) is real tampering and ``InvalidTag`` is allowed to propagate.
         """
         async for item in self._client:
             # Burn tombstone from the relay — verify token, then call hook.
@@ -332,27 +349,33 @@ class Session:
                 continue
 
             envelope = item
-            if envelope.ephemeral_pub is None or envelope.one_time_addr is None:
+            if envelope.one_time_addr is None:
                 continue  # not a stealth envelope
-            detected = scan_for_message(
-                envelope.ephemeral_pub,
+            try:
+                ephemeral_pub, sealed_header, ratchet_ct = parse_sender(envelope.ciphertext)
+            except ValueError:
+                continue  # malformed blob — not a well-formed stealth message
+            stealth_key = scan_for_message(
+                ephemeral_pub,
                 envelope.one_time_addr,
                 self._my_scan_priv,
                 self._my_spend_pub,
             )
-            if detected is None:
+            if stealth_key is None:
                 continue  # not addressed to us (someone else's, or our own echo)
-            if envelope.ratchet_header is None:
-                continue  # addressed to us but carries no ratchet header
             if envelope.one_time_addr in self._seen_addrs:
                 continue  # relay replayed a message we've already accepted
             self._seen_addrs.add(envelope.one_time_addr)
 
-            logger.debug("messages: scan matched — decrypting our envelope")
+            logger.debug("messages: scan matched — unsealing our envelope")
             self._emit("recv", _addr_digest(envelope.one_time_addr))
-            header = Header.from_bytes(envelope.ratchet_header)
+            # Confirmed ours → unseal the header. Tampering surfaces as InvalidTag.
+            header_bytes = open_sender_header(
+                stealth_key, sealed_header, address=envelope.one_time_addr
+            )
+            header = Header.from_bytes(header_bytes)
             async with self._lock:
-                plaintext = ratchet_decrypt(self._ratchet, header, envelope.ciphertext)
+                plaintext = ratchet_decrypt(self._ratchet, header, ratchet_ct)
                 self._emit("ratchet", f"receiving chain step · msg #{self._ratchet.recv_count}")
             self._emit("erase", "message key erased")
             yield plaintext.decode()

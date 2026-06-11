@@ -75,8 +75,9 @@ Deliver = Callable[[dict[str, Any]], Awaitable[int]]
 # The wire fields that define a blob's identity. Deliberately excludes the
 # relay's own per-hop bookkeeping (_id uuid, _relay_ts) so the *same* client
 # blob hashes identically on every relay it visits — that is what makes
-# cross-relay dedup work.
-_ID_FIELDS = ("to", "ct", "ts", "R", "addr", "hdr")
+# cross-relay dedup work. Since sealed sender (Phase 3b) the only fields are the
+# opaque ciphertext, the one-time address, and the timestamp.
+_ID_FIELDS = ("to", "ct", "ts", "addr")
 
 
 def blob_id(envelope: dict[str, Any]) -> str:
