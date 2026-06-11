@@ -59,7 +59,7 @@ Being precise here is what separates a serious tool from snake oil.
 | 0 | Basic E2E encryption — X25519 + XChaCha20 | ✅ Complete (`v0.1.0`) |
 | 1 | Stealth rotating addresses + TUI | ✅ Complete (`v0.3.0`) |
 | 2 | Double Ratchet (forward secrecy) | ✅ Complete (`v0.4.3`) |
-| 3 | Tor transport + sealed sender | ✅ Complete (`v0.6.0`) |
+| 3 | Tor transport + sealed sender | ✅ Complete (`v0.6.0` + `v0.7.1`) |
 | 4 | Federated relays + Pi Zero mesh nodes | ✅ Complete (`v0.7.0`) |
 | 5 | Panic key, decoy volumes, FMD | 📋 Planned |
 
