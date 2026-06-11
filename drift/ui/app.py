@@ -44,6 +44,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import importlib.util
+import os
 import random
 import time
 from dataclasses import dataclass, field
@@ -155,6 +156,221 @@ def _now() -> str:
 
 
 # ===========================================================================
+# Themes — selected at module load via DRIFT_THEME env var.
+# ===========================================================================
+
+_THEMES: dict[str, dict[str, str]] = {
+    "matrix": {
+        "primary":       "#00ff41",
+        "secondary":     "#00d4ff",
+        "bg":            "#0a0a0a",
+        "dim_bg":        "#060606",
+        "modal_bg":      "#0c0c0c",
+        "border":        "#1a5c1a",
+        "hover_bg":      "#06160a",
+        "hover_bg_off":  "#160606",  # inactive SecurityPill hover
+        "dim":           "#888888",
+        "warning":       "#ff4444",
+        "scanlines":     "#00ff41 3.5%",
+    },
+    "amber": {
+        "primary":       "#ffaa00",
+        "secondary":     "#ff6600",
+        "bg":            "#0a0800",
+        "dim_bg":        "#060500",
+        "modal_bg":      "#0c0900",
+        "border":        "#5c4500",
+        "hover_bg":      "#160d00",
+        "hover_bg_off":  "#160500",
+        "dim":           "#887766",
+        "warning":       "#ff3300",
+        "scanlines":     "#ffaa00 3.5%",
+    },
+    "frost": {
+        "primary":       "#88ccff",
+        "secondary":     "#44aaff",
+        "bg":            "#080c10",
+        "dim_bg":        "#060810",
+        "modal_bg":      "#0a0e14",
+        "border":        "#1a3a5c",
+        "hover_bg":      "#061018",
+        "hover_bg_off":  "#060818",
+        "dim":           "#8899aa",
+        "warning":       "#ff6644",
+        "scanlines":     "#88ccff 3%",
+    },
+    "redacted": {
+        "primary":       "#ff3333",
+        "secondary":     "#ff8800",
+        "bg":            "#0a0a0a",
+        "dim_bg":        "#060606",
+        "modal_bg":      "#0c0c0c",
+        "border":        "#5c1a1a",
+        "hover_bg":      "#160808",
+        "hover_bg_off":  "#100000",
+        "dim":           "#888888",
+        "warning":       "#ff0000",
+        "scanlines":     "#ff3333 3%",
+    },
+    "ghost": {
+        "primary":       "#bbbbbb",
+        "secondary":     "#999999",
+        "bg":            "#0a0a0a",
+        "dim_bg":        "#060606",
+        "modal_bg":      "#0c0c0c",
+        "border":        "#3a3a3a",
+        "hover_bg":      "#111111",
+        "hover_bg_off":  "#0e0e0e",
+        "dim":           "#666666",
+        "warning":       "#ff4444",
+        "scanlines":     "#bbbbbb 2%",
+    },
+}
+
+_ACTIVE_THEME = _THEMES.get(
+    os.environ.get("DRIFT_THEME", "matrix").lower(), _THEMES["matrix"]
+)
+
+# Short aliases used in Rich markup and render() methods throughout this module.
+_P  = _ACTIVE_THEME["primary"]
+_S  = _ACTIVE_THEME["secondary"]
+_DM = _ACTIVE_THEME["dim"]
+_BG = _ACTIVE_THEME["bg"]
+_BD = _ACTIVE_THEME["border"]
+_HB = _ACTIVE_THEME["hover_bg"]
+_HBI = _ACTIVE_THEME["hover_bg_off"]
+_DB = _ACTIVE_THEME["dim_bg"]
+_MB = _ACTIVE_THEME["modal_bg"]
+_WN = _ACTIVE_THEME["warning"]
+
+
+def _build_css(t: dict[str, str]) -> str:
+    p   = t["primary"]
+    bg  = t["bg"]
+    db  = t["dim_bg"]
+    mb  = t["modal_bg"]
+    bd  = t["border"]
+    hb  = t["hover_bg"]
+    hbi = t["hover_bg_off"]
+    dm  = t["dim"]
+    sc  = t["scanlines"]
+    return f"""
+    Screen {{ background: {bg}; }}
+
+    #root {{
+        background: {bg};
+        hatch: horizontal {sc};
+    }}
+
+    /* ── Header ─────────────────────────────────────────────── */
+    #header {{ height: 5; padding: 0 1; background: {bg}; }}
+    #header-top {{ height: 3; }}
+    #logo {{ width: auto; height: 3; content-align: left middle; }}
+    #lock {{
+        width: auto; height: 3; margin: 0 2 0 2; content-align: center middle;
+    }}
+    #header-spacer {{ width: 1fr; height: 3; }}
+    #security {{ width: auto; height: 3; content-align: right middle; }}
+    UptimePill, LatencyPill, RatchetPill {{
+        width: auto; height: 3; padding: 0 1; content-align: center middle;
+    }}
+    SecurityPill {{
+        width: auto; height: 3; padding: 0 1; margin: 0 0 0 1;
+        background: {bg}; content-align: center middle;
+    }}
+    SecurityPill:hover {{ background: {hb}; }}
+    SecurityPill.inactive:hover {{ background: {hbi}; }}
+    #headerinfo {{ height: 1; }}
+    #header-rule {{ height: 1; }}
+
+    /* ── Crypto ticker ──────────────────────────────────────── */
+    #ticker {{
+        height: 1; padding: 0 1; background: {db}; color: {dm};
+    }}
+
+    /* ── Command palette ────────────────────────────────────── */
+    #palette {{ height: 1; padding: 0 1; background: {bg}; }}
+    PillButton {{
+        width: auto; height: 1; padding: 0 2; margin: 0 1 0 0;
+        color: {dm}; background: {bg};
+    }}
+    PillButton:hover {{ color: {bg}; background: {p}; text-style: bold; }}
+    PillButton:focus {{ color: {p}; background: {hb}; text-style: bold; }}
+
+    /* ── Body: sidebar + chat + info ────────────────────────── */
+    #body {{ height: 1fr; }}
+
+    #sidebar {{
+        width: 22; background: {db}; border-right: solid {bd}; padding: 0 1;
+    }}
+    #sidebar-title {{ height: 1; padding: 0 1; }}
+    #contact-list {{ height: 1fr; }}
+    ContactItem {{ width: 100%; height: 1; padding: 0 1; background: {db}; }}
+    ContactItem:hover {{ background: {hb}; }}
+    ContactItem.active {{ background: {hb}; }}
+    .empty-hint {{ padding: 1; color: #555555; }}
+
+    /* ── Chat column ────────────────────────────────────────── */
+    #chat {{ width: 1fr; }}
+    #pane-wrap {{ height: 1fr; layers: watermark messages; }}
+    #watermark {{
+        layer: watermark; width: 100%; height: 100%;
+        content-align: center middle; text-align: center;
+        color: {p} 8%;
+    }}
+    #pane {{
+        layer: messages; height: 100%; background: transparent; border: solid {bd};
+        scrollbar-color: {p}; scrollbar-background: {bg};
+        scrollbar-gutter: stable; scrollbar-size-vertical: 1; padding: 0 1;
+    }}
+    #pane > Static {{ width: 100%; height: auto; }}
+    #pane.flash {{ border: solid {p}; background: {hb}; }}
+    #netpane {{
+        display: none; height: 1fr;
+        background: {bg}; border: solid {bd};
+        padding: 1 2; overflow-y: auto;
+        scrollbar-color: {p}; scrollbar-size-vertical: 1;
+    }}
+
+    /* ── Session info panel (slide-in, right) ───────────────── */
+    #infopanel {{
+        dock: right; width: 48; height: 1fr; display: none; overflow-y: auto;
+        background: {db}; border-left: solid {bd}; padding: 1 2;
+        scrollbar-color: {p}; scrollbar-size-vertical: 1;
+    }}
+
+    /* ── Input bar ──────────────────────────────────────────── */
+    #input {{ height: 3; padding: 0 1; background: {bg}; }}
+    #input-rule {{ height: 1; }}
+    #input-row {{ height: 1; }}
+    #prompt {{ width: 2; color: {p}; text-style: bold; }}
+    #msg-input {{
+        width: 1fr; height: 1; padding: 0; border: none;
+        background: {bg}; color: #e0e0e0;
+    }}
+    #msg-input:focus {{ border: none; }}
+    #char-count {{ width: 6; content-align: right middle; color: {dm}; }}
+    #input-hint {{ height: 1; color: {dm}; }}
+
+    /* ── Modals ─────────────────────────────────────────────── */
+    _FadeModal {{ align: center middle; background: {bg} 75%; }}
+    #modal-box {{
+        width: 64; height: auto; max-height: 80%; padding: 1 2;
+        background: {mb}; border: round {p};
+    }}
+    .modal-title {{ height: 1; text-align: center; }}
+    .field-label {{ height: 1; margin: 1 0 0 0; }}
+    .modal-error {{ height: 1; text-align: center; }}
+    .modal-hint {{ margin: 1 0; }}
+    .modal-actions {{ height: auto; align: center middle; margin: 1 0 0 0; }}
+    .modal-actions Button {{ margin: 0 1; }}
+    #safety-number, #own-code {{ height: 1; text-align: center; margin: 1 0; text-style: bold; }}
+    #help-body {{ height: auto; }}
+    AddContactModal Input {{ margin: 0 0 0 0; }}
+    """
+
+
+# ===========================================================================
 # Domain events (bubble up from widgets → app). Like custom DOM events.
 # ===========================================================================
 
@@ -244,7 +460,7 @@ class LogoBox(Static):
     """The condensed matrix-green DRIFT wordmark, sits left in the header."""
 
     def render(self) -> RenderableType:
-        logo = Text("\n".join(_LOGO_ROWS), style="bold #00ff41", no_wrap=True)
+        logo = Text("\n".join(_LOGO_ROWS), style=f"bold {_P}", no_wrap=True)
         return logo
 
 
@@ -267,11 +483,10 @@ class LockIndicator(Static):
 
     def render(self) -> RenderableType:
         if self.secure and self.maximum:
-            # Closed lock + a small cyan superscript plus.
-            colour = "#00ff41"
-            mid = f"[{colour}]│🔒[/][#00d4ff]⁺[/][{colour}]│[/]"
+            colour = _P
+            mid = f"[{colour}]│🔒[/][{_S}]⁺[/][{colour}]│[/]"
         elif self.secure:
-            colour = "#00ff41"
+            colour = _P
             mid = f"[{colour}]│ 🔒│[/]"
         else:
             colour = "#aa3333"  # dim red — channel not secured
@@ -297,7 +512,7 @@ class SecurityPill(Static):
 
     def render(self) -> RenderableType:
         if self._active:
-            return f"[#00ff41]{self._label}[/]"
+            return f"[{_P}]{self._label}[/]"
         return f"[#555555 strike]{self._label}[/]"
 
     def on_click(self) -> None:
@@ -372,7 +587,7 @@ class LatencyPill(Static):
         if self.latency_ms is None:
             return "[#444444]⚡ —[/]"
         ms = self.latency_ms
-        colour = "#00ff41" if ms < 100 else ("#cccc00" if ms < 300 else "#ff4444")
+        colour = _P if ms < 100 else ("#cccc00" if ms < 300 else _WN)
         return f"[{colour}]⚡ {ms}ms[/]"
 
 
@@ -391,7 +606,7 @@ class RatchetPill(Static):
         self.flashing = False
 
     def render(self) -> RenderableType:
-        colour = "#00d4ff" if self.flashing else "#555555"
+        colour = _S if self.flashing else "#555555"
         return f"[{colour}]↻ {self.count}[/]"
 
 
@@ -405,7 +620,7 @@ class HeaderBar(Static):
 
     def render(self) -> RenderableType:
         if self.connected:
-            dot = "[#00ff41]⣿ secure[/]" if self.pulse else "[#1a5c1a]⡇ secure[/]"
+            dot = f"[{_P}]⣿ secure[/]" if self.pulse else f"[{_BD}]⡇ secure[/]"
         else:
             dot = "[#555555]○ offline[/]"
         who = self.contact_name or "no contact selected"
@@ -413,7 +628,7 @@ class HeaderBar(Static):
         grid.add_column(justify="left", ratio=1)
         grid.add_column(justify="right")
         grid.add_row(
-            f"[#00d4ff]▶ {who}[/]",
+            f"[{_S}]▶ {who}[/]",
             f"[#888888]{self.relay_url}  ·  {VERSION}  ·[/]  {dot}",
         )
         return grid
@@ -427,18 +642,18 @@ class CryptoTicker(Static):
     """
 
     _ICON: ClassVar[dict[str, tuple[str, str]]] = {
-        "ratchet": ("⚡", "#00d4ff"),
-        "send": ("⬡", "#00ff41"),
-        "recv": ("⬡", "#00ff41"),
+        "ratchet": ("⚡", _S),
+        "send": ("⬡", _P),
+        "recv": ("⬡", _P),
         "erase": ("🔥", "#cc7722"),
-        "burn": ("🔥", "#ff4444"),
+        "burn": ("🔥", _WN),
     }
 
     def on_mount(self) -> None:
         self.update("[#444444]· awaiting crypto activity …[/]")
 
     def push(self, ts: str, kind: str, detail: str) -> None:
-        icon, colour = self._ICON.get(kind, ("·", "#888888"))
+        icon, colour = self._ICON.get(kind, ("·", _DM))
         if kind == "send":
             body = f"stealth addr derived · {detail}"
         elif kind == "recv":
@@ -498,8 +713,8 @@ class ContactItem(Static):
 
     def render(self) -> RenderableType:
         prefix = "▶" if self.active else " "
-        colour = "#00ff41" if self.active else "#888888"
-        badge = f"  [#00d4ff]{self.unread}[/]" if self.unread else ""
+        colour = _P if self.active else _DM
+        badge = f"  [{_S}]{self.unread}[/]" if self.unread else ""
         return f"[{colour}]{prefix} {self.contact_name}[/]{badge}"
 
     def on_click(self) -> None:
@@ -515,7 +730,7 @@ class Sidebar(Vertical):
     """Contact list with a header and an ``[+] Add`` action at the bottom."""
 
     def compose(self) -> ComposeResult:
-        yield Static("[bold #00ff41]CONTACTS[/]", id="sidebar-title")
+        yield Static(f"[bold {_P}]CONTACTS[/]", id="sidebar-title")
         yield VerticalScroll(id="contact-list")
         yield PillButton("+", "Add Contact", "add")
 
@@ -542,7 +757,7 @@ class _SentLine(Static):
     _GLYPH: ClassVar[dict[str, tuple[str, str]]] = {
         "sending": ("◌", "#3a8a4a"),    # dim green
         "sent": ("✓", "#3a8a4a"),       # delivered to relay
-        "failed": ("✗", "#ff4444"),
+        "failed": ("✗", _WN),
     }
 
     status: reactive[str] = reactive("sending")
@@ -555,8 +770,8 @@ class _SentLine(Static):
     def render(self) -> RenderableType:
         glyph, colour = self._GLYPH.get(self.status, ("", "#3a8a4a"))
         line = Text(justify="right")
-        line.append(f"{self._ts}  ", style="#888888")
-        line.append("you:  ", style="bold #00ff41")
+        line.append(f"{self._ts}  ", style=_DM)
+        line.append("you:  ", style=f"bold {_P}")
         line.append(self._text, style="#b0ffb0")
         line.append(f"  {glyph}", style=colour)
         return line
@@ -588,10 +803,10 @@ class MessagePane(VerticalScroll):
         return self.remove_children()
 
     def write_separator(self, label: str) -> None:
-        self._add(Static(f"[#1a5c1a]▓▒░  {label}  ░▒▓[/]"))
+        self._add(Static(f"[{_BD}]▓▒░  {label}  ░▒▓[/]"))
 
     def write_incoming(self, sender: str, text: str, ts: str) -> None:
-        self._add(Static(f"[#888888]{ts}[/]  [bold #00d4ff]{sender}:[/]  [white]{text}[/]"))
+        self._add(Static(f"[{_DM}]{ts}[/]  [bold {_S}]{sender}:[/]  [white]{text}[/]"))
         self.flash()
 
     def write_outgoing(self, text: str, ts: str, *, status: str = "sending") -> _SentLine:
@@ -601,7 +816,7 @@ class MessagePane(VerticalScroll):
         return line
 
     def write_system(self, text: str) -> None:
-        self._add(Static(f"[#888888 italic]· {text}[/]"))
+        self._add(Static(f"[{_DM} italic]· {text}[/]"))
 
     def write_warning(self, text: str) -> None:
         self._add(Static(f"[bold red]⚠  {text}[/]"))
@@ -621,7 +836,7 @@ class InputBar(Vertical):
     )
 
     def compose(self) -> ComposeResult:
-        yield Static(RichRule(style="#1a5c1a", characters="─"), id="input-rule")
+        yield Static(RichRule(style=_BD, characters="─"), id="input-rule")
         with Horizontal(id="input-row"):
             yield Static("▶", id="prompt")
             yield Input(placeholder="message — or /command", id="msg-input")
@@ -631,11 +846,11 @@ class InputBar(Vertical):
     @on(Input.Changed, "#msg-input")
     def _on_changed(self, event: Input.Changed) -> None:
         n = len(event.value)
-        colour = "#ff4444" if n > 1000 else "#ffaa00" if n > 800 else "#888888"
+        colour = _WN if n > 1000 else "#ffaa00" if n > 800 else _DM
         self.query_one("#char-count", Static).update(f"[{colour}]{n}[/]")
 
     def reset_counter(self) -> None:
-        self.query_one("#char-count", Static).update("[#888888]0[/]")
+        self.query_one("#char-count", Static).update(f"[{_DM}]0[/]")
 
     @property
     def input(self) -> Input:
@@ -685,8 +900,8 @@ class NetworkPane(Static):
 
     def _build(self) -> RenderableType:
         s = self._state
-        rc = "#00ff41" if s.relay_connected else "#555555"
-        pc = "#00d4ff" if s.peer_connected else "#555555"
+        rc = _P if s.relay_connected else "#555555"
+        pc = _S if s.peer_connected else "#555555"
 
         relay_host = s.relay_url.replace("ws://", "").replace("wss://", "")
         lat = f"⚡ {s.relay_latency_ms}ms" if s.relay_latency_ms is not None else "⚡ —"
@@ -703,49 +918,48 @@ class NetworkPane(Static):
 
         # Tor note (Phase 3)
         tor_line = (
-            f"\n  [#00d4ff]⬡ Tor active · {s.tor_hops} hops[/]" if s.tor_active else ""
+            f"\n  [{_S}]⬡ Tor active · {s.tor_hops} hops[/]" if s.tor_active else ""
         )
 
         # Federation note (Phase 4)
         fed_line = (
-            f"\n  [#888888]⧉ {len(s.federation_peers)} federation peer(s)[/]"
+            f"\n  [{_DM}]⧉ {len(s.federation_peers)} federation peer(s)[/]"
             if s.federation_peers else ""
         )
 
         stats = (
-            f"  [#888888]↻ {s.ratchet_steps} ratchet steps"
+            f"  [{_DM}]↻ {s.ratchet_steps} ratchet steps"
             f"  ·  ⬡ {s.stealth_addrs} stealth addrs[/]"
         )
 
         body = (
             "\n"
             "  ┌──────────┐\n"
-            f"  │ [bold #00ff41]YOU[/]      │\n"
-            "  │ [#888888]local[/]    │\n"
+            f"  │ [bold {_P}]YOU[/]      │\n"
+            f"  │ [{_DM}]local[/]    │\n"
             "  └────┬─────┘\n"
-            f"       [#888888]{down_arrow}[/]\n"
+            f"       [{_DM}]{down_arrow}[/]\n"
             "       ▼\n"
             "  ┌────────────────────────────┐\n"
             f"  │ [{rc}]{relay_host}[/]\n"
-            f"  │ [#888888]{relay_status}  {lat}[/]\n"
+            f"  │ [{_DM}]{relay_status}  {lat}[/]\n"
             "  └────────────┬───────────────┘\n"
-            f"               [#888888]{peer_arrow}[/]\n"
+            f"               [{_DM}]{peer_arrow}[/]\n"
             "               ▼\n"
             "  ┌────────────────────────────┐\n"
             f"  │ [{pc}]{peer_label}[/]\n"
-            f"  │ [#888888]{peer_status}[/]\n"
+            f"  │ [{_DM}]{peer_status}[/]\n"
             "  └────────────────────────────┘\n"
             f"{tor_line}{fed_line}"
         )
 
         return Group(
             Text.from_markup(
-                "\n  [bold #888888]▶ NETWORK TOPOLOGY[/]  "
-                "[#333333](^N to return to chat)[/]"
+                f"\n  [bold {_DM}]▶ NETWORK TOPOLOGY[/]  [#333333](^N to return to chat)[/]"
             ),
-            RichRule(style="#1a5c1a", characters="─"),
+            RichRule(style=_BD, characters="─"),
             Text.from_markup(body),
-            RichRule(style="#1a5c1a", characters="─"),
+            RichRule(style=_BD, characters="─"),
             Text.from_markup(f"{stats}\n"),
         )
 
@@ -799,7 +1013,7 @@ class InfoPanel(Static):
     def _field(label: str, value: str, colour: str = "#e0e0e0") -> Table:
         grid = Table.grid(expand=True)
         grid.add_column(justify="left")
-        grid.add_row(Text(label, style="#888888"))
+        grid.add_row(Text(label, style=_DM))
         grid.add_row(Text(value, style=colour, no_wrap=True))
         return grid
 
@@ -811,12 +1025,12 @@ class InfoPanel(Static):
         caption = ("scan to add this contact" if _HAS_SEGNO
                    else "decorative · not scannable — share the code below")
         return Group(
-            Text("⬡  SESSION", style="bold #00ff41"),
+            Text("⬡  SESSION", style=f"bold {_P}"),
             Text(""),
             _qr_renderable(self._code),
             Text(caption, style="italic #555555"),
             Text(""),
-            self._field("your contact code", self._code, "#00d4ff"),
+            self._field("your contact code", self._code, _S),
             Text(""),
             self._field(f"safety number · {self._contact}", self._safety, "#ffff00"),
             Text(""),
@@ -873,7 +1087,7 @@ def _decorative_qr(data: str, n: int = 8) -> Text:
             cells.append("██" if bits[k] else "  ")
             k += 1
         rows.append("".join(cells))
-    return Text("\n".join(rows), style="#00ff41", no_wrap=True)
+    return Text("\n".join(rows), style=_P, no_wrap=True)
 
 
 def _qr_renderable(data: str) -> Text:
@@ -906,7 +1120,7 @@ class AddContactModal(_FadeModal[tuple[str, str]]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="modal-box"):
-            yield Static("[bold #00ff41]＋  ADD CONTACT[/]", classes="modal-title")
+            yield Static(f"[bold {_P}]＋  ADD CONTACT[/]", classes="modal-title")
             yield Static("[#888888]nickname[/]", classes="field-label")
             yield Input(placeholder="e.g. alice", id="nick")
             yield Static("[#888888]contact code[/]", classes="field-label")
@@ -955,7 +1169,7 @@ class VerifyModal(_FadeModal[bool]):
         with Vertical(id="modal-box"):
             yield Static(
                 f"[bold #ffff00]⚿  SAFETY NUMBER[/]  ·  with "
-                f"[bold #00d4ff]{self._contact_name}[/]",
+                f"[bold {_S}]{self._contact_name}[/]",
                 classes="modal-title",
             )
             yield Static(
@@ -963,7 +1177,7 @@ class VerifyModal(_FadeModal[bool]):
                 id="safety-number",
             )
             yield Static(
-                "[#888888]Read these digits aloud over a trusted channel.\n"
+                f"[{_DM}]Read these digits aloud over a trusted channel.\n"
                 "If they match on both sides, the key is verified.[/]",
                 classes="modal-hint",
             )
@@ -994,13 +1208,13 @@ class IdentityModal(_FadeModal[None]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="modal-box"):
-            yield Static("[bold #00ff41]⬡  YOUR IDENTITY[/]", classes="modal-title")
+            yield Static(f"[bold {_P}]⬡  YOUR IDENTITY[/]", classes="modal-title")
             yield Static(
-                f"[bold #00d4ff on #001018]  {self._contact_code}  [/]",
+                f"[bold {_S} on #001018]  {self._contact_code}  [/]",
                 id="own-code",
             )
             yield Static(
-                "[#888888]Share this code so others can message you.\n"
+                f"[{_DM}]Share this code so others can message you.\n"
                 "Your private keys never leave this machine.[/]",
                 classes="modal-hint",
             )
@@ -1021,36 +1235,36 @@ class HelpModal(_FadeModal[None]):
     ]
 
     _REFERENCE = (
-        "[bold #00ff41]Commands[/]\n"
-        "  [#00ff41]I[/]  Init / show your identity\n"
-        "  [#00ff41]A[/]  Add a contact\n"
-        "  [#00ff41]V[/]  Verify the active contact (safety number)\n"
-        "  [#00ff41]C[/]  Focus the contact list\n"
-        "  [#00ff41]/[/]  Command mode (type a /slash command)\n"
-        "  [#00ff41]Q[/]  Quit\n\n"
-        "[bold #00ff41]Toggles[/]\n"
-        "  [#00d4ff]Ctrl+G[/]  session info panel (your code, safety number, counters)\n"
-        "  [#00d4ff]Ctrl+L[/]  crypto-event ticker on/off\n\n"
-        "[bold #00ff41]Slash commands[/]\n"
-        "  [#00d4ff]/add[/]         add a contact\n"
-        "  [#00d4ff]/verify[/]      show the safety number\n"
-        "  [#00d4ff]/clear[/]       clear the current conversation (local only)\n"
-        "  [#00d4ff]/burn[/]        erase conversation from relay and both clients\n"
-        "  [#00d4ff]/burn last[/]   burn the last message you sent\n"
-        "  [#00d4ff]/burn 5m[/]     schedule auto-burn in 5 minutes (or Ns for seconds)\n"
-        "  [#00d4ff]/burn cancel[/] cancel a scheduled auto-burn\n"
-        "  [#00d4ff]/help[/]        this screen\n"
-        "  [#00d4ff]/quit[/]        exit\n\n"
-        "[bold #00ff41]Composing[/]\n"
-        "  [#888888]Enter[/] send   ·   [#888888]Shift+Enter[/] newline\n"
-        "  [#888888]Esc[/] unfocus the input so letter shortcuts work\n\n"
+        f"[bold {_P}]Commands[/]\n"
+        f"  [{_P}]I[/]  Init / show your identity\n"
+        f"  [{_P}]A[/]  Add a contact\n"
+        f"  [{_P}]V[/]  Verify the active contact (safety number)\n"
+        f"  [{_P}]C[/]  Focus the contact list\n"
+        f"  [{_P}]/[/]  Command mode (type a /slash command)\n"
+        f"  [{_P}]Q[/]  Quit\n\n"
+        f"[bold {_P}]Toggles[/]\n"
+        f"  [{_S}]Ctrl+G[/]  session info panel (your code, safety number, counters)\n"
+        f"  [{_S}]Ctrl+L[/]  crypto-event ticker on/off\n\n"
+        f"[bold {_P}]Slash commands[/]\n"
+        f"  [{_S}]/add[/]         add a contact\n"
+        f"  [{_S}]/verify[/]      show the safety number\n"
+        f"  [{_S}]/clear[/]       clear the current conversation (local only)\n"
+        f"  [{_S}]/burn[/]        erase conversation from relay and both clients\n"
+        f"  [{_S}]/burn last[/]   burn the last message you sent\n"
+        f"  [{_S}]/burn 5m[/]     schedule auto-burn in 5 minutes (or Ns for seconds)\n"
+        f"  [{_S}]/burn cancel[/] cancel a scheduled auto-burn\n"
+        f"  [{_S}]/help[/]        this screen\n"
+        f"  [{_S}]/quit[/]        exit\n\n"
+        f"[bold {_P}]Composing[/]\n"
+        f"  [{_DM}]Enter[/] send   ·   [{_DM}]Shift+Enter[/] newline\n"
+        f"  [{_DM}]Esc[/] unfocus the input so letter shortcuts work\n\n"
         "[#555555]⚠  Burn requests are best-effort — a non-compliant client can ignore them.[/]\n\n"
-        "[#888888]Click any pill, contact, or security indicator with the mouse, too.[/]"
+        f"[{_DM}]Click any pill, contact, or security indicator with the mouse, too.[/]"
     )
 
     def compose(self) -> ComposeResult:
         with Vertical(id="modal-box"):
-            yield Static("[bold #00ff41]?  HELP[/]", classes="modal-title")
+            yield Static(f"[bold {_P}]?  HELP[/]", classes="modal-title")
             yield Static(self._REFERENCE, id="help-body")
             with Horizontal(classes="modal-actions"):
                 yield Button("Close", variant="primary", id="close")
@@ -1083,123 +1297,7 @@ class DriftApp(App[None]):
         Binding("escape", "blur_input", "Unfocus", show=False),
     ]
 
-    CSS = """
-    Screen { background: #0a0a0a; }
-
-    #root {
-        background: #0a0a0a;
-        /* faint horizontal scanlines (≈0.035 opacity) */
-        hatch: horizontal #00ff41 3.5%;
-    }
-
-    /* ── Header ─────────────────────────────────────────────── */
-    #header { height: 5; padding: 0 1; background: #0a0a0a; }
-    #header-top { height: 3; }
-    #logo { width: auto; height: 3; content-align: left middle; }
-    #lock {
-        width: auto; height: 3; margin: 0 2 0 2; content-align: center middle;
-    }
-    #header-spacer { width: 1fr; height: 3; }
-    #security { width: auto; height: 3; content-align: right middle; }
-    UptimePill, LatencyPill, RatchetPill {
-        width: auto; height: 3; padding: 0 1; content-align: center middle;
-    }
-    SecurityPill {
-        width: auto; height: 3; padding: 0 1; margin: 0 0 0 1;
-        background: #0a0a0a; content-align: center middle;
-    }
-    SecurityPill:hover { background: #06160a; }
-    SecurityPill.inactive:hover { background: #160606; }
-    #headerinfo { height: 1; }
-    #header-rule { height: 1; }
-
-    /* ── Crypto ticker ──────────────────────────────────────── */
-    #ticker {
-        height: 1; padding: 0 1; background: #060606; color: #888888;
-    }
-
-    /* ── Command palette ────────────────────────────────────── */
-    #palette { height: 1; padding: 0 1; background: #0a0a0a; }
-    PillButton {
-        width: auto; height: 1; padding: 0 2; margin: 0 1 0 0;
-        color: #888888; background: #0a0a0a;
-    }
-    PillButton:hover { color: #0a0a0a; background: #00ff41; text-style: bold; }
-    PillButton:focus { color: #00ff41; background: #06160a; text-style: bold; }
-
-    /* ── Body: sidebar + chat + info ────────────────────────── */
-    #body { height: 1fr; }
-
-    #sidebar {
-        width: 22; background: #060606; border-right: solid #1a5c1a; padding: 0 1;
-    }
-    #sidebar-title { height: 1; padding: 0 1; }
-    #contact-list { height: 1fr; }
-    ContactItem { width: 100%; height: 1; padding: 0 1; background: #060606; }
-    ContactItem:hover { background: #06160a; }
-    ContactItem.active { background: #06160a; }
-    .empty-hint { padding: 1; color: #555555; }
-
-    /* ── Chat column ────────────────────────────────────────── */
-    #chat { width: 1fr; }
-    /* The watermark layer sits behind the message layer; messages render on
-       top of the dim lock. */
-    #pane-wrap { height: 1fr; layers: watermark messages; }
-    #watermark {
-        layer: watermark; width: 100%; height: 100%;
-        content-align: center middle; text-align: center;
-        color: #00ff41 8%;
-    }
-    #pane {
-        layer: messages; height: 100%; background: transparent; border: solid #1a5c1a;
-        scrollbar-color: #00ff41; scrollbar-background: #0a0a0a;
-        scrollbar-gutter: stable; scrollbar-size-vertical: 1; padding: 0 1;
-    }
-    #pane > Static { width: 100%; height: auto; }
-    #pane.flash { border: solid #88ffaa; background: #001800; }
-    #netpane {
-        display: none; height: 1fr;
-        background: #0a0a0a; border: solid #1a5c1a;
-        padding: 1 2; overflow-y: auto;
-        scrollbar-color: #00ff41; scrollbar-size-vertical: 1;
-    }
-
-    /* ── Session info panel (slide-in, right) ───────────────── */
-    #infopanel {
-        dock: right; width: 48; height: 1fr; display: none; overflow-y: auto;
-        background: #060606; border-left: solid #1a5c1a; padding: 1 2;
-        scrollbar-color: #00ff41; scrollbar-size-vertical: 1;
-    }
-
-    /* ── Input bar ──────────────────────────────────────────── */
-    #input { height: 3; padding: 0 1; background: #0a0a0a; }
-    #input-rule { height: 1; }
-    #input-row { height: 1; }
-    #prompt { width: 2; color: #00ff41; text-style: bold; }
-    #msg-input {
-        width: 1fr; height: 1; padding: 0; border: none;
-        background: #0a0a0a; color: #e0e0e0;
-    }
-    #msg-input:focus { border: none; }
-    #char-count { width: 6; content-align: right middle; color: #888888; }
-    #input-hint { height: 1; color: #888888; }
-
-    /* ── Modals ─────────────────────────────────────────────── */
-    _FadeModal { align: center middle; background: #0a0a0a 75%; }
-    #modal-box {
-        width: 64; height: auto; max-height: 80%; padding: 1 2;
-        background: #0c0c0c; border: round #00ff41;
-    }
-    .modal-title { height: 1; text-align: center; }
-    .field-label { height: 1; margin: 1 0 0 0; }
-    .modal-error { height: 1; text-align: center; }
-    .modal-hint { margin: 1 0; }
-    .modal-actions { height: auto; align: center middle; margin: 1 0 0 0; }
-    .modal-actions Button { margin: 0 1; }
-    #safety-number, #own-code { height: 1; text-align: center; margin: 1 0; text-style: bold; }
-    #help-body { height: auto; }
-    AddContactModal Input { margin: 0 0 0 0; }
-    """
+    CSS = _build_css(_ACTIVE_THEME)
 
     def __init__(
         self,
@@ -1241,7 +1339,7 @@ class DriftApp(App[None]):
                     yield LatencyPill(_ws_to_http(self._relay_url), id="latency")
                     yield RatchetPill(id="ratchet")
                 yield HeaderBar(id="headerinfo")
-                yield Static(RichRule(style="#1a5c1a", characters="─"), id="header-rule")
+                yield Static(RichRule(style=_BD, characters="─"), id="header-rule")
             yield CryptoTicker(id="ticker")
             yield CommandPalette(id="palette")
             with Horizontal(id="body"):
