@@ -45,17 +45,46 @@ app = FastAPI(
 # Replace with Redis in Phase 4 for persistence + federation.
 # ---------------------------------------------------------------------------
 
-# addr_hex → list of waiting envelopes (for clients not yet connected)
-_mailbox: dict[str, list[dict]] = defaultdict(list)
-
-# addr_hex → set of live WebSocket connections subscribed to that address
+# channel → set of live WebSocket connections subscribed to that channel
 _subscribers: dict[str, set[WebSocket]] = defaultdict(set)
 
-# Message TTL in seconds (messages expire even if undelivered)
-MESSAGE_TTL = 60 * 60 * 24  # 24 hours
+# channel → recent envelopes, replayed to every NEW subscriber.
+#
+# Why a replay buffer and not a per-recipient mailbox: DRIFT uses a shared
+# firehose channel (every client subscribes to the same one and scans
+# locally). The sender is therefore always a live subscriber, so "did this
+# reach a live socket?" is *always* true and cannot gate offline queueing —
+# the old delivered==0 mailbox never fired, and any message sent before the
+# peer's socket finished subscribing was lost. Instead we keep a short,
+# bounded, TTL'd buffer of recent envelopes and replay it to each new
+# subscriber: a client that connects late (or a hair after its peer hit send)
+# still receives recent traffic and scans it. The relay learns nothing new —
+# it already broadcasts this same opaque firehose to everyone; this only lets
+# a late socket catch up. Recipients dedupe locally (by one-time address).
+_recent: dict[str, list[dict[str, Any]]] = defaultdict(list)
 
-# Maximum queued messages per address (soft cap — prevents abuse)
-MAX_QUEUED = 500
+# How long an envelope stays replayable, and the per-channel cap (bounds
+# memory and how far a late joiner can rewind).
+#
+# The window is deliberately SHORT. It exists to close the connection-setup
+# race (a sender hits send in the sub-second gap before its peer's socket
+# finishes subscribing) and to cover a peer who opens the chat a few seconds
+# later — not to be a durable inbox. A long window would replay a whole prior
+# conversation into a freshly reopened session; because the Phase-2 ratchet is
+# bootstrapped deterministically per session and not persisted, those stale
+# envelopes collide with the new ratchet. Durable, arbitrary-time offline
+# delivery is Phase 4 (Redis mailbox keyed to a persisted ratchet epoch).
+RECENT_TTL = 30.0    # seconds — covers the subscribe race + brief late-join
+RECENT_MAX = 500     # envelopes per channel
+
+
+def _prune_recent(channel: str) -> None:
+    """Drop expired / overflow envelopes from a channel's replay buffer."""
+    cutoff = time.time() - RECENT_TTL
+    buf = [e for e in _recent[channel] if e["_relay_ts"] >= cutoff]
+    if len(buf) > RECENT_MAX:
+        buf = buf[-RECENT_MAX:]
+    _recent[channel] = buf
 
 
 # ---------------------------------------------------------------------------
@@ -79,14 +108,17 @@ async def websocket_endpoint(websocket: WebSocket, listen_addr: str) -> None:
         "Client subscribed addr=%.12s… total=%d", listen_addr, len(_subscribers[listen_addr])
     )
 
-    # Drain any queued messages for this address
-    if listen_addr in _mailbox:
-        queued = _mailbox.pop(listen_addr)
-        for envelope in queued:
-            try:
-                await websocket.send_text(json.dumps(envelope))
-            except Exception:
-                logger.debug("Failed to drain queued envelope to %s", listen_addr)
+    # Replay recent traffic so a late-joining socket catches up. We do NOT
+    # pop: the buffer is shared by all subscribers (other late joiners still
+    # need it) and expires on its own TTL. Recipients dedupe by one-time
+    # address, so replaying a message a connected peer already saw is a no-op.
+    _prune_recent(listen_addr)
+    for envelope in list(_recent[listen_addr]):
+        try:
+            await websocket.send_text(json.dumps(envelope))
+        except Exception:
+            logger.debug("Failed to replay recent envelope to %s", listen_addr)
+            break
 
     try:
         while True:
@@ -167,13 +199,13 @@ async def send_message(envelope: dict[str, Any]) -> JSONResponse:
         except Exception:
             subscribers.discard(ws)
 
-    if delivered == 0:
-        # Queue for later pickup
-        q = _mailbox[to_addr]
-        if len(q) < MAX_QUEUED:
-            q.append(envelope)
-        else:
-            logger.warning("Mailbox full for addr=%.12s… dropping message", to_addr)
+    # Always record into the replay buffer so a peer that subscribes a moment
+    # later (or was briefly offline) still receives this. Delivery to live
+    # sockets above is the fast path; the buffer is the safety net. Both are
+    # needed because the sender is itself a live subscriber on the firehose,
+    # so `delivered` is never a reliable signal that the *recipient* got it.
+    _recent[to_addr].append(envelope)
+    _prune_recent(to_addr)
 
     return JSONResponse({"ok": True, "delivered": delivered})
 
@@ -183,7 +215,7 @@ async def health() -> JSONResponse:
     return JSONResponse({
         "status": "ok",
         "subscriptions": sum(len(v) for v in _subscribers.values()),
-        "queued": sum(len(v) for v in _mailbox.values()),
+        "recent": sum(len(v) for v in _recent.values()),
     })
 
 

@@ -61,9 +61,9 @@ async def relay_url() -> str:  # type: ignore[misc]
     Spin up a fresh relay instance on a free port for the duration of a test.
 
     Clears module-level relay state before starting so tests are isolated
-    even though _mailbox and _subscribers are global defaultdicts.
+    even though _recent and _subscribers are global defaultdicts.
     """
-    relay_module._mailbox.clear()
+    relay_module._recent.clear()
     relay_module._subscribers.clear()
 
     port = _free_port()
@@ -185,6 +185,64 @@ async def test_many_messages_each_way(relay_url: str) -> None:
             assert await asyncio.wait_for(alice_msgs.__anext__(), timeout=5.0) == f"b{i}"
 
 
+@pytest.mark.asyncio
+async def test_late_joiner_receives_message_sent_before_connecting(relay_url: str) -> None:
+    """
+    Regression for the firehose offline-delivery bug: Alice sends *before* Bob
+    has subscribed. Because the sender is itself a live subscriber, the relay's
+    old delivered==0 mailbox never queued the message and Bob lost it forever.
+    The replay buffer must hand the recent envelope to Bob when he connects.
+    """
+    alice, bob = _alice_and_bob()
+
+    async with Session(alice, bob.contact_code(), relay_url) as alice_session:
+        # Bob is NOT connected yet.
+        await alice_session.send("are you there?")
+
+        # Bob opens his session only now — and must still get the message.
+        async with Session(bob, alice.contact_code(), relay_url) as bob_session:
+            bob_msgs = bob_session.messages()
+            got = await asyncio.wait_for(bob_msgs.__anext__(), timeout=5.0)
+            assert got == "are you there?"
+
+
+@pytest.mark.asyncio
+async def test_replayed_envelope_is_deduped_not_double_delivered(relay_url: str) -> None:
+    """
+    The relay replays recent traffic to every new subscriber, so a reconnecting
+    client can be handed an envelope it already processed. The session must drop
+    the duplicate (by one-time address) rather than feed it to the ratchet a
+    second time — which would advance past the key and raise a spurious
+    InvalidTag. Here we deliver the *same* envelope twice and expect exactly one
+    decrypted message, no error.
+    """
+    alice, bob = _alice_and_bob()
+    observer = RelayClient(relay_url, STEALTH_CHANNEL)
+
+    async with observer, Session(alice, bob.contact_code(), relay_url) as alice_session:
+        await alice_session.send("once")
+        captured = await asyncio.wait_for(observer.receive(), timeout=5.0)
+
+    injector = RelayClient(relay_url, "injector")
+    async with Session(bob, alice.contact_code(), relay_url) as bob_session, injector:
+        env = Envelope(
+            to=STEALTH_CHANNEL,
+            ciphertext=captured.ciphertext,
+            ephemeral_pub=captured.ephemeral_pub,
+            one_time_addr=captured.one_time_addr,
+            ratchet_header=captured.ratchet_header,
+        )
+        # Bob's own subscribe already replayed the genuine "once" from the
+        # buffer; now inject a byte-identical duplicate.
+        await injector.send(env)
+
+        bob_msgs = bob_session.messages()
+        assert await asyncio.wait_for(bob_msgs.__anext__(), timeout=5.0) == "once"
+        # The duplicate must NOT yield a second message or raise.
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(bob_msgs.__anext__(), timeout=1.5)
+
+
 # ---------------------------------------------------------------------------
 # Rotating addresses — the Phase 1 property still holds under the ratchet
 # ---------------------------------------------------------------------------
@@ -277,13 +335,18 @@ async def test_tampered_ciphertext_raises_invalid_tag(relay_url: str) -> None:
 
     alice, bob = _alice_and_bob()
 
-    # Alice + a passive observer are connected; Bob is not yet. The real
-    # message is delivered (not queued), so a late-joining Bob won't see it —
-    # leaving the corrupted copy as the only thing he scans.
+    # Alice + a passive observer are connected; Bob is not yet. We capture the
+    # real envelope, then clear the relay's replay buffer so a late-joining Bob
+    # won't be handed the genuine copy — leaving the corrupted copy as the only
+    # thing he scans.
     observer = RelayClient(relay_url, STEALTH_CHANNEL)
     async with observer, Session(alice, bob.contact_code(), relay_url) as alice_session:
         await alice_session.send("surprise")
         captured = await asyncio.wait_for(observer.receive(), timeout=5.0)
+
+    # Drop the genuine envelope from the replay buffer; only the corrupt
+    # injection below should reach Bob.
+    relay_module._recent.clear()
 
     assert captured.ratchet_header is not None
     corrupt = bytearray(captured.ciphertext)
