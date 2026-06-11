@@ -1,7 +1,7 @@
 # DRIFT
 
 [![CI](https://github.com/chickenswaffle/Drift/actions/workflows/ci.yml/badge.svg)](https://github.com/chickenswaffle/Drift/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-v0.7.0-blue)](https://github.com/chickenswaffle/Drift/releases/tag/v0.7.0)
+[![Version](https://img.shields.io/badge/version-v0.7.1-blue)](https://github.com/chickenswaffle/Drift/releases/tag/v0.7.1)
 [![Phase](https://img.shields.io/badge/phase-4%20%E2%80%94%20Federation-brightgreen)](#project-status)
 
 > A terminal-first, end-to-end encrypted messenger with rotating, unlinkable receiving addresses.
