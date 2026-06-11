@@ -1,28 +1,51 @@
 """
 drift.transport.session — authenticated session layer
 
-Composes crypto + transport. Phase 1 uses rotating stealth addresses:
-every message is sent to a fresh, unlinkable one-time address, and the
-receiver detects its own messages by scanning with its private scan key.
+Composes crypto + transport across all three layers:
 
-Phase 0 (historical): a single static ECDH+HKDF shared key per contact.
-Phase 1 (current):    per-message ephemeral key → stealth address.
-Phase 2 (planned):    swap the per-message key for a Double Ratchet.
+  Phase 1 — stealth addresses provide unlinkable routing and recipient
+            detection: every message is broadcast to a one-time address that
+            only the recipient (scanning with their scan key) can recognise.
+  Phase 2 — the Double Ratchet provides the *content* key for each message,
+            giving per-message forward secrecy and post-compromise security.
 
-Routing model
--------------
-One-time addresses are unpredictable, so a receiver cannot subscribe to
-them ahead of time. Instead every client subscribes to a shared broadcast
-channel and scans the stream locally — exactly like scanning a blockchain
-for outputs. The relay therefore learns nothing about who any message is
-for; only the holder of the matching scan key can detect it.
+So a sent message now carries three things in its envelope:
+  - a fresh stealth one-time address + ephemeral key   (who/where — Phase 1)
+  - a Double Ratchet header                            (key schedule — Phase 2)
+  - the ratchet-encrypted ciphertext                   (the content)
+
+Ratchet bootstrap
+-----------------
+The ratchet needs a shared root secret and an initial responder ratchet key.
+We derive both deterministically so no extra handshake round-trip is needed:
+
+  - root secret      = HKDF(ECDH(my_spend, their_spend))
+  - responder's key  = HKDF(same ECDH) → a deterministic X25519 keypair both
+                       sides can reconstruct
+
+Roles are assigned by comparing the two static spend keys (lower = initiator),
+so both peers agree on who bootstraps as sender vs. receiver without talking.
+The responder's *initial* ratchet key is the only deterministic key material;
+every key after the first DH ratchet step is freshly random (see ratchet.py).
+A production build would source these from an X3DH prekey exchange instead.
 """
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncGenerator
 
-from drift.crypto import Identity, Keypair, decrypt, encrypt
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+
+from drift.crypto import Identity, Keypair, derive_message_key
+from drift.crypto.ratchet import (
+    Header,
+    RatchetState,
+    init_receiver,
+    init_sender,
+    ratchet_decrypt,
+    ratchet_encrypt,
+)
 from drift.crypto.stealth import derive_one_time_address, scan_for_message
 from drift.transport.client import Envelope, RelayClient
 
@@ -31,12 +54,16 @@ from drift.transport.client import Envelope, RelayClient
 STEALTH_CHANNEL = "drift-stealth-v1"
 
 
+def _keypair_from_private(private_bytes: bytes) -> Keypair:
+    """Reconstruct an X25519 Keypair from raw private key bytes."""
+    priv = X25519PrivateKey.from_private_bytes(private_bytes)
+    return Keypair(private_key=priv, public_key=priv.public_key())
+
+
 class Session:
     """
-    An encrypted conversation channel with stealth-addressed delivery.
-
-    Sending derives a fresh one-time address from the contact's scan/spend
-    keys; receiving scans the broadcast stream with our own scan key.
+    An encrypted conversation channel: stealth-addressed delivery (Phase 1)
+    with Double Ratchet content encryption (Phase 2).
 
     Usage::
 
@@ -44,6 +71,10 @@ class Session:
             await s.send("hello")
             async for msg in s.messages():
                 print(msg)
+
+    Note: as in Signal/X3DH, only the *initiator* can send the first message.
+    The responder must receive that message (turning its DH ratchet) before it
+    can reply; calling :meth:`send` earlier raises ``RatchetError``.
     """
 
     def __init__(
@@ -63,8 +94,29 @@ class Session:
         self._my_scan_priv = identity.scan_keypair.private_bytes()
         self._my_spend_pub = identity.spend_keypair.public_bytes()
 
+        # Bootstrap the Double Ratchet (see module docstring).
+        self._ratchet = self._bootstrap_ratchet(identity)
+
+        # The ratchet state is mutated on every send and receive; serialize
+        # access so concurrent send/receive tasks can't interleave a mutation.
+        self._lock = asyncio.Lock()
+
         # Subscribe to the shared firehose; the relay routes by this key only.
         self._client = RelayClient(relay_url, STEALTH_CHANNEL, ping_interval=ping_interval)
+
+    def _bootstrap_ratchet(self, identity: Identity) -> RatchetState:
+        static_ecdh = identity.spend_keypair.ecdh(self._their_spend_pub)
+        root_secret = derive_message_key(static_ecdh, info=b"drift-ratchet-v1-root")
+        responder_priv = derive_message_key(
+            static_ecdh, info=b"drift-ratchet-v1-responder"
+        )
+        responder_keypair = _keypair_from_private(responder_priv)
+
+        # Lower static spend key initiates; both peers compute this identically.
+        i_am_initiator = self._my_spend_pub < self._their_spend_pub
+        if i_am_initiator:
+            return init_sender(root_secret, responder_keypair.public_bytes())
+        return init_receiver(root_secret, responder_keypair)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -91,22 +143,26 @@ class Session:
         """
         Encrypt and deliver a UTF-8 string to the contact.
 
-        Generates a fresh ephemeral keypair so every message lands at a
-        distinct, unlinkable one-time address.
+        The content is encrypted with a fresh ratchet message key; the
+        envelope is addressed to a fresh stealth one-time address so it is
+        unlinkable on the wire.
         """
+        async with self._lock:
+            header, ciphertext = ratchet_encrypt(self._ratchet, plaintext.encode())
+
         ephemeral = Keypair.generate()
-        one_time_addr, message_key = derive_one_time_address(
+        one_time_addr, _ = derive_one_time_address(
             ephemeral.private_bytes(),
             self._their_scan_pub,
             self._their_spend_pub,
         )
-        ciphertext = encrypt(message_key, plaintext.encode())
         await self._client.send(
             Envelope(
                 to=STEALTH_CHANNEL,
                 ciphertext=ciphertext,
                 ephemeral_pub=ephemeral.public_bytes(),
                 one_time_addr=one_time_addr,
+                ratchet_header=header.to_bytes(),
             )
         )
 
@@ -114,22 +170,27 @@ class Session:
         """
         Async generator yielding decrypted messages addressed to us.
 
-        Each envelope on the broadcast channel is scanned with our scan
-        key. Envelopes that aren't ours (other recipients, or our own
-        outbound echoes) scan to ``None`` and are skipped. A scan match
-        means the message is genuinely ours, so a decrypt failure here is
-        real tampering — ``InvalidTag`` is allowed to propagate.
+        Each broadcast envelope is first scanned with our scan key to see if
+        it is ours; if so, the ratchet header drives decryption. Envelopes
+        that aren't ours scan to ``None`` and are skipped. A scan match means
+        the message is genuinely ours, so a decrypt failure is real tampering
+        — ``InvalidTag`` is allowed to propagate.
         """
         async for envelope in self._client:
             if envelope.ephemeral_pub is None or envelope.one_time_addr is None:
                 continue  # not a stealth envelope
-            message_key = scan_for_message(
+            detected = scan_for_message(
                 envelope.ephemeral_pub,
                 envelope.one_time_addr,
                 self._my_scan_priv,
                 self._my_spend_pub,
             )
-            if message_key is None:
+            if detected is None:
                 continue  # not addressed to us
-            plaintext = decrypt(message_key, envelope.ciphertext)
+            if envelope.ratchet_header is None:
+                continue  # addressed to us but carries no ratchet header
+
+            header = Header.from_bytes(envelope.ratchet_header)
+            async with self._lock:
+                plaintext = ratchet_decrypt(self._ratchet, header, envelope.ciphertext)
             yield plaintext.decode()

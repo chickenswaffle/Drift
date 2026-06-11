@@ -51,15 +51,20 @@ class Envelope:
       ``ephemeral_pub``  — the sender's one-time public key R
       ``one_time_addr``  — the derived one-time address A_once
 
-    Both are carried verbatim so the receiver can scan for messages
-    addressed to it. The transport layer never interprets them.
+    Phase 2 ratchet field (optional, opaque to transport):
+      ``ratchet_header`` — serialized Double Ratchet header
+
+    All are carried verbatim so the receiver can scan for messages
+    addressed to it and turn its ratchet. The transport layer never
+    interprets them.
     """
 
     to: str            # destination/routing key — opaque to transport
     ciphertext: bytes  # encrypted payload — opaque to transport
     timestamp: int = field(default_factory=lambda: int(time.time()))
-    ephemeral_pub: bytes | None = None  # R — stealth ephemeral public key
-    one_time_addr: bytes | None = None  # A_once — stealth one-time address
+    ephemeral_pub: bytes | None = None    # R — stealth ephemeral public key
+    one_time_addr: bytes | None = None    # A_once — stealth one-time address
+    ratchet_header: bytes | None = None   # serialized Double Ratchet header
 
 
 class RelayClient:
@@ -156,6 +161,9 @@ class RelayClient:
             payload["R"] = base64.b64encode(envelope.ephemeral_pub).decode()
         if envelope.one_time_addr is not None:
             payload["addr"] = base64.b64encode(envelope.one_time_addr).decode()
+        # Phase 2: carry the ratchet header when present.
+        if envelope.ratchet_header is not None:
+            payload["hdr"] = base64.b64encode(envelope.ratchet_header).decode()
         try:
             resp = await self._http.post(f"{self._http_base}/send", json=payload)
             resp.raise_for_status()
@@ -224,6 +232,8 @@ class RelayClient:
                     # Phase 1 stealth fields are optional; decode when present.
                     ephemeral_pub = base64.b64decode(msg["R"]) if "R" in msg else None
                     one_time_addr = base64.b64decode(msg["addr"]) if "addr" in msg else None
+                    # Phase 2 ratchet header is optional too.
+                    ratchet_header = base64.b64decode(msg["hdr"]) if "hdr" in msg else None
                 except ValueError:
                     continue
                 await self._queue.put(
@@ -233,6 +243,7 @@ class RelayClient:
                         timestamp=int(msg.get("ts", 0)),
                         ephemeral_pub=ephemeral_pub,
                         one_time_addr=one_time_addr,
+                        ratchet_header=ratchet_header,
                     )
                 )
         except (ConnectionClosed, asyncio.CancelledError):

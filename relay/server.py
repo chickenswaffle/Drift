@@ -126,9 +126,12 @@ async def send_message(envelope: dict[str, Any]) -> JSONResponse:
         "R":    "<base64>",          // sender's ephemeral public key
         "addr": "<base64>"           // derived one-time stealth address
 
-    The relay never inspects "ct", "R", or "addr" — it routes and forgets.
-    Only the recipient, scanning with their private scan key, can tell
-    which one-time address (and therefore which message) is theirs.
+    Phase 2 ratchet field (optional, opaque to relay):
+        "hdr":  "<base64>"           // serialized Double Ratchet header
+
+    The relay never inspects "ct", "R", "addr", or "hdr" — it routes and
+    forgets. Only the recipient, scanning with their private scan key, can
+    tell which one-time address (and therefore which message) is theirs.
 
     We rebuild the forwarded record from known fields only, so the relay
     never re-broadcasts arbitrary client-supplied JSON to other clients.
@@ -149,6 +152,9 @@ async def send_message(envelope: dict[str, Any]) -> JSONResponse:
         record["R"] = envelope["R"]
     if "addr" in envelope:
         record["addr"] = envelope["addr"]
+    # Carry the Phase 2 ratchet header through untouched, if present.
+    if "hdr" in envelope:
+        record["hdr"] = envelope["hdr"]
 
     envelope = record
     subscribers = _subscribers.get(to_addr, set())
