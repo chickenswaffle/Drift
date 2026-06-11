@@ -42,6 +42,15 @@ relay = [
 qr = [
     "segno>=1.6",
 ]
+tor = [
+    # stem drives a system tor daemon; python-socks + httpx[socks] route the
+    # relay WebSocket and HTTP traffic through its SOCKS5 port. arti (embedded,
+    # daemonless) is preferred when present but ships separately as its Python
+    # bindings are still maturing — install it alongside this extra to use it.
+    "stem>=1.8",
+    "python-socks[asyncio]>=2.4",
+    "httpx[socks]>=0.27",
+]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",

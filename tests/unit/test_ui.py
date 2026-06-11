@@ -38,8 +38,10 @@ from drift.ui.app import (
     NetworkState,
     PillButton,
     RatchetPill,
+    SecurityBar,
     SecurityPill,
     Sidebar,
+    TorActiveEvent,
     UptimePill,
     _build_css,
 )
@@ -543,8 +545,10 @@ def test_network_pane_build_shows_tor_when_active() -> None:
     state = NetworkState(tor_active=True, tor_hops=3)
     pane._state = state
     rendered = _render(pane._build())
-    assert "Tor active" in rendered
-    assert "3 hops" in rendered
+    # The YOU→relay connector expands into the 3-hop anonymising circuit.
+    assert "tor circuit · 3 hops" in rendered
+    assert "guard" in rendered
+    assert "exit" in rendered
 
 
 def test_network_pane_build_shows_federation_peers() -> None:
@@ -623,3 +627,97 @@ def test_ghost_theme_primary_in_logo_render() -> None:
         assert "#bbbbbb" in str(logo.render().style)
     finally:
         appmod._P = original
+
+
+# --------------------------------------------------------------------------- #
+# Phase 3 — Tor indicators
+# --------------------------------------------------------------------------- #
+
+
+def _fake_tor_client(hops: int = 3):
+    from drift.transport.tor import TorClient
+
+    return TorClient(socks_host="127.0.0.1", socks_port=9050, backend="mock", num_hops=hops)
+
+
+def test_latency_pill_bootstrap_mode() -> None:
+    pill = LatencyPill("http://localhost:8765/health")
+    pill.set_bootstrap(42)
+    assert "Bootstrapping Tor... 42%" in _render(pill.render())
+    # Out-of-range values clamp to 0..100.
+    pill.set_bootstrap(150)
+    assert "100%" in _render(pill.render())
+    pill.clear_bootstrap()
+    # Back to the latency readout (no live ping yet → em dash).
+    assert "Bootstrapping" not in _render(pill.render())
+
+
+@pytest.mark.asyncio
+async def test_security_bar_flips_tor_pill() -> None:
+    async with _app().run_test() as pilot:
+        bar = pilot.app.query_one(SecurityBar)
+        tor_pill = next(p for p in bar.query(SecurityPill) if p.label.endswith("TOR"))
+        assert tor_pill._active is False           # dim until a circuit exists
+        bar.set_tor_active(True)
+        await pilot.pause()
+        assert tor_pill._active is True            # bright green
+        assert "TOR" in _render(tor_pill.render())
+
+
+@pytest.mark.asyncio
+async def test_app_bootstraps_tor_and_lights_indicators() -> None:
+    """use_tor=True with a mocked bootstrap flips every Tor indicator on."""
+    from unittest.mock import AsyncMock, patch
+
+    me = Identity.generate()
+    contacts = {"alice": {"code": Identity.generate().contact_code()}}
+    app = DriftApp(me, contacts, "ws://127.0.0.1:1", active=None, use_tor=True)
+
+    with patch("drift.transport.tor.bootstrap", AsyncMock(return_value=_fake_tor_client())):
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            assert app._tor_active is True
+            assert app._tor_client is not None
+            tor_pill = next(
+                p for p in app.query_one(SecurityBar).query(SecurityPill)
+                if p.label.endswith("TOR")
+            )
+            assert tor_pill._active is True
+            # Bootstrap progress readout has cleared off the latency pill.
+            assert app.query_one(LatencyPill).bootstrap_pct is None
+
+
+@pytest.mark.asyncio
+async def test_app_tor_failure_falls_back_to_clearnet() -> None:
+    """A bootstrap failure warns and continues; indicators stay dim."""
+    from unittest.mock import AsyncMock, patch
+
+    from drift.transport.tor import TorUnavailableError
+
+    me = Identity.generate()
+    contacts = {"alice": {"code": Identity.generate().contact_code()}}
+    app = DriftApp(me, contacts, "ws://127.0.0.1:1", active=None, use_tor=True)
+
+    with patch(
+        "drift.transport.tor.bootstrap",
+        AsyncMock(side_effect=TorUnavailableError("no backend")),
+    ):
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            assert app._tor_active is False
+            assert app._tor_client is None
+
+
+@pytest.mark.asyncio
+async def test_tor_active_event_upgrades_lock_to_maximum() -> None:
+    """TorActiveEvent while secured drives the lock to 🔒⁺ (maximum)."""
+    async with _app_active().run_test() as pilot:
+        app = pilot.app
+        app._set_secure(True)                  # E2E + ratchet secured, no Tor yet
+        lock = app.query_one(LockIndicator)
+        assert lock.secure is True and lock.maximum is False
+        app.post_message(TorActiveEvent(3))
+        await pilot.pause()
+        assert app._tor_active is True
+        assert lock.maximum is True            # upgraded to 🔒⁺
+        assert "⁺" in _render(lock.render())

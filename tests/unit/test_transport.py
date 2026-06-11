@@ -344,3 +344,78 @@ class TestLifecycle:
         client = RelayClient("ws://relay.local:9000", "addr")
         assert client._http_base == "http://relay.local:9000"
         assert client._ws_url == "ws://relay.local:9000/ws/addr"
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 — SOCKS5 (Tor) routing
+# ---------------------------------------------------------------------------
+
+
+class TestSocksProxy:
+    @pytest.mark.asyncio
+    async def test_no_proxy_uses_plain_websocket(self) -> None:
+        """Without a proxy, connect() takes the direct websockets path."""
+        ws = FakeWebSocket([])
+        fake_http = _mock_http_send_ok()
+        with (
+            patch(
+                "drift.transport.client.websockets.connect",
+                return_value=_FakeWSConnect(ws),
+            ) as plain_connect,
+            patch("drift.transport.client.httpx.AsyncClient", return_value=fake_http),
+            patch("drift.transport.tor.open_socks_websocket") as socks_connect,
+        ):
+            client = RelayClient("ws://localhost:8765", "addr")
+            await client.connect()
+            await client.close()
+
+        plain_connect.assert_called_once()
+        socks_connect.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_proxy_routes_ws_through_socks(self) -> None:
+        """With a proxy, the WS handshake goes through tor.open_socks_websocket."""
+        ws = FakeWebSocket([])
+        fake_http = _mock_http_send_ok()
+        with (
+            patch(
+                "drift.transport.client.websockets.connect",
+                return_value=_FakeWSConnect(ws),
+            ) as plain_connect,
+            patch("drift.transport.client.httpx.AsyncClient", return_value=fake_http),
+            patch(
+                "drift.transport.tor.open_socks_websocket",
+                AsyncMock(return_value=ws),
+            ) as socks_connect,
+        ):
+            client = RelayClient(
+                "ws://localhost:8765", "addr", socks_proxy=("127.0.0.1", 9050)
+            )
+            await client.connect()
+            await client.close()
+
+        plain_connect.assert_not_called()
+        socks_connect.assert_awaited_once_with(
+            "ws://localhost:8765/ws/addr", "127.0.0.1", 9050
+        )
+
+    @pytest.mark.asyncio
+    async def test_proxy_configures_httpx_socks(self) -> None:
+        """HTTP /send + /burn traffic shares the same SOCKS5 proxy."""
+        ws = FakeWebSocket([])
+        fake_http = _mock_http_send_ok()
+        with (
+            patch("drift.transport.client.httpx.AsyncClient", return_value=fake_http) as mk_http,
+            patch(
+                "drift.transport.tor.open_socks_websocket",
+                AsyncMock(return_value=ws),
+            ),
+        ):
+            client = RelayClient(
+                "ws://localhost:8765", "addr", socks_proxy=("127.0.0.1", 9050)
+            )
+            await client.connect()
+            await client.close()
+
+        _, kwargs = mk_http.call_args
+        assert kwargs.get("proxy") == "socks5://127.0.0.1:9050"
