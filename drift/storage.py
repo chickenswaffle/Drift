@@ -17,13 +17,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 from typing import TypedDict
 
 from drift.crypto import Identity
 
-# Default config directory: ~/.config/drift/
-CONFIG_DIR = Path.home() / ".config" / "drift"
+# Config directory: ~/.config/drift/ by default, overridable via $DRIFT_CONFIG.
+# The override lets two terminals run separate identities on one machine (each
+# `DRIFT_CONFIG=/tmp/alice drift …`), which is essential for local testing.
+CONFIG_DIR = Path(os.environ.get("DRIFT_CONFIG", Path.home() / ".config" / "drift"))
 IDENTITY_FILE = CONFIG_DIR / "identity.json"
 
 # Contacts are scoped *per identity*, not global: each identity keeps its own
