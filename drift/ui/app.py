@@ -8,7 +8,7 @@ layout can later be ported to a web UI almost one-to-one:
     DriftApp                     (root / state container — like <App/>)
     ├─ Header
     │  ├─ LogoBox                condensed block wordmark
-    │  ├─ LockIndicator          🔓/🔒 boxed channel-security signal
+    │  ├─ LockIndicator          block-drawn padlock — favicon, flush left
     │  ├─ SecurityBar            🔒 E2E · ⚡ RATCHET · ⬡ STEALTH · 🌐 TOR pills
     │  └─ HeaderBar              active contact · relay · connection
     ├─ CryptoTicker              live (non-secret) crypto-event feed (Ctrl+L)
@@ -270,8 +270,10 @@ def _build_css(t: dict[str, str]) -> str:
     #header {{ height: 5; padding: 0 1; background: {bg}; }}
     #header-top {{ height: 3; }}
     #logo {{ width: auto; height: 3; content-align: left middle; }}
+    /* Favicon lock: flush left, vertically centered, single space before the
+       wordmark. */
     #lock {{
-        width: auto; height: 3; margin: 0 2 0 2; content-align: center middle;
+        width: auto; height: 3; margin: 0 1 0 0; content-align: left middle;
     }}
     #header-spacer {{ width: 1fr; height: 3; }}
     #security {{ width: auto; height: 3; content-align: right middle; }}
@@ -496,16 +498,22 @@ class LogoBox(Static):
 
 class LockIndicator(Static):
     """
-    The single most prominent security signal in the header: a boxed padlock
-    whose colour and glyph track the live channel state. Sits just left of the
-    security pills so it's the first thing the eye lands on.
+    The favicon of the TUI: a small block-drawn padlock, flush left in the
+    header, whose colour and shape track the live channel state. It's the first
+    thing the eye lands on when the app opens.
 
-        🔓  dim red    — unsecured (no active, connected session)
-        🔒  bright green — secured (E2E + Double Ratchet active)
-        🔒⁺ green + cyan superscript — maximum security (Tor also active; Phase 3)
+    Three lines tall (shackle / shackle-feet + body-top / body + keyhole):
 
-    The box-drawing frame makes it read as a status panel rather than a bare
-    emoji. ``maximum`` only has meaning when ``secure`` is also set.
+        ┌ unsecured (dim red) ┐   ┌ secured (green) ┐   ┌ maximum (green) ┐
+        │  ╭──╮               │   │  ╭──╮           │   │  ╭──╮⁺          │
+        │  ╭╯  ╰╮  ← open     │   │  ╭┴──┴╮ ← closed │   │  ╭┴──┴╮         │
+        │  ╰─██─╯             │   │  ╰─██─╯          │   │  ╰─╋╋─╯ ← cross │
+        └─────────────────────┘   └──────────────────┘   └─────────────────┘
+
+    Matrix green when locked, dim red when unlocked, with a cyan ``⁺``
+    superscript at maximum security (Tor also active). ``maximum`` only has
+    meaning when ``secure`` is also set. Driven by the app's ``_set_secure()``;
+    this widget holds no logic of its own.
     """
 
     secure: reactive[bool] = reactive(False)
@@ -513,17 +521,18 @@ class LockIndicator(Static):
 
     def render(self) -> RenderableType:
         if self.secure and self.maximum:
-            colour = _P
-            mid = f"[{colour}]│🔒[/][{_S}]⁺[/][{colour}]│[/]"
-        elif self.secure:
-            colour = _P
-            mid = f"[{colour}]│ 🔒│[/]"
-        else:
-            colour = "#aa3333"  # dim red — channel not secured
-            mid = f"[{colour}]│ 🔓│[/]"
-        top = f"[{colour}]╭───╮[/]"
-        bot = f"[{colour}]╰───╯[/]"
-        return f"{top}\n{mid}\n{bot}"
+            # Closed shackle + cross keyhole, cyan ⁺ superscript top-right.
+            c = _P
+            return (
+                f"[{c}] ╭──╮[/][{_S}]⁺[/]\n"
+                f"[{c}]╭┴──┴╮\n"
+                f"╰─╋╋─╯[/]"
+            )
+        if self.secure:
+            # Closed shackle (feet attached to the body), filled keyhole.
+            return f"[{_P}] ╭──╮ \n╭┴──┴╮\n╰─██─╯[/]"
+        # Unsecured: shackle swung open, dim red.
+        return "[#aa3333] ╭──╮ \n╭╯  ╰╮\n╰─██─╯[/]"
 
 
 class SecurityPill(Static):
@@ -1509,8 +1518,8 @@ class DriftApp(App[None]):
         with Vertical(id="root"):
             with Vertical(id="header"):
                 with Horizontal(id="header-top"):
-                    yield LogoBox(id="logo")
                     yield LockIndicator(id="lock")
+                    yield LogoBox(id="logo")
                     yield Static(id="header-spacer")
                     yield SecurityBar(id="security")
                     yield UptimePill(id="uptime")

@@ -133,10 +133,12 @@ async def test_header_has_lock_indicator_starting_unsecured() -> None:
     async with _app().run_test() as pilot:
         lock = pilot.app.query_one(LockIndicator)
         assert lock.secure is False
-        # Open padlock, dim red, before any session connects.
+        # Block-drawn padlock, shackle open, dim red, before any session connects.
         rendered = str(lock.render())
-        assert "🔓" in rendered
-        assert "#aa3333" in rendered
+        assert "╰─██─╯" in rendered      # padlock body + keyhole
+        assert "╭╯  ╰╮" in rendered       # open shackle
+        assert "#aa3333" in rendered      # dim red
+        assert "🔓" not in rendered        # no emoji — block-drawn now
 
 
 @pytest.mark.asyncio
@@ -146,13 +148,17 @@ async def test_lock_indicator_reflects_secure_and_maximum_states() -> None:
         lock.secure = True
         await pilot.pause()
         secured = str(lock.render())
-        assert "🔒" in secured and "#00ff41" in secured
+        # Closed shackle (feet attached), matrix green, no emoji.
+        assert "╭┴──┴╮" in secured
+        assert "#00ff41" in secured
+        assert "🔒" not in secured
 
         lock.maximum = True
         await pilot.pause()
         maxed = str(lock.render())
-        # Closed lock plus a cyan superscript.
-        assert "🔒" in maxed and "⁺" in maxed and "#00d4ff" in maxed
+        # Cross keyhole plus a cyan ⁺ superscript at maximum security.
+        assert "╰─╋╋─╯" in maxed
+        assert "⁺" in maxed and "#00d4ff" in maxed
 
 
 def test_stealth_pill_uses_hexagon_not_ghost() -> None:
