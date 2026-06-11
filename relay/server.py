@@ -201,5 +201,13 @@ async def root() -> JSONResponse:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
+    import os
+
     import uvicorn
-    uvicorn.run("relay.server:app", host="0.0.0.0", port=8765, reload=True)  # noqa: S104
+
+    # reload=True restarts uvicorn on every file save, which drops every live
+    # WebSocket — clients then see "relay closed connection". Keep the relay
+    # stable by default; opt into autoreload with DRIFT_RELAY_RELOAD=1 only when
+    # actively editing the relay itself.
+    reload = bool(os.environ.get("DRIFT_RELAY_RELOAD"))
+    uvicorn.run("relay.server:app", host="0.0.0.0", port=8765, reload=reload)  # noqa: S104
