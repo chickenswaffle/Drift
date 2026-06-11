@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "drift-messenger"
-version = "0.4.2"
+version = "0.4.3"
 description = "Terminal-first E2E encrypted messenger with rotating stealth addresses"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -39,13 +39,16 @@ relay = [
     "uvicorn[standard]>=0.29",
     "redis>=5.0",
 ]
+qr = [
+    "segno>=1.6",
+]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "pytest-cov>=5.0",
     "ruff>=0.4",
     "mypy>=1.10",
-    "drift-messenger[relay]",
+    "drift-messenger[relay,qr]",
 ]
 
 [project.scripts]

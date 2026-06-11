@@ -6,13 +6,18 @@ widgets — the same component decomposition a React app would use — so the
 layout can later be ported to a web UI almost one-to-one:
 
     DriftApp                     (root / state container — like <App/>)
-    ├─ HeaderBar                 wordmark · contact · connection
+    ├─ Header
+    │  ├─ LogoBox                condensed block wordmark
+    │  ├─ SecurityBar            🔒 E2E · ⚡ RATCHET · 👻 STEALTH · 🌐 TOR pills
+    │  └─ HeaderBar              active contact · relay · connection
+    ├─ CryptoTicker              live (non-secret) crypto-event feed (Ctrl+L)
     ├─ CommandPalette            [I] [A] [V] [C] [/] [Q]  (PillButton ×N)
     ├─ Body
     │  ├─ Sidebar                contact list (ContactItem ×N) + add
-    │  └─ ChatColumn
-    │     ├─ MessagePane         scrollable message log
-    │     └─ InputBar            rule · prompt · input · counter · hint
+    │  ├─ ChatColumn
+    │  │  ├─ MessagePane         scrollable message log (per-line status)
+    │  │  └─ InputBar            rule · prompt · input · counter · help bar
+    │  └─ InfoPanel              slide-in session info (Ctrl+I)
     └─ Modals (pushed)           AddContactModal · VerifyModal · HelpModal ·
                                  IdentityModal
 
@@ -20,7 +25,9 @@ State lives on DriftApp and flows *down* into widgets via reactive props
 (≈ React props); widgets emit *up* via Textual Messages (≈ DOM events that
 bubble). No widget reaches sideways into another. The network/crypto work
 happens in a background @work worker that talks to drift.transport.Session
-and posts plain strings back — the UI never imports crypto (see CLAUDE.md).
+and posts plain strings / typed events back — the UI never imports crypto.
+Crypto-event messages (CryptoEvent) follow the same worker→UI pattern as
+IncomingMessage; they report only non-secret, already-public information.
 
 Colour language:
     #0a0a0a  deep black background
@@ -31,6 +38,9 @@ Colour language:
 
 from __future__ import annotations
 
+import hashlib
+import importlib.util
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, ClassVar, TypeVar
@@ -47,12 +57,14 @@ from textual.events import Key
 from textual.message import Message
 from textual.reactive import reactive
 from textual.screen import ModalScreen
-from textual.widgets import Button, Input, RichLog, Static
+from textual.widgets import Button, Input, Static
 
 from drift import __version__, storage
 from drift.transport.session import Session
 
 if TYPE_CHECKING:
+    from textual.await_remove import AwaitRemove
+
     from drift.crypto import Identity
     from drift.storage import Contacts
 
@@ -70,6 +82,26 @@ _COMMANDS: list[tuple[str, str, str]] = [
     ("/", "Command", "command"),
     ("Q", "Quit", "quit"),
 ]
+
+# Security indicators. (label, tooltip, active). Tor is honestly inactive
+# until Phase 3 lands — it renders dim and struck-through.
+_SECURITY: list[tuple[str, str, bool]] = [
+    ("🔒 E2E", "End-to-end encrypted — X25519 ECDH → HKDF → XChaCha20-Poly1305. "
+               "The relay only ever sees ciphertext.", True),
+    ("⚡ RATCHET", "Double Ratchet — every message uses a fresh key; a leaked key "
+                   "cannot decrypt past or future messages.", True),
+    ("👻 STEALTH", "Stealth addresses — each message goes to a one-time address only "
+                   "you can recognise; the relay can't link your messages.", True),
+    ("🌐 TOR", "Tor transport — NOT active yet (Phase 3). Your IP is currently "
+               "visible to the relay.", False),
+]
+
+# Condensed three-row block wordmark (the full six-row art is too tall for a header).
+_LOGO_ROWS: tuple[str, ...] = (
+    "█▀▄ █▀▄ █ █▀▀ ▀█▀",
+    "█ █ █▀▄ █ █▀   █ ",
+    "▀▀  ▀ ▀ ▀ ▀    ▀ ",
+)
 
 
 def _now() -> str:
@@ -94,12 +126,35 @@ class ContactSelected(Message):
         self.name = name
 
 
+class SecurityPillClicked(Message):
+    """A security indicator was clicked — show its one-line explanation."""
+    def __init__(self, label: str, tooltip: str) -> None:
+        super().__init__()
+        self.label = label
+        self.tooltip = tooltip
+
+
 class IncomingMessage(Message):
     """Worker → UI: a decrypted message arrived for a contact."""
     def __init__(self, contact: str, text: str) -> None:
         super().__init__()
         self.contact = contact
         self.text = text
+
+
+class CryptoEvent(Message):
+    """
+    Worker → UI: a non-secret transport/crypto event for the live ticker.
+
+    Same worker→UI pattern as IncomingMessage. Carries only public info (event
+    kind + a short detail such as a one-time address prefix) — never plaintext
+    or key material. The UI never imports crypto; it just renders these.
+    """
+    def __init__(self, kind: str, detail: str) -> None:
+        super().__init__()
+        self.kind = kind
+        self.detail = detail
+        self.ts = _now()
 
 
 class SessionUp(Message):
@@ -130,39 +185,102 @@ class MessageRecord:
 # Presentational components
 # ===========================================================================
 
+class LogoBox(Static):
+    """The condensed matrix-green DRIFT wordmark, sits left in the header."""
+
+    def render(self) -> RenderableType:
+        logo = Text("\n".join(_LOGO_ROWS), style="bold #00ff41", no_wrap=True)
+        return logo
+
+
+class SecurityPill(Static):
+    """A security indicator pill — bright green if active, dim+struck if not."""
+
+    can_focus = True
+
+    def __init__(self, label: str, tooltip_text: str, active: bool) -> None:
+        super().__init__()
+        self._label = label
+        self._tip = tooltip_text
+        self._active = active
+        self.tooltip = tooltip_text  # native hover tooltip
+        if not active:
+            self.add_class("inactive")
+
+    def render(self) -> RenderableType:
+        if self._active:
+            return f"[#00ff41]{self._label}[/]"
+        return f"[#555555 strike]{self._label}[/]"
+
+    def on_click(self) -> None:
+        self.post_message(SecurityPillClicked(self._label, self._tip))
+
+    def on_key(self, event: Key) -> None:
+        if event.key == "enter":
+            self.post_message(SecurityPillClicked(self._label, self._tip))
+            event.stop()
+
+
+class SecurityBar(Horizontal):
+    """The always-visible row of security indicators (right of the header)."""
+
+    def compose(self) -> ComposeResult:
+        for label, tooltip_text, active in _SECURITY:
+            yield SecurityPill(label, tooltip_text, active)
+
+
 class HeaderBar(Static):
-    """Three-line header: wordmark/version/Tor · contact/relay/conn · rule."""
+    """One line: active contact (left) · relay · version · connection (right)."""
 
     contact_name: reactive[str] = reactive("")
     relay_url: reactive[str] = reactive("")
     connected: reactive[bool] = reactive(False)
-    tor_active: reactive[bool] = reactive(False)
     pulse: reactive[bool] = reactive(True)
 
     def render(self) -> RenderableType:
-        # Line 1 — wordmark left, version + Tor right.
-        tor = "[#00ff41]● TOR[/]" if self.tor_active else "[#444444]○ TOR[/]"
-        line1 = Table.grid(expand=True)
-        line1.add_column(justify="left", ratio=1)
-        line1.add_column(justify="right")
-        line1.add_row("[bold #00ff41]DRIFT[/]", f"[#888888]{VERSION}[/]   {tor}")
-
-        # Line 2 — active contact left, relay + pulsing connection dot right.
         if self.connected:
-            dot = "[#00ff41]⣿[/]" if self.pulse else "[#1a5c1a]⡇[/]"
-            state = dot
+            dot = "[#00ff41]⣿ secure[/]" if self.pulse else "[#1a5c1a]⡇ secure[/]"
         else:
-            state = "[#444444]⠀ offline[/]"
+            dot = "[#555555]○ offline[/]"
         who = self.contact_name or "no contact selected"
-        line2 = Table.grid(expand=True)
-        line2.add_column(justify="left", ratio=1)
-        line2.add_column(justify="right")
-        line2.add_row(
+        grid = Table.grid(expand=True)
+        grid.add_column(justify="left", ratio=1)
+        grid.add_column(justify="right")
+        grid.add_row(
             f"[#00d4ff]▶ {who}[/]",
-            f"[#888888]{self.relay_url}[/]  {state}",
+            f"[#888888]{self.relay_url}  ·  {VERSION}  ·[/]  {dot}",
         )
+        return grid
 
-        return Group(line1, line2, RichRule(style="#1a5c1a", characters="─"))
+
+class CryptoTicker(Static):
+    """
+    A one-line, dim, live feed of (non-secret) crypto events.
+
+    Makes the cryptography visible without being intrusive. Toggled with Ctrl+L.
+    """
+
+    _ICON: ClassVar[dict[str, tuple[str, str]]] = {
+        "ratchet": ("⚡", "#00d4ff"),
+        "send": ("👻", "#00ff41"),
+        "recv": ("👻", "#00ff41"),
+        "erase": ("🔥", "#cc7722"),
+    }
+
+    def on_mount(self) -> None:
+        self.update("[#444444]· awaiting crypto activity …[/]")
+
+    def push(self, ts: str, kind: str, detail: str) -> None:
+        icon, colour = self._ICON.get(kind, ("·", "#888888"))
+        if kind == "send":
+            body = f"stealth addr derived · {detail}"
+        elif kind == "recv":
+            body = f"inbound matched · {detail}"
+        elif kind == "erase":
+            body = "message key erased"
+        else:  # ratchet
+            body = detail
+        self.update(f"[#555555]\\[{ts}][/]  [{colour}]{icon} {body}[/]")
 
 
 class PillButton(Static):
@@ -249,36 +367,60 @@ class Sidebar(Vertical):
         )
 
 
-class MessagePane(RichLog):
-    """Scrollable message log with typed write helpers and a flash effect."""
+class _SentLine(Static):
+    """An outgoing message line whose delivery-status glyph can update in place."""
+
+    _GLYPH: ClassVar[dict[str, tuple[str, str]]] = {
+        "sending": ("◌", "#3a8a4a"),    # dim green
+        "sent": ("✓", "#3a8a4a"),       # delivered to relay
+        "failed": ("✗", "#ff4444"),
+    }
+
+    status: reactive[str] = reactive("sending")
+
+    def __init__(self, text: str, ts: str) -> None:
+        super().__init__()
+        self._text = text
+        self._ts = ts
+
+    def render(self) -> RenderableType:
+        glyph, colour = self._GLYPH.get(self.status, ("", "#3a8a4a"))
+        line = Text(justify="right")
+        line.append(f"{self._ts}  ", style="#888888")
+        line.append("you:  ", style="bold #00ff41")
+        line.append(self._text, style="#b0ffb0")
+        line.append(f"  {glyph}", style=colour)
+        return line
+
+
+class MessagePane(VerticalScroll):
+    """Scrollable message log; each line is its own widget (mutable status)."""
+
+    def _add(self, widget: Static) -> None:
+        self.mount(widget)
+        self.call_after_refresh(self.scroll_end, animate=False)
+
+    def clear(self) -> AwaitRemove:
+        return self.remove_children()
 
     def write_separator(self, label: str) -> None:
-        self.write(
-            f"[#1a5c1a]▓▒░  {label}  ░▒▓[/]",
-            scroll_end=True,
-        )
+        self._add(Static(f"[#1a5c1a]▓▒░  {label}  ░▒▓[/]"))
 
     def write_incoming(self, sender: str, text: str, ts: str) -> None:
-        self.write(
-            f"[#888888]{ts}[/]  [bold #00d4ff]{sender}:[/]  [white]{text}[/]",
-            scroll_end=True,
-        )
+        self._add(Static(f"[#888888]{ts}[/]  [bold #00d4ff]{sender}:[/]  [white]{text}[/]"))
         self.flash()
 
-    def write_outgoing(self, text: str, ts: str) -> None:
-        # Right-justify via the Text itself (not an Align wrapper, which would
-        # report an oversized width and trip RichLog's horizontal scrollbar).
-        line = Text(justify="right")
-        line.append(f"{ts}  ", style="#888888")
-        line.append("you:  ", style="bold #00ff41")
-        line.append(text, style="#b0ffb0")
-        self.write(line, scroll_end=True)
+    def write_outgoing(self, text: str, ts: str, *, status: str = "sending") -> _SentLine:
+        line = _SentLine(text, ts)
+        line.status = status
+        self._add(line)
+        return line
 
     def write_system(self, text: str) -> None:
-        self.write(f"[#888888 italic]· {text}[/]", scroll_end=True)
+        self._add(Static(f"[#888888 italic]· {text}[/]"))
 
     def write_warning(self, text: str) -> None:
-        self.write(f"[bold red]⚠  {text}[/]", scroll_end=True)
+        self._add(Static(f"[bold red]⚠  {text}[/]"))
 
     def flash(self) -> None:
         """Briefly tint the border green when a new message lands."""
@@ -287,11 +429,11 @@ class MessagePane(RichLog):
 
 
 class InputBar(Vertical):
-    """Bottom composer: rule · (prompt + input + counter) · hint."""
+    """Bottom composer: rule · (prompt + input + counter) · keyboard help bar."""
 
     HINT = (
-        "[#888888]Enter[/] send  ·  [#888888]Shift+Enter[/] newline  ·  "
-        "[#888888]/verify[/]  ·  [#888888]/clear[/]  ·  [#888888]/help[/]"
+        "[#888888]\\[Q]uit  ·  ^G info  ·  ^L log  ·  \\[V]erify  ·  \\[A]dd  ·  "
+        "\\[/]command  ·  \\[↑↓]scroll[/]"
     )
 
     def compose(self) -> ComposeResult:
@@ -314,6 +456,137 @@ class InputBar(Vertical):
     @property
     def input(self) -> Input:
         return self.query_one("#msg-input", Input)
+
+
+class InfoPanel(Static):
+    """Slide-in session info panel (Ctrl+I). Rendered from app-supplied data."""
+
+    def __init__(self, id: str | None = None) -> None:
+        super().__init__(id=id)
+        self._active = False
+        self._code = ""
+        self._contact = ""
+        self._safety = ""
+        self._sent = 0
+        self._recv = 0
+        self._stealth = 0
+        self._recent: list[str] = []
+        self._relay = ""
+        self._uptime = "—"
+
+    def clear_data(self) -> None:
+        self._active = False
+        self.refresh()
+
+    def show_data(
+        self,
+        *,
+        code: str,
+        contact: str,
+        safety: str,
+        sent: int,
+        recv: int,
+        stealth: int,
+        recent: list[str],
+        relay: str,
+        uptime: str,
+    ) -> None:
+        self._active = True
+        self._code = code
+        self._contact = contact
+        self._safety = safety
+        self._sent = sent
+        self._recv = recv
+        self._stealth = stealth
+        self._recent = recent
+        self._relay = relay
+        self._uptime = uptime
+        self.refresh()
+
+    @staticmethod
+    def _field(label: str, value: str, colour: str = "#e0e0e0") -> Table:
+        grid = Table.grid(expand=True)
+        grid.add_column(justify="left")
+        grid.add_row(Text(label, style="#888888"))
+        grid.add_row(Text(value, style=colour, no_wrap=True))
+        return grid
+
+    def render(self) -> RenderableType:
+        if not self._active:
+            return Text("no active session — select a contact", style="#555555")
+
+        recent_str = "  ".join(self._recent) if self._recent else "—"
+        caption = ("scan to add this contact" if _HAS_SEGNO
+                   else "decorative · not scannable — share the code below")
+        return Group(
+            Text("⬡  SESSION", style="bold #00ff41"),
+            Text(""),
+            _qr_renderable(self._code),
+            Text(caption, style="italic #555555"),
+            Text(""),
+            self._field("your contact code", self._code, "#00d4ff"),
+            Text(""),
+            self._field(f"safety number · {self._contact}", self._safety, "#ffff00"),
+            Text(""),
+            self._field("ratchet messages",
+                        f"↑ {self._sent} sent   ↓ {self._recv} received"),
+            self._field("stealth addresses used", str(self._stealth)),
+            self._field("recent addresses", recent_str, "#3a8a4a"),
+            Text(""),
+            self._field("relay", self._relay),
+            self._field("session uptime", self._uptime),
+        )
+
+
+# A real, scannable QR is rendered with segno when it's installed (the optional
+# ``qr`` extra); otherwise we fall back to a decorative block derived from the
+# code hash. Resolved once at import.
+_HAS_SEGNO = importlib.util.find_spec("segno") is not None
+
+
+def _real_qr(data: str) -> Text:
+    """A scannable QR of ``data`` — half-block cells (2 modules per text row)."""
+    import segno
+
+    rows = [list(row) for row in segno.make(data, error="l").matrix_iter(border=2)]
+    if len(rows) % 2:
+        rows.append([0] * len(rows[0]))
+    out = Text(no_wrap=True)
+    for r in range(0, len(rows), 2):
+        top, bottom = rows[r], rows[r + 1]
+        for c in range(len(top)):
+            # Dark module → black, light → white (standard orientation). ▀ paints
+            # the top module as foreground and the bottom module as background.
+            fg = "black" if top[c] else "white"
+            bg = "black" if bottom[c] else "white"
+            out.append("▀", style=f"{fg} on {bg}")
+        out.append("\n")
+    return out
+
+
+def _decorative_qr(data: str, n: int = 8) -> Text:
+    """A decorative (NOT scannable) matrix-green block derived from the code."""
+    bits: list[int] = []
+    src = hashlib.sha256(data.encode()).digest()
+    while len(bits) < n * n:
+        for byte in src:
+            for i in range(8):
+                bits.append((byte >> i) & 1)
+        src = hashlib.sha256(src).digest()
+    rows: list[str] = []
+    k = 0
+    for _ in range(n):
+        cells = []
+        for _ in range(n):
+            cells.append("██" if bits[k] else "  ")
+            k += 1
+        rows.append("".join(cells))
+    return Text("\n".join(rows), style="#00ff41", no_wrap=True)
+
+
+def _qr_renderable(data: str) -> Text:
+    """Real QR if segno is available, else the decorative fallback."""
+    return _real_qr(data) if _HAS_SEGNO else _decorative_qr(data)
 
 
 # ===========================================================================
@@ -463,6 +736,9 @@ class HelpModal(_FadeModal[None]):
         "  [#00ff41]C[/]  Focus the contact list\n"
         "  [#00ff41]/[/]  Command mode (type a /slash command)\n"
         "  [#00ff41]Q[/]  Quit\n\n"
+        "[bold #00ff41]Toggles[/]\n"
+        "  [#00d4ff]Ctrl+G[/]  session info panel (your code, safety number, counters)\n"
+        "  [#00d4ff]Ctrl+L[/]  crypto-event ticker on/off\n\n"
         "[bold #00ff41]Slash commands[/]\n"
         "  [#00d4ff]/add[/]      add a contact\n"
         "  [#00d4ff]/verify[/]   show the safety number\n"
@@ -472,7 +748,7 @@ class HelpModal(_FadeModal[None]):
         "[bold #00ff41]Composing[/]\n"
         "  [#888888]Enter[/] send   ·   [#888888]Shift+Enter[/] newline\n"
         "  [#888888]Esc[/] unfocus the input so letter shortcuts work\n\n"
-        "[#888888]Click any pill or contact with the mouse, too.[/]"
+        "[#888888]Click any pill, contact, or security indicator with the mouse, too.[/]"
     )
 
     def compose(self) -> ComposeResult:
@@ -504,6 +780,8 @@ class DriftApp(App[None]):
         Binding("c", "command('contacts')", "Contacts", show=False),
         Binding("q", "command('quit')", "Quit", show=False),
         Binding("question_mark", "command('help')", "Help", show=False),
+        Binding("ctrl+g", "toggle_info", "Info", show=False),
+        Binding("ctrl+l", "toggle_log", "Log", show=False),
         Binding("escape", "blur_input", "Unfocus", show=False),
     ]
 
@@ -517,54 +795,42 @@ class DriftApp(App[None]):
     }
 
     /* ── Header ─────────────────────────────────────────────── */
-    #header {
-        height: 3;
-        padding: 0 1;
-        background: #0a0a0a;
+    #header { height: 5; padding: 0 1; background: #0a0a0a; }
+    #header-top { height: 3; }
+    #logo { width: auto; height: 3; content-align: left middle; }
+    #security { width: 1fr; height: 3; align-horizontal: right; content-align: right middle; }
+    SecurityPill {
+        width: auto; height: 3; padding: 0 1; margin: 0 0 0 1;
+        background: #0a0a0a; content-align: center middle;
+    }
+    SecurityPill:hover { background: #06160a; }
+    SecurityPill.inactive:hover { background: #160606; }
+    #headerinfo { height: 1; }
+    #header-rule { height: 1; }
+
+    /* ── Crypto ticker ──────────────────────────────────────── */
+    #ticker {
+        height: 1; padding: 0 1; background: #060606; color: #888888;
     }
 
     /* ── Command palette ────────────────────────────────────── */
-    #palette {
-        height: 1;
-        padding: 0 1;
-        background: #0a0a0a;
-    }
+    #palette { height: 1; padding: 0 1; background: #0a0a0a; }
     PillButton {
-        width: auto;
-        height: 1;
-        padding: 0 2;
-        margin: 0 1 0 0;
-        color: #888888;
-        background: #0a0a0a;
+        width: auto; height: 1; padding: 0 2; margin: 0 1 0 0;
+        color: #888888; background: #0a0a0a;
     }
-    PillButton:hover {
-        color: #0a0a0a;
-        background: #00ff41;
-        text-style: bold;
-    }
-    PillButton:focus {
-        color: #00ff41;
-        background: #06160a;
-        text-style: bold;
-    }
+    PillButton:hover { color: #0a0a0a; background: #00ff41; text-style: bold; }
+    PillButton:focus { color: #00ff41; background: #06160a; text-style: bold; }
 
-    /* ── Body: sidebar + chat ───────────────────────────────── */
+    /* ── Body: sidebar + chat + info ────────────────────────── */
     #body { height: 1fr; }
 
     #sidebar {
-        width: 22;
-        background: #060606;
-        border-right: solid #1a5c1a;
-        padding: 0 1;
+        width: 22; background: #060606; border-right: solid #1a5c1a; padding: 0 1;
     }
     #sidebar-title { height: 1; padding: 0 1; }
     #contact-list { height: 1fr; }
-    ContactItem {
-        width: 100%;
-        height: 1;
-        padding: 0 1;
-        background: #060606;
-    }
+    ContactItem { width: 100%; height: 1; padding: 0 1; background: #060606; }
     ContactItem:hover { background: #06160a; }
     ContactItem.active { background: #06160a; }
     .empty-hint { padding: 1; color: #555555; }
@@ -572,16 +838,19 @@ class DriftApp(App[None]):
     /* ── Chat column ────────────────────────────────────────── */
     #chat { width: 1fr; }
     #pane {
-        height: 1fr;
-        background: #0a0a0a;
-        border: solid #1a5c1a;
-        scrollbar-color: #00ff41;
-        scrollbar-background: #0a0a0a;
-        scrollbar-gutter: stable;
-        scrollbar-size-vertical: 1;
-        padding: 0 1;
+        height: 1fr; background: #0a0a0a; border: solid #1a5c1a;
+        scrollbar-color: #00ff41; scrollbar-background: #0a0a0a;
+        scrollbar-gutter: stable; scrollbar-size-vertical: 1; padding: 0 1;
     }
+    #pane > Static { width: 100%; height: auto; }
     #pane.flash { border: solid #88ffaa; background: #001800; }
+
+    /* ── Session info panel (slide-in, right) ───────────────── */
+    #infopanel {
+        dock: right; width: 48; height: 1fr; display: none; overflow-y: auto;
+        background: #060606; border-left: solid #1a5c1a; padding: 1 2;
+        scrollbar-color: #00ff41; scrollbar-size-vertical: 1;
+    }
 
     /* ── Input bar ──────────────────────────────────────────── */
     #input { height: 3; padding: 0 1; background: #0a0a0a; }
@@ -589,12 +858,8 @@ class DriftApp(App[None]):
     #input-row { height: 1; }
     #prompt { width: 2; color: #00ff41; text-style: bold; }
     #msg-input {
-        width: 1fr;
-        height: 1;
-        padding: 0;
-        border: none;
-        background: #0a0a0a;
-        color: #e0e0e0;
+        width: 1fr; height: 1; padding: 0; border: none;
+        background: #0a0a0a; color: #e0e0e0;
     }
     #msg-input:focus { border: none; }
     #char-count { width: 6; content-align: right middle; color: #888888; }
@@ -603,12 +868,8 @@ class DriftApp(App[None]):
     /* ── Modals ─────────────────────────────────────────────── */
     _FadeModal { align: center middle; background: #0a0a0a 75%; }
     #modal-box {
-        width: 64;
-        height: auto;
-        max-height: 80%;
-        padding: 1 2;
-        background: #0c0c0c;
-        border: round #00ff41;
+        width: 64; height: auto; max-height: 80%; padding: 1 2;
+        background: #0c0c0c; border: round #00ff41;
     }
     .modal-title { height: 1; text-align: center; }
     .field-label { height: 1; margin: 1 0 0 0; }
@@ -638,20 +899,31 @@ class DriftApp(App[None]):
         self._history: dict[str, list[MessageRecord]] = {}
         self._session: Session | None = None
         self._connected = False
+        # Per-session crypto telemetry (reset on each conversation open).
+        self._sent_count = 0
+        self._recv_count = 0
+        self._stealth_count = 0
+        self._stealth_recent: list[str] = []
+        self._session_start: float | None = None
 
     # ── Layout ────────────────────────────────────────────────────────────
 
     def compose(self) -> ComposeResult:
         with Vertical(id="root"):
-            yield HeaderBar(id="header")
+            with Vertical(id="header"):
+                with Horizontal(id="header-top"):
+                    yield LogoBox(id="logo")
+                    yield SecurityBar(id="security")
+                yield HeaderBar(id="headerinfo")
+                yield Static(RichRule(style="#1a5c1a", characters="─"), id="header-rule")
+            yield CryptoTicker(id="ticker")
             yield CommandPalette(id="palette")
             with Horizontal(id="body"):
                 yield Sidebar(id="sidebar")
                 with Vertical(id="chat"):
-                    yield MessagePane(
-                        id="pane", highlight=False, markup=True, wrap=True, min_width=10
-                    )
+                    yield MessagePane(id="pane")
                     yield InputBar(id="input")
+                yield InfoPanel(id="infopanel")
 
     # ── Lifecycle ─────────────────────────────────────────────────────────
 
@@ -676,7 +948,7 @@ class DriftApp(App[None]):
 
     @property
     def _header(self) -> HeaderBar:
-        return self.query_one("#header", HeaderBar)
+        return self.query_one("#headerinfo", HeaderBar)
 
     @property
     def _sidebar(self) -> Sidebar:
@@ -690,6 +962,14 @@ class DriftApp(App[None]):
     def _input(self) -> Input:
         return self.query_one("#input", InputBar).input
 
+    @property
+    def _ticker(self) -> CryptoTicker:
+        return self.query_one("#ticker", CryptoTicker)
+
+    @property
+    def _infopanel(self) -> InfoPanel:
+        return self.query_one("#infopanel", InfoPanel)
+
     # ── Background session worker (UI never touches crypto) ────────────────
 
     @work(exclusive=True, group="session")
@@ -697,7 +977,12 @@ class DriftApp(App[None]):
         from cryptography.exceptions import InvalidTag
 
         code = self._contacts[name]["code"]
-        session = Session(self._identity, code, self._relay_url)
+        session = Session(
+            self._identity,
+            code,
+            self._relay_url,
+            on_event=self._emit_crypto,
+        )
         self._session = session
         try:
             await session.connect()
@@ -724,13 +1009,21 @@ class DriftApp(App[None]):
         self._connected = False
         self._header.contact_name = name
         self._header.connected = False
+        # Reset per-session telemetry.
+        self._sent_count = 0
+        self._recv_count = 0
+        self._stealth_count = 0
+        self._stealth_recent = []
+        self._session_start = time.monotonic()
         await self._sidebar.populate(self._contacts, self._active, self._unread)
 
         # Replay this contact's history into a fresh pane.
-        self._pane.clear()
+        await self._pane.clear()
         self._pane.write_separator(f"session opened · {name} · {_now()}")
         for record in self._history.get(name, []):
             self._replay(record)
+        if self._infopanel.display:
+            self._refresh_info()
 
         self._run_session(name)
 
@@ -738,11 +1031,11 @@ class DriftApp(App[None]):
         if record.direction == "in":
             self._pane.write_incoming(record.sender, record.text, record.ts)
         elif record.direction == "out":
-            self._pane.write_outgoing(record.text, record.ts)
+            self._pane.write_outgoing(record.text, record.ts, status="sent")
         else:
             self._pane.write_system(record.text)
 
-    # ── Session events ─────────────────────────────────────────────────────
+    # ── Session + crypto events ────────────────────────────────────────────
 
     @on(SessionUp)
     def _on_session_up(self, event: SessionUp) -> None:
@@ -771,6 +1064,31 @@ class DriftApp(App[None]):
             self.call_later(
                 self._sidebar.populate, self._contacts, self._active, self._unread
             )
+
+    @on(CryptoEvent)
+    def _on_crypto_event(self, event: CryptoEvent) -> None:
+        self._ticker.push(event.ts, event.kind, event.detail)
+        if event.kind == "send":
+            self._sent_count += 1
+            self._note_addr(event.detail)
+        elif event.kind == "recv":
+            self._recv_count += 1
+            self._note_addr(event.detail)
+        if self._infopanel.display:
+            self._refresh_info()
+
+    def _emit_crypto(self, kind: str, detail: str) -> None:
+        """Session worker → UI bridge for non-secret crypto events."""
+        self.post_message(CryptoEvent(kind, detail))
+
+    def _note_addr(self, prefix: str) -> None:
+        self._stealth_count += 1
+        self._stealth_recent.append(prefix)
+        self._stealth_recent = self._stealth_recent[-4:]
+
+    @on(SecurityPillClicked)
+    def _on_security_pill(self, event: SecurityPillClicked) -> None:
+        self._pane.write_system(f"{event.label} — {event.tooltip}")
 
     # ── Contact selection ──────────────────────────────────────────────────
 
@@ -866,10 +1184,15 @@ class DriftApp(App[None]):
 
     async def _send(self, text: str) -> None:
         assert self._session is not None and self._active is not None
-        await self._session.send(text)
-        record = MessageRecord("out", "you", text, _now())
+        line = self._pane.write_outgoing(text, _now(), status="sending")
+        record = MessageRecord("out", "you", text, line._ts)
         self._history.setdefault(self._active, []).append(record)
-        self._pane.write_outgoing(text, record.ts)
+        try:
+            await self._session.send(text)
+        except Exception:
+            line.status = "failed"
+            raise
+        line.status = "sent"
 
     async def _handle_slash(self, text: str) -> None:
         command = text[1:].split()[0].lower() if len(text) > 1 else ""
@@ -881,7 +1204,7 @@ class DriftApp(App[None]):
             case "verify":
                 self._open_verify()
             case "clear":
-                self._pane.clear()
+                await self._pane.clear()
                 if self._active is not None:
                     self._history[self._active] = []
                     self._pane.write_separator(f"cleared · {self._active}")
@@ -907,5 +1230,46 @@ class DriftApp(App[None]):
     def action_do_quit(self) -> None:
         self.exit()
 
+    def action_toggle_log(self) -> None:
+        """Show/hide the crypto-event ticker."""
+        self._ticker.display = not self._ticker.display
+
+    def action_toggle_info(self) -> None:
+        """Slide the session info panel in/out from the right."""
+        panel = self._infopanel
+        if panel.display:
+            panel.display = False
+            return
+        self._refresh_info()
+        panel.display = True
+        panel.styles.opacity = 0.0
+        panel.styles.animate("opacity", value=1.0, duration=0.16)
+
+    def _refresh_info(self) -> None:
+        if self._active is None:
+            self._infopanel.clear_data()
+            return
+        self._infopanel.show_data(
+            code=self._identity.contact_code(),
+            contact=self._active,
+            safety=storage.safety_number(
+                self._identity, self._contacts[self._active]["code"]
+            ),
+            sent=self._sent_count,
+            recv=self._recv_count,
+            stealth=self._stealth_count,
+            recent=list(self._stealth_recent),
+            relay=self._relay_url,
+            uptime=self._fmt_uptime(),
+        )
+
+    def _fmt_uptime(self) -> str:
+        if self._session_start is None:
+            return "—"
+        secs = int(time.monotonic() - self._session_start)
+        return f"{secs // 60:02d}:{secs % 60:02d}"
+
     def _tick_pulse(self) -> None:
         self._header.pulse = not self._header.pulse
+        if self._infopanel.display:
+            self._refresh_info()

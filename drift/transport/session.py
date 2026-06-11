@@ -49,7 +49,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
@@ -78,6 +78,17 @@ def _keypair_from_private(private_bytes: bytes) -> Keypair:
     return Keypair(private_key=priv, public_key=priv.public_key())
 
 
+def _addr_digest(addr: bytes) -> str:
+    """Short, non-secret display digest of a one-time address (already public)."""
+    return f"{addr[:2].hex()}···{addr[-2:].hex()}"
+
+
+# Observable, non-secret transport events for the UI ticker. These report
+# operations the session already performs (no crypto behaviour changes); the
+# only data exposed is the one-time address — which is public on the wire.
+EventHook = Callable[[str, str], None]
+
+
 class Session:
     """
     An encrypted conversation channel: stealth-addressed delivery (Phase 1)
@@ -101,7 +112,13 @@ class Session:
         relay_url: str,
         *,
         ping_interval: float = 30.0,
+        on_event: EventHook | None = None,
     ) -> None:
+        # Optional sink for observable (non-secret) transport events; the UI
+        # passes a callback that re-emits them as typed messages. Never carries
+        # plaintext or key material.
+        self._on_event = on_event
+
         # Contact's public keys — used to address messages *to* them.
         self._their_scan_pub, self._their_spend_pub = Identity.parse_contact_code(
             contact_code
@@ -148,6 +165,11 @@ class Session:
             self._root_secret, self._responder_keypair.public_bytes()
         )
 
+    def _emit(self, kind: str, detail: str = "") -> None:
+        """Report a non-secret transport event to the optional hook."""
+        if self._on_event is not None:
+            self._on_event(kind, detail)
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -184,6 +206,7 @@ class Session:
                 # First to speak in this conversation → become the initiator.
                 self._promote_to_initiator()
             header, ciphertext = ratchet_encrypt(self._ratchet, plaintext.encode())
+            self._emit("ratchet", f"sending chain step · msg #{self._ratchet.send_count}")
 
         ephemeral = Keypair.generate()
         one_time_addr, _ = derive_one_time_address(
@@ -191,6 +214,7 @@ class Session:
             self._their_scan_pub,
             self._their_spend_pub,
         )
+        self._emit("send", _addr_digest(one_time_addr))
         await self._client.send(
             Envelope(
                 to=STEALTH_CHANNEL,
@@ -200,6 +224,7 @@ class Session:
                 ratchet_header=header.to_bytes(),
             )
         )
+        self._emit("erase", "message key erased")
 
     async def messages(self) -> AsyncGenerator[str, None]:
         """
@@ -226,8 +251,11 @@ class Session:
                 continue  # addressed to us but carries no ratchet header
 
             logger.debug("messages: scan matched — decrypting our envelope")
+            self._emit("recv", _addr_digest(envelope.one_time_addr))
             header = Header.from_bytes(envelope.ratchet_header)
             async with self._lock:
                 plaintext = ratchet_decrypt(self._ratchet, header, envelope.ciphertext)
+                self._emit("ratchet", f"receiving chain step · msg #{self._ratchet.recv_count}")
+            self._emit("erase", "message key erased")
             yield plaintext.decode()
         logger.debug("messages: firehose ended — relay connection closed")
