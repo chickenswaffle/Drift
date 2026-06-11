@@ -83,7 +83,10 @@ def init(
 def whoami() -> None:
     """Print your contact code."""
     identity = _require_identity()
-    console.print(identity.contact_code())
+    # Plain print, not console.print: Rich hard-wraps at the terminal width
+    # (80 when piped), and a ~95-char contact code would gain a newline mid-token
+    # — corrupting it for copy-paste / capture. The code must come out as one line.
+    print(identity.contact_code())
 
 
 @app.command()
