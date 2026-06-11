@@ -6,7 +6,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 DRIFT is a terminal-first, end-to-end encrypted messenger with rotating stealth addresses. No accounts, no phone numbers — identity is a locally-generated keypair. The design goal is to hide both message content *and* metadata (who talks to whom, when).
 
-The project is **pre-alpha, Phase 0 in progress**. The phased roadmap matters: each phase is a discrete milestone, and code should not anticipate later phases unless explicitly scoped.
+The project is **pre-alpha**. The phased roadmap matters: each phase is a discrete milestone, and code should not anticipate later phases unless explicitly scoped.
+
+### Phase status
+
+- **Phase 0 — transport** ✅ complete (tagged `v0.1.0`): X25519 ECDH → HKDF → XChaCha20-Poly1305, wired to the relay transport.
+- **Phase 1 — stealth addresses + TUI** ✅ complete (tagged `v0.2.0`, `v0.3.0`): rotating one-time addressing and the Textual TUI.
+- **Phase 2 — Double Ratchet** ✅ complete (tagged `v0.4.0`): forward-secret message encryption.
+- **Phase 3 — Tor + sealed sender** ⏳ next: route over Tor automatically and hide the sender from the relay.
+- **Phase 4 — relay federation** — planned: Redis-backed mailbox + federated relays.
+
+The TUI/storage refactor (component-tree UI over a `drift.storage` model seam) ships as `v0.4.1`.
 
 ## Development setup
 
@@ -42,11 +52,14 @@ Layers are intentionally decoupled — `crypto/` knows nothing about networks; `
 
 ```
 drift/          Python package (client)
-  crypto/       All cryptographic operations — keypair gen, ECDH, HKDF, AEAD
-  transport/    Network layer (Phase 0: stub; Phase 3: Tor)
+  crypto/       All cryptographic operations — keypair gen, ECDH, HKDF, AEAD,
+                stealth addressing, Double Ratchet
+  transport/    Network layer (relay-backed; Phase 3: Tor)
   relay/        Relay-protocol client stub (currently empty)
-  ui/           Textual TUI (Phase 0 placeholder — app.py not yet created)
-  cli.py        Typer CLI; config lives in ~/.config/drift/
+  ui/           Textual TUI — component-tree app in app.py (see its module docstring)
+  storage.py    Local persistence model — identity + contacts under ~/.config/drift/;
+                the seam the UI talks to instead of crypto
+  cli.py        Typer CLI; a thin view over drift.storage
 relay/          Reference relay server — FastAPI + in-memory mailbox
 tests/
   unit/         Pure unit tests against drift.crypto (no network)
@@ -65,7 +78,7 @@ Phase 0 encryption: `X25519 ECDH → HKDF-SHA256 → XChaCha20-Poly1305`. The `e
 
 ### Stealth addresses (`drift/crypto/stealth.py`)
 
-Phase 1 placeholder. The protocol math is fully documented in the file. The key insight: every message derives a unique one-time address via `A_once = spend_pub + SHA256(ECDH(r, scan_pub))·G`. Only the recipient — using their private scan key — can detect it. Implementing this requires elliptic-curve point addition, which X25519 doesn't expose natively; the file notes `ristretto255` or `pure25519` as viable options.
+Implemented (Phase 1). Every message derives a unique one-time address via `A_once = spend_point(spend_pub) + SHA256(ECDH(r, scan_pub))·G`. Only the recipient — using their private scan key — can detect it via a constant-time compare. The elliptic-curve point addition that X25519 doesn't expose natively is done with libsodium's ed25519 group operations (Elligator map to a curve point, `crypto_core_ed25519_add`, scalar mult). Note: the module docstring still self-describes as a placeholder and is stale relative to the implementation.
 
 ### Relay (`relay/server.py`)
 

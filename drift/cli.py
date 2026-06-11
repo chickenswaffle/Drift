@@ -2,20 +2,22 @@
 drift.cli — command-line interface
 
 Commands:
-  drift init              generate a new identity
-  drift whoami            print your contact code
-  drift add <name> <code> save a contact
-  drift verify <name>     display safety number for out-of-band verification
-  drift chat <name>       open a conversation (Phase 0: basic, Phase 3: Tor)
-  drift relay             start a local relay (for dev / self-hosted use)
+  drift init               generate a new identity
+  drift whoami             print your contact code
+  drift add <name> <code>  save a contact
+  drift contacts           list saved contacts
+  drift verify <name>      display safety number for out-of-band verification
+  drift chat [name]        open the TUI client (optionally focused on a contact)
+  drift version            print the DRIFT version
+
+The CLI is a thin "view" over drift.storage (the model). It owns no on-disk
+state of its own and never performs crypto directly.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import sys
-from pathlib import Path
 from typing import Any
 
 import typer
@@ -23,8 +25,9 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
 
-from drift import __version__
+from drift import __version__, storage
 from drift.crypto import Identity
+from drift.storage import StorageError
 
 app = typer.Typer(
     name="drift",
@@ -34,30 +37,13 @@ app = typer.Typer(
 )
 console = Console()
 
-# Default config directory: ~/.config/drift/
-CONFIG_DIR = Path.home() / ".config" / "drift"
-IDENTITY_FILE = CONFIG_DIR / "identity.json"
-CONTACTS_FILE = CONFIG_DIR / "contacts.json"
 
-
-def _load_identity() -> Identity:
-    if not IDENTITY_FILE.exists():
+def _require_identity() -> Identity:
+    try:
+        return storage.load_identity()
+    except StorageError:
         console.print("[red]No identity found. Run [bold]drift init[/bold] first.[/red]")
-        raise typer.Exit(1)
-    return Identity.load(IDENTITY_FILE)
-
-
-def _load_contacts() -> dict[str, Any]:
-    if not CONTACTS_FILE.exists():
-        return {}
-    result: dict[str, Any] = json.loads(CONTACTS_FILE.read_text())
-    return result
-
-
-def _save_contacts(contacts: dict[str, Any]) -> None:
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    CONTACTS_FILE.write_text(json.dumps(contacts, indent=2))
-    CONTACTS_FILE.chmod(0o600)
+        raise typer.Exit(1) from None
 
 
 # ---------------------------------------------------------------------------
@@ -69,15 +55,15 @@ def init(
     force: bool = typer.Option(False, "--force", help="Overwrite existing identity"),
 ) -> None:
     """Generate a new DRIFT identity (keypairs stored locally)."""
-    if IDENTITY_FILE.exists() and not force:
+    identity = Identity.generate()
+    try:
+        storage.save_identity(identity, overwrite=force)
+    except StorageError:
         console.print(
             "[yellow]Identity already exists.[/yellow] "
             "Use --force to regenerate (this is destructive)."
         )
-        raise typer.Exit(1)
-
-    identity = Identity.generate()
-    identity.save(IDENTITY_FILE)
+        raise typer.Exit(1) from None
 
     code = identity.contact_code()
     console.print()
@@ -88,7 +74,7 @@ def init(
         border_style="green",
     ))
     console.print()
-    console.print("[dim]Keys are stored in:[/dim]", str(IDENTITY_FILE))
+    console.print("[dim]Keys are stored in:[/dim]", str(storage.IDENTITY_FILE))
     console.print("[dim]They never leave this machine.[/dim]")
     console.print()
 
@@ -96,7 +82,7 @@ def init(
 @app.command()
 def whoami() -> None:
     """Print your contact code."""
-    identity = _load_identity()
+    identity = _require_identity()
     console.print(identity.contact_code())
 
 
@@ -107,25 +93,21 @@ def add(
 ) -> None:
     """Save a contact by their contact code."""
     try:
-        scan_pub, spend_pub = Identity.parse_contact_code(code)
-    except ValueError as e:
-        console.print(f"[red]Invalid contact code:[/red] {e}")
+        storage.add_contact(name, code)
+    except StorageError as e:
+        console.print(f"[red]Could not add contact:[/red] {e}")
         raise typer.Exit(1) from None
-
-    contacts = _load_contacts()
-    contacts[name] = {"code": code}
-    _save_contacts(contacts)
     console.print(f"[green]✓[/green] Added contact [bold]{name}[/bold]")
 
 
 @app.command()
 def contacts() -> None:
     """List your saved contacts."""
-    c = _load_contacts()
-    if not c:
+    saved = storage.load_contacts()
+    if not saved:
         console.print("[dim]No contacts yet. Use [bold]drift add[/bold] to add one.[/dim]")
         return
-    for name, data in c.items():
+    for name, data in saved.items():
         console.print(f"  [bold]{name}[/bold]  {data['code'][:40]}···")
 
 
@@ -140,28 +122,17 @@ def verify(
     They should match on both sides. If they don't, abort — you may be
     talking to the wrong person.
     """
-    identity = _load_identity()
-    contacts_data = _load_contacts()
+    identity = _require_identity()
+    saved = storage.load_contacts()
 
-    if name not in contacts_data:
+    if name not in saved:
         console.print(
             f"[red]Unknown contact:[/red] {name}. "
             f"Run [bold]drift add {name} <code>[/bold] first."
         )
         raise typer.Exit(1)
 
-    their_code = contacts_data[name]["code"]
-    their_scan, _ = Identity.parse_contact_code(their_code)
-    my_scan = identity.scan_keypair.public_bytes()
-
-    # Safety number: hash of both scan keys (sorted so it's symmetric)
-    import hashlib
-    combined = b"drift-safety-v0" + b"".join(sorted([my_scan, their_scan]))
-    digest = hashlib.sha256(combined).digest()
-
-    # Encode as 4 English-ish words from a tiny wordlist (proper BIP39 in Phase 1)
-    # For now: 4 groups of 2 decimal digits + one hex nibble, easy to read aloud
-    words = "-".join(f"{digest[i*4]:02x}{digest[i*4+1]:02x}" for i in range(4))
+    words = storage.safety_number(identity, saved[name]["code"])
 
     console.print()
     console.print(Panel(
@@ -175,31 +146,44 @@ def verify(
 
 @app.command()
 def chat(
-    name: str = typer.Argument(..., help="Contact name to message"),
+    name: str = typer.Argument(None, help="Contact to open (omit for the full client)"),
     relay: str = typer.Option("ws://localhost:8765", "--relay", help="Relay WebSocket URL"),
     no_tui: bool = typer.Option(False, "--no-tui", help="Plain-text mode (no Textual TUI)"),
 ) -> None:
     """
-    Open a conversation with a contact.
+    Open the DRIFT chat client.
 
     Phase 1: stealth addresses with rotating one-time addressing.
+    Phase 2: Double Ratchet content encryption.
     Phase 3: routes over Tor automatically.
     """
-    identity = _load_identity()
-    contacts_data = _load_contacts()
+    identity = _require_identity()
+    saved = storage.load_contacts()
 
-    if name not in contacts_data:
+    if name is not None and name not in saved:
         console.print(f"[red]Unknown contact:[/red] {name}")
         raise typer.Exit(1)
 
-    their_code = contacts_data[name]["code"]
-
     if no_tui:
-        asyncio.run(_chat_async(name, identity, their_code, relay))
-    else:
-        from drift.ui.app import DriftApp
-        DriftApp(identity, name, their_code, relay).run()
+        if name is None:
+            console.print("[red]--no-tui requires a contact name.[/red]")
+            raise typer.Exit(1)
+        asyncio.run(_chat_async(name, identity, saved[name]["code"], relay))
+        return
 
+    from drift.ui.app import DriftApp
+    DriftApp(identity, dict(saved), relay, active=name).run()
+
+
+@app.command()
+def version() -> None:
+    """Print the DRIFT version."""
+    console.print(f"drift v{__version__}")
+
+
+# ---------------------------------------------------------------------------
+# Headless chat loop (--no-tui) — for CI and environments without a TTY
+# ---------------------------------------------------------------------------
 
 async def _chat_async(
     name: str, identity: Identity, contact_code: str, relay_url: str
@@ -224,7 +208,11 @@ async def _chat_async(
                         break
                     text = line.rstrip("\n")
                     if text:
-                        await session.send(text)
+                        try:
+                            await session.send(text)
+                        except Exception as exc:  # noqa: BLE001
+                            console.print(f"[red]send error:[/red] {exc}")
+                            continue
                         console.print(f"[bold green]you:[/bold green] {text}")
             except (KeyboardInterrupt, asyncio.CancelledError):
                 pass
@@ -234,7 +222,7 @@ async def _chat_async(
                     await recv_task
                 except (asyncio.CancelledError, InvalidTag):
                     pass
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         console.print(f"[red]Connection error:[/red] {exc}")
 
 
@@ -249,12 +237,6 @@ async def _receive_loop(session: Any, name: str) -> None:
             "\n[red]Authentication failure — message rejected "
             "(tampered or wrong key).[/red]"
         )
-
-
-@app.command()
-def version() -> None:
-    """Print the DRIFT version."""
-    console.print(f"drift v{__version__}")
 
 
 if __name__ == "__main__":
