@@ -16,6 +16,7 @@ from drift.crypto import Identity
 from drift.ui.app import (
     _SECURITY,
     AddContactModal,
+    BurnEvent,
     CommandPalette,
     CryptoEvent,
     CryptoTicker,
@@ -221,3 +222,105 @@ async def test_outgoing_line_carries_a_status_glyph() -> None:
         line = pilot.app._pane.write_outgoing("hi", "00:00:00", status="sent")
         await pilot.pause()
         assert "✓" in str(line.render())
+
+
+# --------------------------------------------------------------------------- #
+# Burn feature
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.asyncio
+async def test_burn_slash_no_session_writes_system_message() -> None:
+    async with _app(with_contacts=True).run_test() as pilot:
+        # No active session — /burn should surface a friendly message, not crash.
+        await pilot.app._handle_slash("/burn")
+        await pilot.pause()
+        children = list(pilot.app._pane.children)
+        rendered = " ".join(str(c.render()) for c in children)
+        assert "burn" in rendered.lower() or "session" in rendered.lower()
+
+
+@pytest.mark.asyncio
+async def test_burn_event_conversation_clears_pane() -> None:
+    async with _app_active().run_test() as pilot:
+        app = pilot.app
+        # Populate pane with a few messages.
+        app._pane.write_incoming("alice", "hello", "12:00:00")
+        app._pane.write_incoming("alice", "world", "12:00:01")
+        await pilot.pause()
+        # Post a conversation BurnEvent.
+        app.post_message(BurnEvent("alice", "conversation", None))
+        await pilot.pause()
+        await pilot.pause()  # give the async handler time to clear + remount
+        children = list(app._pane.children)
+        rendered = " ".join(str(c.render()) for c in children)
+        assert "burned" in rendered.lower()
+        # Original messages should be gone — history cleared.
+        assert app._history.get("alice", []) == []
+
+
+@pytest.mark.asyncio
+async def test_burn_event_message_scope_writes_system_line() -> None:
+    async with _app_active().run_test() as pilot:
+        app = pilot.app
+        app._pane.write_incoming("alice", "hello", "12:00:00")
+        await pilot.pause()
+        app.post_message(BurnEvent("alice", "message", "abc123=="))
+        await pilot.pause()
+        rendered = " ".join(str(c.render()) for c in app._pane.children)
+        assert "burned" in rendered.lower()
+
+
+@pytest.mark.asyncio
+async def test_burn_event_for_other_contact_is_ignored() -> None:
+    """A BurnEvent for a different contact must not touch the active pane."""
+    async with _app_active().run_test() as pilot:
+        app = pilot.app
+        app._pane.write_incoming("alice", "secret", "12:00:00")
+        await pilot.pause()
+        count_before = len(list(app._pane.children))
+        # Post burn for a different contact.
+        app.post_message(BurnEvent("bob", "conversation", None))
+        await pilot.pause()
+        await pilot.pause()
+        assert len(list(app._pane.children)) == count_before
+
+
+@pytest.mark.asyncio
+async def test_burn_5m_schedule_and_cancel() -> None:
+    async with _app_active().run_test() as pilot:
+        app = pilot.app
+        # Schedule but immediately cancel.
+        app._schedule_auto_burn(300)
+        await pilot.pause()
+        assert app._burn_timer is not None
+        app._cancel_auto_burn()
+        await pilot.pause()
+        assert app._burn_timer is None
+        rendered = " ".join(str(c.render()) for c in app._pane.children)
+        assert "cancelled" in rendered.lower()
+
+
+@pytest.mark.asyncio
+async def test_burn_cancel_with_no_timer_writes_system() -> None:
+    async with _app_active().run_test() as pilot:
+        app = pilot.app
+        assert app._burn_timer is None
+        app._cancel_auto_burn()
+        await pilot.pause()
+        rendered = " ".join(str(c.render()) for c in app._pane.children)
+        assert "no auto-burn" in rendered.lower()
+
+
+@pytest.mark.asyncio
+async def test_burn_slash_parse_seconds() -> None:
+    assert DriftApp._parse_burn_duration("30s") == 30
+    assert DriftApp._parse_burn_duration("1m") == 60
+    assert DriftApp._parse_burn_duration("5m") == 300
+    assert DriftApp._parse_burn_duration("invalid") is None
+    assert DriftApp._parse_burn_duration("") is None
+
+
+def test_help_modal_mentions_best_effort() -> None:
+    ref = HelpModal._REFERENCE
+    assert "best-effort" in ref
+    assert "/burn" in ref

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from collections import defaultdict
 from typing import Any
@@ -208,6 +209,78 @@ async def send_message(envelope: dict[str, Any]) -> JSONResponse:
     _prune_recent(to_addr)
 
     return JSONResponse({"ok": True, "delivered": delivered})
+
+
+# HMAC-SHA256 token is 32 bytes = 64 lowercase hex characters.
+_BURN_TOKEN_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+@app.post("/burn")
+async def burn_request(body: dict[str, Any]) -> JSONResponse:
+    """
+    POST a burn request to erase messages from the relay buffer and notify
+    connected clients via a tombstone.
+
+    Expected body:
+        {
+            "token":      "<64 hex chars>",        // HMAC-SHA256 burn token
+            "scope":      "message"|"conversation",
+            "channel":    "<channel name>",
+            "message_id": "<base64 addr>"          // required for scope=message
+        }
+
+    The relay does NOT verify the HMAC (it has no shared secret). Clients
+    verify the token end-to-end before honouring the tombstone.
+
+    NOTE: The stealth firehose is shared by all users; a conversation-scope
+    burn clears all recent traffic on the channel, not just the requesting
+    pair's messages. The 30 s RECENT_TTL limits the blast radius.
+    (Phase 4 will add per-recipient storage.)
+    """
+    token = body.get("token", "")
+    scope = body.get("scope", "")
+    channel = body.get("channel", "")
+    message_id: str | None = body.get("message_id") or None
+
+    if not isinstance(token, str) or not _BURN_TOKEN_RE.match(token):
+        return JSONResponse({"error": "token must be 64 lowercase hex characters"}, status_code=400)
+    if scope not in ("message", "conversation"):
+        return JSONResponse({"error": "scope must be 'message' or 'conversation'"}, status_code=400)
+    if not channel:
+        return JSONResponse({"error": "channel is required"}, status_code=400)
+    if scope == "message" and not message_id:
+        return JSONResponse({"error": "message_id required for scope=message"}, status_code=400)
+
+    # Erase matching blobs from the replay buffer.
+    if scope == "conversation":
+        _recent[channel] = []
+    else:
+        _recent[channel] = [
+            e for e in _recent[channel] if e.get("addr") != message_id
+        ]
+
+    # Broadcast a tombstone (with token so recipients can verify) to all
+    # live subscribers. Token is NOT written to server logs below.
+    tombstone: dict[str, Any] = {
+        "type": "BURNED",
+        "scope": scope,
+        "token": token,
+        "ts": int(time.time()),
+    }
+    if message_id:
+        tombstone["message_id"] = message_id
+
+    subscribers = _subscribers.get(channel, set())
+    notified = 0
+    for ws in list(subscribers):
+        try:
+            await ws.send_text(json.dumps(tombstone))
+            notified += 1
+        except Exception:
+            subscribers.discard(ws)
+
+    logger.info("burn request processed channel=%.12s… scope=%s", channel, scope)
+    return JSONResponse({"ok": True, "notified": notified})
 
 
 @app.get("/health")

@@ -10,6 +10,25 @@ DRIFT uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Burn requests** — a signed control message that erases messages from the
+  relay buffer and both clients.
+  - `drift/crypto/burn.py` — HMAC-SHA256 token generation and constant-time
+    verification; tokens are bound to the conversation's static ECDH output
+    via HKDF with `info=b"drift-burn-v1"` (domain-separated from ratchet keys).
+  - `POST /burn` relay endpoint — validates token shape (64 hex chars), deletes
+    matching blobs from the replay buffer, and broadcasts a tombstone (including
+    token) to live subscribers so both clients update immediately.  Server logs
+    record only `"burn request processed"` — no token or content details.
+  - `Session.burn_conversation()` / `Session.burn_last_message()` — initiate a
+    burn from the transport layer; the relay echoes the tombstone back to all
+    subscribers.  Incoming tombstones are verified before the `on_burn` hook
+    fires; unverified tombstones are silently dropped.
+  - TUI slash commands: `/burn` (full conversation), `/burn last` (last sent
+    message), `/burn Nm` / `/burn Ns` (scheduled auto-burn), `/burn cancel`.
+  - Help modal updated with burn command reference and the honest UX note:
+    *"Burn requests are best-effort — a non-compliant client can ignore them."*
+  - 29 new unit tests covering token generation/verification, relay validation,
+    relay buffer mutation, and all TUI burn paths.
 - **Header lock indicator** — a prominent boxed padlock left of the security
   pills that tracks the live channel state: 🔓 dim red (unsecured), 🔒 green
   (E2E + ratchet active), 🔒⁺ green with a cyan superscript (maximum security,
