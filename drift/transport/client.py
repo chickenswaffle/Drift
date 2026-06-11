@@ -38,6 +38,16 @@ import websockets
 from websockets.exceptions import ConnectionClosed
 
 
+def _ws_to_http(url: str) -> str:
+    """ws:// → http://, wss:// → https:// (the relay's HTTP base)."""
+    return url.replace("wss://", "https://", 1).replace("ws://", "http://", 1)
+
+
+def _http_to_ws(url: str) -> str:
+    """http:// → ws://, https:// → wss:// (a federation peer's WS base)."""
+    return url.replace("https://", "wss://", 1).replace("http://", "ws://", 1).rstrip("/")
+
+
 class RelayError(Exception):
     """Raised when the relay rejects a request or the connection is lost."""
 
@@ -91,8 +101,14 @@ class RelayClient:
             # Block until a message arrives (or connection drops)
             envelope = await client.receive()
 
-    ``relay_url`` is the WebSocket base URL (``ws://…`` or ``wss://…``).
-    The HTTP base URL is derived automatically.
+    ``relay_url`` is the WebSocket base URL (``ws://…`` or ``wss://…``). It may
+    be a comma-separated list of relays (Phase 4 federation): the client tries
+    them in order on connect and, if the active relay drops mid-conversation,
+    automatically fails over to the next. After connecting it also fetches the
+    relay's federation peer list and folds those in as extra failover targets,
+    so the mesh keeps you online even as individual nodes come and go.
+
+    The HTTP base URL is derived automatically from whichever relay is active.
     """
 
     def __init__(
@@ -103,8 +119,16 @@ class RelayClient:
         ping_interval: float = 30.0,
         socks_proxy: tuple[str, int] | None = None,
     ) -> None:
-        self._ws_url = f"{relay_url}/ws/{listen_addr}"
-        self._http_base = relay_url.replace("ws://", "http://").replace("wss://", "https://")
+        # A relay list (Phase 4). A single URL is just a one-element list, so the
+        # non-federated path is unchanged. Trailing slashes are trimmed so the
+        # derived ws/http URLs are well-formed.
+        self._relays: list[str] = [
+            u.strip().rstrip("/") for u in relay_url.split(",") if u.strip()
+        ]
+        if not self._relays:
+            raise RelayError("no relay URL provided")
+        self._listen_addr = listen_addr
+        self._active_idx = 0
         self._ping_interval = ping_interval
         # Optional SOCKS5 proxy (host, port) — when set, every WS/HTTP byte is
         # routed through it (Phase 3: a Tor circuit). None → direct connect.
@@ -112,44 +136,152 @@ class RelayClient:
 
         self._ws: Any = None
         self._http: httpx.AsyncClient | None = None
-        # None sentinel signals a clean disconnect to receive()
+        # None sentinel signals a disconnect to receive()
         self._queue: asyncio.Queue[Envelope | BurnFrame | None] = asyncio.Queue()
         self._listener: asyncio.Task[None] | None = None
         self._pinger: asyncio.Task[None] | None = None
         self._connected = False
+        # Set by close(): suppresses failover on a *deliberate* shutdown so a
+        # clean close still surfaces as "connection closed", not a reconnect.
+        self._closing = False
+
+    # -- active-relay derived URLs --------------------------------------
+
+    @property
+    def _active_relay(self) -> str:
+        return self._relays[self._active_idx]
+
+    @property
+    def _ws_url(self) -> str:
+        return f"{self._active_relay}/ws/{self._listen_addr}"
+
+    @property
+    def _http_base(self) -> str:
+        return _ws_to_http(self._active_relay)
+
+    @property
+    def relays(self) -> list[str]:
+        """All relays known for failover (seeds + discovered peers)."""
+        return list(self._relays)
+
+    @property
+    def node_count(self) -> int:
+        """How many relay nodes are reachable for this session."""
+        return len(self._relays)
+
+    @property
+    def is_onion(self) -> bool:
+        """True when the active relay is a Tor onion service."""
+        return ".onion" in self._active_relay
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
     async def connect(self) -> None:
-        """Open the WebSocket subscription and start background tasks."""
+        """
+        Subscribe to a relay, trying each known relay in order until one works.
+
+        Raises ``RelayError`` only if *every* relay is unreachable. After a
+        successful connect it fetches the relay's federation peers and folds
+        them into the failover list.
+        """
+        last_exc: Exception | None = None
+        for idx in range(len(self._relays)):
+            try:
+                await self._open(idx)
+            except Exception as exc:  # noqa: BLE001 — try the next relay
+                last_exc = exc
+                continue
+            await self._discover_peers()
+            return
+        raise RelayError(
+            f"could not connect to any relay {self._relays}: {last_exc}"
+        )
+
+    async def _dial(self, ws_url: str) -> Any:
+        """Open one WebSocket (direct, or through the SOCKS5/Tor proxy)."""
         if self._socks_proxy is not None:
-            # Route HTTP through the same SOCKS5 proxy as the WebSocket.
+            from drift.transport.tor import open_socks_websocket
+
             host, port = self._socks_proxy
-            self._http = httpx.AsyncClient(proxy=f"socks5://{host}:{port}")
+            return await open_socks_websocket(ws_url, host, port)
+        return await websockets.connect(ws_url)
+
+    async def _open(self, idx: int) -> None:
+        """
+        Connect to relay ``idx`` and start its listener + pinger.
+
+        On failure the partially-built HTTP client is cleaned up and the error
+        propagates so the caller can try the next relay.
+        """
+        url = self._relays[idx]
+        ws_url = f"{url}/ws/{self._listen_addr}"
+        if self._socks_proxy is not None:
+            host, port = self._socks_proxy
+            http = httpx.AsyncClient(proxy=f"socks5://{host}:{port}")
         else:
-            self._http = httpx.AsyncClient()
+            http = httpx.AsyncClient()
         try:
-            if self._socks_proxy is not None:
-                from drift.transport.tor import open_socks_websocket
-
-                host, port = self._socks_proxy
-                self._ws = await open_socks_websocket(self._ws_url, host, port)
-            else:
-                self._ws = await websockets.connect(self._ws_url)
+            ws = await self._dial(ws_url)
         except Exception as exc:
-            await self._http.aclose()
-            self._http = None
-            raise RelayError(f"could not connect to relay at {self._ws_url}: {exc}") from exc
+            await http.aclose()
+            raise RelayError(f"could not connect to relay at {ws_url}: {exc}") from exc
 
+        self._http = http
+        self._ws = ws
+        self._active_idx = idx
         self._connected = True
         self._listener = asyncio.create_task(self._listen(), name="relay-listener")
         self._pinger = asyncio.create_task(self._keepalive(), name="relay-pinger")
 
-    async def close(self) -> None:
-        """Cancel background tasks and close connections."""
-        self._connected = False
+    async def _discover_peers(self) -> None:
+        """
+        Fetch the relay's federation peer list and add them as failover targets.
+
+        Best-effort: a relay without federation, or any error, simply leaves the
+        relay list as-is.
+        """
+        if self._http is None:
+            return
+        try:
+            resp = await self._http.get(f"{self._http_base}/federation/peers", timeout=3.0)
+            data = resp.json()
+        except Exception:  # noqa: BLE001 — discovery is optional
+            return
+        if not isinstance(data, dict):
+            return
+        for peer in data.get("peers", []):
+            if not isinstance(peer, str):
+                continue
+            ws_peer = _http_to_ws(peer)
+            if ws_peer not in self._relays:
+                self._relays.append(ws_peer)
+
+    async def _failover(self) -> bool:
+        """
+        Reconnect to the next working relay after the active one dropped.
+
+        Returns True if a standby relay accepted us, False if none did (or there
+        is only one relay, i.e. no federation). Tears the dead connection down
+        before dialling, so we never leak the old socket/pinger.
+        """
+        if len(self._relays) <= 1:
+            return False
+        await self._teardown_active()
+        start = self._active_idx
+        n = len(self._relays)
+        for offset in range(1, n):
+            idx = (start + offset) % n
+            try:
+                await self._open(idx)
+            except Exception:  # noqa: BLE001, S112 — try the next standby
+                continue
+            return True
+        return False
+
+    async def _teardown_active(self) -> None:
+        """Cancel tasks and close the current relay connection (for failover)."""
         for task in (self._pinger, self._listener):
             if task and not task.done():
                 task.cancel()
@@ -158,11 +290,20 @@ class RelayClient:
                 except asyncio.CancelledError:
                     pass
         if self._ws is not None:
-            await self._ws.close()
+            try:
+                await self._ws.close()
+            except Exception:  # noqa: BLE001, S110 — socket already dead
+                pass
             self._ws = None
         if self._http is not None:
             await self._http.aclose()
             self._http = None
+
+    async def close(self) -> None:
+        """Cancel background tasks and close connections."""
+        self._closing = True
+        self._connected = False
+        await self._teardown_active()
 
     # ------------------------------------------------------------------
     # Public interface
@@ -203,14 +344,21 @@ class RelayClient:
         """
         Block until the next message envelope or burn tombstone arrives.
 
-        Raises ``RelayError`` if the relay connection has been closed.
+        If the active relay drops, transparently fails over to the next relay in
+        the federation and keeps reading. Raises ``RelayError`` only when the
+        connection was deliberately closed or every relay is exhausted.
         """
         if not self._connected and self._queue.empty():
             raise RelayError("not connected — call connect() first")
-        item = await self._queue.get()
-        if item is None:
-            raise RelayError("relay connection closed")
-        return item
+        while True:
+            item = await self._queue.get()
+            if item is None:
+                # The listener signalled a disconnect. Unless we're shutting
+                # down, try to fail over to a standby relay and keep going.
+                if not self._closing and await self._failover():
+                    continue
+                raise RelayError("relay connection closed")
+            return item
 
     async def post_burn(
         self,
