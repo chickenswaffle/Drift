@@ -23,22 +23,40 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import time
 from collections import defaultdict
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any
 from uuid import uuid4
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 
+from relay.federation import ANNOUNCE_TTL, DEFAULT_DEDUP_SIZE, Federation
+
 logger = logging.getLogger("drift.relay")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    """On startup: load known peers (peers.json + DRIFT_PEERS) and announce."""
+    federation.load_peers()
+    if federation.peers:
+        logger.info("federation: %d known peer(s): %s", len(federation.peers),
+                    ", ".join(federation.peers))
+        await federation.announce_self()
+    yield
+
 
 app = FastAPI(
     title="DRIFT relay",
     description="Dumb message relay — routes ciphertext, reads nothing.",
     version="0.1.0",
+    lifespan=_lifespan,
 )
 
 # ---------------------------------------------------------------------------
@@ -78,6 +96,10 @@ _recent: dict[str, list[dict[str, Any]]] = defaultdict(list)
 RECENT_TTL = 30.0    # seconds — covers the subscribe race + brief late-join
 RECENT_MAX = 500     # envelopes per channel
 
+# Max simultaneous WebSocket subscribers, across all channels. None = unlimited
+# (the full relay). The Pi-Zero node sets this to a small number (see node.py).
+MAX_CONNECTIONS: int | None = None
+
 
 def _prune_recent(channel: str) -> None:
     """Drop expired / overflow envelopes from a channel's replay buffer."""
@@ -86,6 +108,55 @@ def _prune_recent(channel: str) -> None:
     if len(buf) > RECENT_MAX:
         buf = buf[-RECENT_MAX:]
     _recent[channel] = buf
+
+
+def _connection_count() -> int:
+    """Total live WebSocket subscribers across every channel."""
+    return sum(len(v) for v in _subscribers.values())
+
+
+# ---------------------------------------------------------------------------
+# Federation (Phase 4a)
+#
+# The relay is now one node of a gossip mesh. ``_deliver_local`` is the single
+# place a blob is fanned out to this node's subscribers + replay buffer; both
+# the /send path and inbound gossip from peers funnel through it, so a federated
+# blob is indistinguishable from a directly-submitted one once it lands here.
+# ---------------------------------------------------------------------------
+
+
+async def _deliver_local(envelope: dict[str, Any]) -> int:
+    """Fan a blob out to local subscribers and record it in the replay buffer."""
+    to_addr = envelope.get("to", "")
+    if not to_addr:
+        return 0
+    # Stamp a *local* receive time so the replay-buffer TTL works regardless of
+    # how the blob arrived. A gossiped blob carries the origin relay's _relay_ts
+    # (or none at all); each node times its own buffer from when it saw the blob.
+    envelope.setdefault("_relay_ts", time.time())
+    subscribers = _subscribers.get(to_addr, set())
+    delivered = 0
+    for ws in list(subscribers):
+        try:
+            await ws.send_text(json.dumps(envelope))
+            delivered += 1
+        except Exception:
+            subscribers.discard(ws)
+    _recent[to_addr].append(envelope)
+    _prune_recent(to_addr)
+    return delivered
+
+
+# This node's externally-reachable base URL (so peers can re-announce it and we
+# never gossip a blob back to ourselves). Set via DRIFT_SELF_URL.
+SELF_URL = os.environ.get("DRIFT_SELF_URL") or None
+
+federation = Federation(
+    self_url=SELF_URL,
+    peers_file=os.environ.get("DRIFT_PEERS_FILE", "peers.json"),
+    dedup_size=DEFAULT_DEDUP_SIZE,
+    deliver=_deliver_local,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -103,6 +174,15 @@ async def websocket_endpoint(websocket: WebSocket, listen_addr: str) -> None:
     The relay doesn't care what the address means — it's just a routing key.
     """
     await websocket.accept()
+
+    # Resource cap for low-power nodes: refuse new subscribers past the limit.
+    # The full relay leaves MAX_CONNECTIONS=None (unlimited).
+    if MAX_CONNECTIONS is not None and _connection_count() >= MAX_CONNECTIONS:
+        await websocket.send_text(json.dumps({"type": "error", "error": "node at capacity"}))
+        await websocket.close(code=1013)  # 1013 = "try again later"
+        logger.info("Refused subscriber addr=%.12s… (at capacity %d)", listen_addr, MAX_CONNECTIONS)
+        return
+
     _subscribers[listen_addr].add(websocket)
 
     logger.info(
@@ -190,25 +270,61 @@ async def send_message(envelope: dict[str, Any]) -> JSONResponse:
         record["hdr"] = envelope["hdr"]
 
     envelope = record
-    subscribers = _subscribers.get(to_addr, set())
-    delivered = 0
 
-    for ws in list(subscribers):
-        try:
-            await ws.send_text(json.dumps(envelope))
-            delivered += 1
-        except Exception:
-            subscribers.discard(ws)
+    # Replicate to the federation FIRST so the blob survives this node dying.
+    # submit() floods peers at the starting TTL and reports how many accepted;
+    # we want at least min_replicas before acknowledging the client (best-effort
+    # — a solo relay with no peers simply replicates to 0 and still serves).
+    replicated = await federation.submit(envelope)
 
-    # Always record into the replay buffer so a peer that subscribes a moment
-    # later (or was briefly offline) still receives this. Delivery to live
-    # sockets above is the fast path; the buffer is the safety net. Both are
-    # needed because the sender is itself a live subscriber on the firehose,
-    # so `delivered` is never a reliable signal that the *recipient* got it.
-    _recent[to_addr].append(envelope)
-    _prune_recent(to_addr)
+    # Then fan out to this node's own subscribers + replay buffer. The buffer is
+    # the safety net for a peer that subscribes a moment later; `delivered` is
+    # never a reliable "recipient got it" signal because the sender is itself a
+    # live subscriber on the shared firehose.
+    delivered = await _deliver_local(envelope)
 
-    return JSONResponse({"ok": True, "delivered": delivered})
+    return JSONResponse({"ok": True, "delivered": delivered, "replicated": replicated})
+
+
+# ---------------------------------------------------------------------------
+# Federation endpoints (Phase 4a)
+# ---------------------------------------------------------------------------
+
+@app.post("/federation/gossip")
+async def federation_gossip(body: dict[str, Any]) -> JSONResponse:
+    """
+    Receive a blob gossiped by a peer relay.
+
+    Body: ``{"envelope": {...}, "ttl": <int>}``. Deduped by content id; a blob
+    we've already seen is dropped silently (``accepted: false``). A fresh blob
+    is delivered locally and forwarded onward at ttl-1.
+    """
+    envelope = body.get("envelope")
+    ttl = int(body.get("ttl", 0))
+    if not isinstance(envelope, dict) or not envelope.get("to"):
+        return JSONResponse({"error": "missing envelope"}, status_code=400)
+    accepted = await federation.handle_gossip(envelope, ttl)
+    return JSONResponse({"ok": True, "accepted": accepted})
+
+
+@app.post("/federation/announce")
+async def federation_announce(body: dict[str, Any]) -> JSONResponse:
+    """
+    A relay announces itself. We record it as a peer and re-announce onward
+    (capped at 2 hops). Body: ``{"url": "<relay base url>", "ttl": <int>}``.
+    """
+    url = body.get("url", "")
+    ttl = int(body.get("ttl", ANNOUNCE_TTL))
+    if not isinstance(url, str) or not url:
+        return JSONResponse({"error": "missing url"}, status_code=400)
+    learned = await federation.handle_announce(url, ttl)
+    return JSONResponse({"ok": True, "learned": learned, "peers": federation.peers})
+
+
+@app.get("/federation/peers")
+async def federation_peers() -> JSONResponse:
+    """Public peer list, used by clients and new relays to bootstrap."""
+    return JSONResponse({"peers": federation.peers})
 
 
 # HMAC-SHA256 token is 32 bytes = 64 lowercase hex characters.
@@ -287,8 +403,9 @@ async def burn_request(body: dict[str, Any]) -> JSONResponse:
 async def health() -> JSONResponse:
     return JSONResponse({
         "status": "ok",
-        "subscriptions": sum(len(v) for v in _subscribers.values()),
+        "subscriptions": _connection_count(),
         "recent": sum(len(v) for v in _recent.values()),
+        "federation": federation.status(),
     })
 
 

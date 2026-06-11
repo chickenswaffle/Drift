@@ -82,8 +82,13 @@ def _mock_http_send_ok(delivered: int = 1) -> AsyncMock:
     response.raise_for_status = MagicMock()
     response.json.return_value = {"ok": True, "delivered": delivered}
 
+    # GET is used by RelayClient._discover_peers (federation peer fetch).
+    peers_resp = MagicMock(spec=httpx.Response)
+    peers_resp.json.return_value = {"peers": []}
+
     client = AsyncMock(spec=httpx.AsyncClient)
     client.post = AsyncMock(return_value=response)
+    client.get = AsyncMock(return_value=peers_resp)
     client.aclose = AsyncMock()
     return client
 
@@ -419,3 +424,111 @@ class TestSocksProxy:
 
         _, kwargs = mk_http.call_args
         assert kwargs.get("proxy") == "socks5://127.0.0.1:9050"
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 — multi-relay failover
+# ---------------------------------------------------------------------------
+
+
+class TestFailover:
+    def test_parses_comma_separated_relays(self) -> None:
+        c = RelayClient("ws://r1:8765 , ws://r2:8765/", "addr")
+        assert c.relays == ["ws://r1:8765", "ws://r2:8765"]
+        assert c.node_count == 2
+
+    def test_single_relay_no_failover_targets(self) -> None:
+        c = RelayClient("ws://only:8765", "addr")
+        assert c.node_count == 1
+
+    def test_is_onion_detects_onion_relay(self) -> None:
+        c = RelayClient("ws://abcdef.onion:8765", "addr")
+        assert c.is_onion is True
+        assert RelayClient("ws://clearnet:8765", "addr").is_onion is False
+
+    @pytest.mark.asyncio
+    async def test_fails_over_to_secondary_on_disconnect(self) -> None:
+        """Primary drops mid-conversation → client reconnects to the secondary."""
+        client = RelayClient("ws://r1:8765,ws://r2:8765", "addr")
+
+        ws1 = FakeWebSocket([_make_relay_msg("addr", b"from-r1")])  # then ends → drop
+        ws2 = FakeWebSocket([_make_relay_msg("addr", b"from-r2")])
+        dials = {"ws://r1:8765/ws/addr": ws1, "ws://r2:8765/ws/addr": ws2}
+
+        async def fake_dial(ws_url: str) -> FakeWebSocket:
+            return dials[ws_url]
+
+        with (
+            patch.object(client, "_dial", fake_dial),
+            patch.object(client, "_discover_peers", AsyncMock()),
+            patch("drift.transport.client.httpx.AsyncClient", return_value=_mock_http_send_ok()),
+        ):
+            await client.connect()
+            assert client._active_idx == 0
+
+            first = await asyncio.wait_for(client.receive(), timeout=2.0)
+            # ws1's iterator has ended → next receive triggers failover to r2.
+            second = await asyncio.wait_for(client.receive(), timeout=2.0)
+            await client.close()
+
+        assert first.ciphertext == b"from-r1"
+        assert second.ciphertext == b"from-r2"
+        assert client._active_idx == 1   # now on the secondary
+
+    @pytest.mark.asyncio
+    async def test_connect_tries_relays_in_order(self) -> None:
+        """First relay refuses; client transparently connects to the second."""
+        client = RelayClient("ws://dead:8765,ws://live:8765", "addr")
+        ws_live = FakeWebSocket([])
+
+        async def fake_dial(ws_url: str) -> FakeWebSocket:
+            if "dead" in ws_url:
+                raise OSError("connection refused")
+            return ws_live
+
+        with (
+            patch.object(client, "_dial", fake_dial),
+            patch.object(client, "_discover_peers", AsyncMock()),
+            patch("drift.transport.client.httpx.AsyncClient", return_value=_mock_http_send_ok()),
+        ):
+            await client.connect()
+            assert client._active_idx == 1
+            await client.close()
+
+    @pytest.mark.asyncio
+    async def test_connect_raises_when_all_relays_down(self) -> None:
+        client = RelayClient("ws://a:8765,ws://b:8765", "addr")
+
+        async def fake_dial(ws_url: str) -> FakeWebSocket:
+            raise OSError("refused")
+
+        with (
+            patch.object(client, "_dial", fake_dial),
+            patch("drift.transport.client.httpx.AsyncClient", return_value=_mock_http_send_ok()),
+        ):
+            with pytest.raises(RelayError, match="could not connect to any relay"):
+                await client.connect()
+
+    @pytest.mark.asyncio
+    async def test_discover_peers_adds_failover_targets(self) -> None:
+        client = RelayClient("ws://r1:8765", "addr")
+        ws1 = FakeWebSocket([])
+
+        peers_resp = MagicMock(spec=httpx.Response)
+        peers_resp.json.return_value = {"peers": ["http://r2:8765", "https://r3:8765"]}
+        http = _mock_http_send_ok()
+        http.get = AsyncMock(return_value=peers_resp)
+
+        async def fake_dial(ws_url: str) -> FakeWebSocket:
+            return ws1
+
+        with (
+            patch.object(client, "_dial", fake_dial),
+            patch("drift.transport.client.httpx.AsyncClient", return_value=http),
+        ):
+            await client.connect()
+            await client.close()
+
+        # Discovered peers are normalised to ws(s) and appended for failover.
+        assert "ws://r2:8765" in client.relays
+        assert "wss://r3:8765" in client.relays
