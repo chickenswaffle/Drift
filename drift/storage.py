@@ -25,7 +25,12 @@ from drift.crypto import Identity
 # Default config directory: ~/.config/drift/
 CONFIG_DIR = Path.home() / ".config" / "drift"
 IDENTITY_FILE = CONFIG_DIR / "identity.json"
-CONTACTS_FILE = CONFIG_DIR / "contacts.json"
+
+# Contacts are scoped *per identity*, not global: each identity keeps its own
+# address book under ~/.config/drift/contacts/<scan_pub_b58>.json. Keying by the
+# public scan key (the routable half of the identity) means two identities on
+# the same machine never see each other's contacts.
+CONTACTS_DIR = CONFIG_DIR / "contacts"
 
 
 class Contact(TypedDict):
@@ -69,17 +74,26 @@ def save_identity(identity: Identity, *, overwrite: bool = False) -> None:
 # Contacts
 # ---------------------------------------------------------------------------
 
-def load_contacts() -> Contacts:
-    if not CONTACTS_FILE.exists():
+def contacts_file(identity: Identity) -> Path:
+    """Path to ``identity``'s address book, named by its public scan key."""
+    return CONTACTS_DIR / f"{identity.scan_keypair.public_b58()}.json"
+
+
+def load_contacts(identity: Identity) -> Contacts:
+    """Load the contacts belonging to ``identity`` (empty if none saved)."""
+    path = contacts_file(identity)
+    if not path.exists():
         return {}
-    data: Contacts = json.loads(CONTACTS_FILE.read_text())
+    data: Contacts = json.loads(path.read_text())
     return data
 
 
-def save_contacts(contacts: Contacts) -> None:
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    CONTACTS_FILE.write_text(json.dumps(contacts, indent=2))
-    CONTACTS_FILE.chmod(0o600)
+def save_contacts(identity: Identity, contacts: Contacts) -> None:
+    """Persist ``contacts`` for ``identity`` only."""
+    CONTACTS_DIR.mkdir(parents=True, exist_ok=True)
+    path = contacts_file(identity)
+    path.write_text(json.dumps(contacts, indent=2))
+    path.chmod(0o600)
 
 
 def is_valid_contact_code(code: str) -> bool:
@@ -91,9 +105,9 @@ def is_valid_contact_code(code: str) -> bool:
     return True
 
 
-def add_contact(name: str, code: str) -> Contacts:
+def add_contact(identity: Identity, name: str, code: str) -> Contacts:
     """
-    Validate and save a contact, returning the updated contact map.
+    Validate and save a contact for ``identity``, returning the updated map.
 
     Raises ``StorageError`` if the name is blank or the code is malformed.
     """
@@ -101,9 +115,9 @@ def add_contact(name: str, code: str) -> Contacts:
         raise StorageError("contact name cannot be empty")
     if not is_valid_contact_code(code):
         raise StorageError("invalid contact code")
-    contacts = load_contacts()
+    contacts = load_contacts(identity)
     contacts[name] = {"code": code}
-    save_contacts(contacts)
+    save_contacts(identity, contacts)
     return contacts
 
 

@@ -92,8 +92,9 @@ def add(
     code: str = typer.Argument(..., help="Their drift: contact code"),
 ) -> None:
     """Save a contact by their contact code."""
+    identity = _require_identity()
     try:
-        storage.add_contact(name, code)
+        storage.add_contact(identity, name, code)
     except StorageError as e:
         console.print(f"[red]Could not add contact:[/red] {e}")
         raise typer.Exit(1) from None
@@ -103,7 +104,8 @@ def add(
 @app.command()
 def contacts() -> None:
     """List your saved contacts."""
-    saved = storage.load_contacts()
+    identity = _require_identity()
+    saved = storage.load_contacts(identity)
     if not saved:
         console.print("[dim]No contacts yet. Use [bold]drift add[/bold] to add one.[/dim]")
         return
@@ -123,7 +125,7 @@ def verify(
     talking to the wrong person.
     """
     identity = _require_identity()
-    saved = storage.load_contacts()
+    saved = storage.load_contacts(identity)
 
     if name not in saved:
         console.print(
@@ -158,7 +160,7 @@ def chat(
     Phase 3: routes over Tor automatically.
     """
     identity = _require_identity()
-    saved = storage.load_contacts()
+    saved = storage.load_contacts(identity)
 
     if name is not None and name not in saved:
         console.print(f"[red]Unknown contact:[/red] {name}")
