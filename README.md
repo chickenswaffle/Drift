@@ -1,8 +1,8 @@
 # DRIFT
 
 [![CI](https://github.com/chickenswaffle/Drift/actions/workflows/ci.yml/badge.svg)](https://github.com/chickenswaffle/Drift/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-v0.4.3-blue)](https://github.com/chickenswaffle/Drift/releases/tag/v0.4.3)
-[![Phase](https://img.shields.io/badge/phase-2%20%E2%80%94%20Double%20Ratchet-brightgreen)](#project-status)
+[![Version](https://img.shields.io/badge/version-v0.7.0-blue)](https://github.com/chickenswaffle/Drift/releases/tag/v0.7.0)
+[![Phase](https://img.shields.io/badge/phase-4%20%E2%80%94%20Federation-brightgreen)](#project-status)
 
 > A terminal-first, end-to-end encrypted messenger with rotating, unlinkable receiving addresses.
 
@@ -52,15 +52,15 @@ Being precise here is what separates a serious tool from snake oil.
 
 ## Project status
 
-🚧 **Pre-alpha — Phase 2 complete.** Not ready for production use.
+🧪 **Alpha — Phases 0–4 complete.** Usable end-to-end, but not yet independently audited; not ready for high-stakes production use.
 
 | Phase | Goal | Status |
 |-------|------|--------|
 | 0 | Basic E2E encryption — X25519 + XChaCha20 | ✅ Complete (`v0.1.0`) |
 | 1 | Stealth rotating addresses + TUI | ✅ Complete (`v0.3.0`) |
 | 2 | Double Ratchet (forward secrecy) | ✅ Complete (`v0.4.3`) |
-| 3 | Tor transport + sealed sender | 🔨 Next |
-| 4 | Federated relays + cover traffic | 📋 Planned |
+| 3 | Tor transport + sealed sender | ✅ Complete (`v0.6.0`) |
+| 4 | Federated relays + Pi Zero mesh nodes | ✅ Complete (`v0.7.0`) |
 | 5 | Panic key, decoy volumes, FMD | 📋 Planned |
 
 ---
