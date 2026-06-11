@@ -324,3 +324,48 @@ def test_help_modal_mentions_best_effort() -> None:
     ref = HelpModal._REFERENCE
     assert "best-effort" in ref
     assert "/burn" in ref
+
+
+# --------------------------------------------------------------------------- #
+# Enhancement 1 — encrypt animation on send
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.asyncio
+async def test_encrypt_animation_clears_input_after_send() -> None:
+    """Input must be empty after the 150 ms animation completes."""
+    async with _app_active().run_test() as pilot:
+        app = pilot.app
+        app._input.focus()
+        await pilot.pause()
+        for ch in "hello":
+            await pilot.press(ch)
+        await pilot.press("enter")
+        # 150 ms animation + Textual event-loop overhead.
+        await pilot.pause(0.4)
+        assert app._input.value == ""
+
+
+@pytest.mark.asyncio
+async def test_encrypt_animation_skipped_for_slash_commands() -> None:
+    """Slash commands bypass the animation and clear immediately."""
+    async with _app_active().run_test() as pilot:
+        app = pilot.app
+        app._input.focus()
+        await pilot.pause()
+        for ch in "/help":
+            await pilot.press(ch)
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app._input.value == ""
+
+
+@pytest.mark.asyncio
+async def test_encrypt_animation_skipped_for_empty_input() -> None:
+    """Submitting empty input clears immediately, no animation."""
+    async with _app_active().run_test() as pilot:
+        app = pilot.app
+        app._input.focus()
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app._input.value == ""

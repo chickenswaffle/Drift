@@ -41,8 +41,10 @@ Colour language:
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import importlib.util
+import random
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -1329,20 +1331,35 @@ class DriftApp(App[None]):
     @on(Input.Submitted, "#msg-input")
     async def _on_submit(self, event: Input.Submitted) -> None:
         text = event.value.strip()
-        event.input.clear()
-        self.query_one("#input", InputBar).reset_counter()
-        if not text:
-            return
-        if text.startswith("/"):
-            await self._handle_slash(text)
+        # Slash commands and empty input clear immediately — no animation.
+        if not text or text.startswith("/"):
+            event.input.clear()
+            self.query_one("#input", InputBar).reset_counter()
+            if text.startswith("/"):
+                await self._handle_slash(text)
             return
         if self._active is None:
+            event.input.clear()
+            self.query_one("#input", InputBar).reset_counter()
             self._pane.write_system("select a contact first (press C)")
             return
+        # 150 ms encrypt animation before clear + send.
+        await self._encrypt_animation(event.input, text)
+        event.input.clear()
+        self.query_one("#input", InputBar).reset_counter()
         try:
             await self._send(text)
         except Exception as exc:  # noqa: BLE001 — show send failures inline
             self._pane.write_warning(f"send error: {exc}")
+
+    async def _encrypt_animation(self, field: Input, original: str) -> None:
+        """Three 50 ms frames of random hex — visual cue that the message is encrypting."""
+        _HEX = "0123456789abcdef"
+        for _ in range(3):
+            field.value = "".join(
+                random.choice(_HEX) for _ch in original  # noqa: S311
+            )
+            await asyncio.sleep(0.05)
 
     async def _send(self, text: str) -> None:
         assert self._session is not None and self._active is not None
