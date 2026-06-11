@@ -9,6 +9,12 @@ DRIFT uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+---
+
+## [0.5.0] — 2026-06-11
+
+Burn requests: signed message and conversation erasure across relay and both clients.
+
 ### Added
 - **Burn requests** — a signed control message that erases messages from the
   relay buffer and both clients.
@@ -237,7 +243,8 @@ Storage refactor and UI foundation — the `drift.storage` model seam.
 
 ---
 
-[Unreleased]: https://github.com/chickenswaffle/Drift/compare/v0.4.4...HEAD
+[Unreleased]: https://github.com/chickenswaffle/Drift/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/chickenswaffle/Drift/compare/v0.4.4...v0.5.0
 [0.4.4]: https://github.com/chickenswaffle/Drift/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/chickenswaffle/Drift/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/chickenswaffle/Drift/compare/v0.4.1...v0.4.2
