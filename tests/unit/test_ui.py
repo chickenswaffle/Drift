@@ -36,6 +36,9 @@ from drift.ui.app import (
     MessagePane,
     NetworkPane,
     NetworkState,
+    NodeCountEvent,
+    NodePill,
+    OnionNodeEvent,
     PillButton,
     RatchetPill,
     SecurityBar,
@@ -721,3 +724,78 @@ async def test_tor_active_event_upgrades_lock_to_maximum() -> None:
         assert app._tor_active is True
         assert lock.maximum is True            # upgraded to 🔒⁺
         assert "⁺" in _render(lock.render())
+
+
+# --------------------------------------------------------------------------- #
+# Phase 4 — federation indicators
+# --------------------------------------------------------------------------- #
+
+
+def test_node_pill_render_states() -> None:
+    pill = NodePill()
+    assert "⬡ —" in _render(pill.render())          # unknown
+    pill.count = 1
+    assert "1 node" in _render(pill.render())        # solo
+    pill.count = 3
+    out = _render(pill.render())
+    assert "3 nodes" in out
+    pill.onion = True
+    assert "⊕" in _render(pill.render())             # onion-routed marker
+
+
+def test_network_pane_shows_federation_nodes() -> None:
+    pane = NetworkPane()
+    pane._state = NetworkState(
+        relay_url="ws://relay1:8765",
+        relay_connected=True,
+        relay_nodes=["ws://relay1:8765", "ws://relay2:8765", "ws://abc.onion:8765"],
+        node_count=3,
+    )
+    rendered = _render(pane._build())
+    # The other reachable relays appear as intermediate failover nodes.
+    assert "relay2:8765" in rendered
+    assert "abc.onion:8765" in rendered
+    assert "federated mesh · 3 nodes" in rendered
+
+
+def test_network_pane_shows_onion_node_badge() -> None:
+    pane = NetworkPane()
+    pane._state = NetworkState(
+        relay_url="ws://abc.onion",
+        relay_connected=True,
+        onion_node=True,
+        node_count=2,
+        relay_nodes=["ws://abc.onion", "ws://relay2:8765"],
+    )
+    rendered = _render(pane._build())
+    assert "onion node" in rendered
+    assert "onion-routed" in rendered
+
+
+@pytest.mark.asyncio
+async def test_node_count_event_updates_pill() -> None:
+    async with _app().run_test() as pilot:
+        app = pilot.app
+        app.post_message(NodeCountEvent(4))
+        await pilot.pause()
+        assert app._node_count == 4
+        assert app.query_one(NodePill).count == 4
+        assert "4 nodes" in _render(app.query_one(NodePill).render())
+
+
+@pytest.mark.asyncio
+async def test_onion_node_event_marks_pill() -> None:
+    async with _app().run_test() as pilot:
+        app = pilot.app
+        app.post_message(OnionNodeEvent())
+        await pilot.pause()
+        assert app._onion_node is True
+        assert app.query_one(NodePill).onion is True
+
+
+@pytest.mark.asyncio
+async def test_primary_relay_parsed_from_comma_list() -> None:
+    me = Identity.generate()
+    contacts = {"alice": {"code": Identity.generate().contact_code()}}
+    app = DriftApp(me, contacts, "ws://r1:8765,ws://r2:8765", active=None)
+    assert app._primary_relay == "ws://r1:8765"

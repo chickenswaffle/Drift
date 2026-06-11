@@ -272,7 +272,7 @@ def _build_css(t: dict[str, str]) -> str:
     }}
     #header-spacer {{ width: 1fr; height: 3; }}
     #security {{ width: auto; height: 3; content-align: right middle; }}
-    UptimePill, LatencyPill, RatchetPill {{
+    UptimePill, LatencyPill, RatchetPill, NodePill {{
         width: auto; height: 3; padding: 0 1; content-align: center middle;
     }}
     SecurityPill {{
@@ -448,6 +448,17 @@ class TorActiveEvent(Message):
     def __init__(self, hops: int) -> None:
         super().__init__()
         self.hops = hops
+
+
+class NodeCountEvent(Message):
+    """Worker → UI: how many federated mesh nodes are reachable this session."""
+    def __init__(self, count: int) -> None:
+        super().__init__()
+        self.count = count
+
+
+class OnionNodeEvent(Message):
+    """Worker → UI: this session is routed through a Tor onion mesh node."""
 
 
 class BurnEvent(Message):
@@ -668,6 +679,26 @@ class RatchetPill(Static):
     def render(self) -> RenderableType:
         colour = _S if self.flashing else "#555555"
         return f"[{colour}]↻ {self.count}[/]"
+
+
+class NodePill(Static):
+    """
+    Reachable mesh-node count: ``⬡ N nodes`` (Phase 4 federation).
+
+    Dim while solo or unknown; bright green once the session can see more than
+    one federated node, signalling there's no single relay to take down.
+    """
+
+    count: reactive[int] = reactive(0)
+    onion: reactive[bool] = reactive(False)
+
+    def render(self) -> RenderableType:
+        if self.count <= 0:
+            return "[#444444]⬡ —[/]"
+        suffix = " ⊕" if self.onion else ""  # onion-routed marker
+        word = "node" if self.count == 1 else "nodes"
+        colour = _P if self.count > 1 else "#888888"
+        return f"[{colour}]⬡ {self.count} {word}{suffix}[/]"
 
 
 class HeaderBar(Static):
@@ -934,8 +965,11 @@ class NetworkState:
     # Phase 3 extensibility (Tor)
     tor_active: bool = False
     tor_hops: int = 0
-    # Phase 4 extensibility (relay federation)
+    # Phase 4 (relay federation + mesh nodes)
     federation_peers: list[str] = field(default_factory=list)
+    relay_nodes: list[str] = field(default_factory=list)  # full failover path
+    node_count: int = 0          # reachable mesh nodes (relay + peers)
+    onion_node: bool = False     # active relay is a Tor onion (Pi-Zero) node
 
 
 class NetworkPane(Static):
@@ -983,6 +1017,29 @@ class NetworkPane(Static):
             "               ▼\n"
         )
 
+    @staticmethod
+    def _federation_block(s: NetworkState, primary_host: str) -> str:
+        """
+        Draw the other reachable mesh nodes as intermediate relays.
+
+        Only the relays *other* than the one we're connected to are listed
+        (the primary is already the box above), so the user sees the redundant
+        paths the conversation can fail over to.
+        """
+        others = [
+            r.replace("ws://", "").replace("wss://", "")
+            for r in s.relay_nodes
+            if r.replace("ws://", "").replace("wss://", "") != primary_host
+        ]
+        if not others:
+            return ""
+        lines = [f"       [{_DM}]│[/]\n"]
+        for host in others:
+            badge = f" [{_S}]⬡ onion[/]" if ".onion" in host else ""
+            lines.append(f"       [{_DM}]├─[/] [{_S}]⬡ {host}[/]{badge}\n")
+        lines.append(f"       [{_DM}]│  federation peers (failover)[/]\n")
+        return "".join(lines)
+
     def _build(self) -> RenderableType:
         s = self._state
         rc = _P if s.relay_connected else "#555555"
@@ -1008,11 +1065,21 @@ class NetworkPane(Static):
             "       ▼\n"
         )
 
-        # Federation note (Phase 4)
-        fed_line = (
-            f"\n  [{_DM}]⧉ {len(s.federation_peers)} federation peer(s)[/]"
-            if s.federation_peers else ""
-        )
+        # Relay box label: an onion (Pi-Zero) node gets a distinct badge.
+        relay_badge = f"  [{_S}]⬡ onion node[/]" if s.onion_node else ""
+
+        # Federation block (Phase 4): when more than one mesh node is reachable,
+        # draw the other relays as intermediate nodes branching off the relay so
+        # the user can see there's no single point of failure.
+        federation_block = self._federation_block(s, relay_host)
+
+        # Footer note: federation reach + onion routing.
+        fed_line = ""
+        if s.node_count > 1:
+            onion = " · ⬡ onion-routed" if s.onion_node else ""
+            fed_line = f"\n  [{_DM}]⧉ federated mesh · {s.node_count} nodes{onion}[/]"
+        elif s.federation_peers:
+            fed_line = f"\n  [{_DM}]⧉ {len(s.federation_peers)} federation peer(s)[/]"
 
         stats = (
             f"  [{_DM}]↻ {s.ratchet_steps} ratchet steps"
@@ -1027,9 +1094,10 @@ class NetworkPane(Static):
             "  └────┬─────┘\n"
             f"{connector}"
             "  ┌────────────────────────────┐\n"
-            f"  │ [{rc}]{relay_host}[/]\n"
+            f"  │ [{rc}]{relay_host}[/]{relay_badge}\n"
             f"  │ [{_DM}]{relay_status}  {lat}[/]\n"
             "  └────────────┬───────────────┘\n"
+            f"{federation_block}"
             f"               [{_DM}]{peer_arrow}[/]\n"
             "               ▼\n"
             "  ┌────────────────────────────┐\n"
@@ -1399,6 +1467,10 @@ class DriftApp(App[None]):
         self._identity = identity
         self._contacts: Contacts = contacts
         self._relay_url = relay_url
+        # The relay URL may be a comma-separated federation list (Phase 4). The
+        # full string is handed to the transport (which fails over across it);
+        # the header/health-check only need the primary (first) relay.
+        self._primary_relay = relay_url.split(",")[0].strip()
         self._active: str | None = active if active in contacts else None
         # Phase 3 Tor policy (set by the CLI). ``use_tor`` defaults off here so
         # that embedding the app in tests never reaches for the network; the
@@ -1408,6 +1480,10 @@ class DriftApp(App[None]):
         self._tor_required = tor_required
         self._tor_client: TorClient | None = None
         self._tor_active = False
+        # Phase 4 federation state, populated as the session reports it.
+        self._node_count = 0
+        self._onion_node = False
+        self._relay_nodes: list[str] = []
         self._unread: dict[str, int] = {}
         self._history: dict[str, list[MessageRecord]] = {}
         self._session: Session | None = None
@@ -1432,8 +1508,9 @@ class DriftApp(App[None]):
                     yield Static(id="header-spacer")
                     yield SecurityBar(id="security")
                     yield UptimePill(id="uptime")
-                    yield LatencyPill(_ws_to_http(self._relay_url), id="latency")
+                    yield LatencyPill(_ws_to_http(self._primary_relay), id="latency")
                     yield RatchetPill(id="ratchet")
+                    yield NodePill(id="nodes")
                 yield HeaderBar(id="headerinfo")
                 yield Static(RichRule(style=_BD, characters="─"), id="header-rule")
             yield CryptoTicker(id="ticker")
@@ -1452,7 +1529,7 @@ class DriftApp(App[None]):
     # ── Lifecycle ─────────────────────────────────────────────────────────
 
     async def on_mount(self) -> None:
-        self._header.relay_url = self._relay_url
+        self._header.relay_url = self._primary_relay
         await self._sidebar.populate(self._contacts, self._active, self._unread)
         self.set_interval(0.8, self._tick_pulse)
         self._input.focus()
@@ -1699,6 +1776,12 @@ class DriftApp(App[None]):
             # Circuit is now carrying this session's traffic.
             self.post_message(TorActiveEvent(int(detail)))
             return
+        if kind == "nodes":
+            self.post_message(NodeCountEvent(int(detail)))
+            return
+        if kind == "onion":
+            self.post_message(OnionNodeEvent())
+            return
         self.post_message(CryptoEvent(kind, detail))
 
     @on(TorProgress)
@@ -1709,6 +1792,26 @@ class DriftApp(App[None]):
     def _on_tor_active(self, event: TorActiveEvent) -> None:
         self._activate_tor(event.hops)
         self._ticker.push(_now(), "tor", f"circuit live · {event.hops} hops")
+
+    @on(NodeCountEvent)
+    def _on_node_count(self, event: NodeCountEvent) -> None:
+        self._node_count = event.count
+        # Capture the federated path from the live session for the graph.
+        if self._session is not None:
+            self._relay_nodes = self._session.relay_nodes
+        pill = self.query_one(NodePill)
+        pill.count = event.count
+        if event.count > 1:
+            self._ticker.push(_now(), "tor", f"federated mesh · {event.count} nodes")
+        if self.query_one("#netpane", NetworkPane).display:
+            self._sync_network_state()
+
+    @on(OnionNodeEvent)
+    def _on_onion_node(self, _event: OnionNodeEvent) -> None:
+        self._onion_node = True
+        self.query_one(NodePill).onion = True
+        if self.query_one("#netpane", NetworkPane).display:
+            self._sync_network_state()
 
     def _note_addr(self, prefix: str) -> None:
         self._stealth_count += 1
@@ -1969,7 +2072,7 @@ class DriftApp(App[None]):
 
     def _sync_network_state(self) -> None:
         state = NetworkState(
-            relay_url=self._relay_url,
+            relay_url=self._primary_relay,
             relay_connected=self._connected,
             relay_latency_ms=self.query_one(LatencyPill).latency_ms,
             peer_name=self._active,
@@ -1978,6 +2081,9 @@ class DriftApp(App[None]):
             stealth_addrs=self._stealth_count,
             tor_active=self._tor_active,
             tor_hops=self._tor_client.num_hops if self._tor_client else 0,
+            relay_nodes=self._relay_nodes,
+            node_count=self._node_count,
+            onion_node=self._onion_node,
         )
         self.query_one("#netpane", NetworkPane).update_graph(state)
 

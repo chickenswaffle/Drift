@@ -223,6 +223,26 @@ class Session:
             # Circuit is carrying our traffic now — let the UI light up the
             # TOR indicators. Detail is the (public, non-secret) hop count.
             self._emit("tor", str(self._tor_client.num_hops))
+        # Phase 4: report the federated reach (relay + discovered peers) and
+        # whether we're routed through a Tor onion node, for the UI indicators.
+        self._emit("nodes", str(self._client.node_count))
+        if self._client.is_onion:
+            self._emit("onion", "1")
+
+    @property
+    def node_count(self) -> int:
+        """Reachable mesh nodes for this session (active relay + failover peers)."""
+        return self._client.node_count
+
+    @property
+    def relay_nodes(self) -> list[str]:
+        """All relay nodes known for failover (the federated path)."""
+        return self._client.relays
+
+    @property
+    def onion_node(self) -> bool:
+        """True when the active relay is a Tor onion service (a Pi-Zero node)."""
+        return self._client.is_onion
 
     async def close(self) -> None:
         await self._client.close()
