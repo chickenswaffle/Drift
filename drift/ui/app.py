@@ -48,8 +48,9 @@ import random
 import time
 from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING, ClassVar, TypeVar
+from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
+import httpx
 from rich.console import Group, RenderableType
 from rich.rule import Rule as RichRule
 from rich.table import Table
@@ -314,6 +315,84 @@ class SecurityBar(Horizontal):
     def compose(self) -> ComposeResult:
         for label, tooltip_text, active in _SECURITY:
             yield SecurityPill(label, tooltip_text, active)
+
+
+def _ws_to_http(url: str) -> str:
+    """Convert ws:// → http:// and wss:// → https:// for health-check requests."""
+    return url.replace("wss://", "https://", 1).replace("ws://", "http://", 1)
+
+
+class UptimePill(Static):
+    """Session uptime counter: ⏱ HH:MM:SS. Ticks every second."""
+
+    elapsed: reactive[int] = reactive(0)
+    _start: float | None = None
+
+    def on_mount(self) -> None:
+        self.set_interval(1.0, self._tick)
+
+    def _tick(self) -> None:
+        if self._start is not None:
+            self.elapsed = int(time.monotonic() - self._start)
+
+    def start(self, ts: float) -> None:
+        self._start = ts
+        self.elapsed = 0
+
+    def render(self) -> RenderableType:
+        if self._start is None:
+            return "[#444444]⏱ —[/]"
+        h, rem = divmod(self.elapsed, 3600)
+        m, s = divmod(rem, 60)
+        return f"[#888888]⏱ {h:02d}:{m:02d}:{s:02d}[/]"
+
+
+class LatencyPill(Static):
+    """Relay round-trip latency: ⚡ Nms, color-coded green/yellow/red."""
+
+    latency_ms: reactive[int | None] = reactive(None)
+
+    def __init__(self, health_url: str, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._health_url = health_url
+
+    def on_mount(self) -> None:
+        self.set_interval(15.0, self._ping)
+
+    async def _ping(self) -> None:
+        try:
+            t0 = time.monotonic()
+            async with httpx.AsyncClient() as c:
+                await c.get(self._health_url, timeout=3.0)
+            self.latency_ms = int((time.monotonic() - t0) * 1000)
+        except Exception:  # noqa: BLE001
+            self.latency_ms = None
+
+    def render(self) -> RenderableType:
+        if self.latency_ms is None:
+            return "[#444444]⚡ —[/]"
+        ms = self.latency_ms
+        colour = "#00ff41" if ms < 100 else ("#cccc00" if ms < 300 else "#ff4444")
+        return f"[{colour}]⚡ {ms}ms[/]"
+
+
+class RatchetPill(Static):
+    """Ratchet step counter: ↻ N, flashes cyan for 300 ms on each step."""
+
+    count: reactive[int] = reactive(0)
+    flashing: reactive[bool] = reactive(False)
+
+    def bump(self) -> None:
+        self.count += 1
+        self.flashing = True
+        self.set_timer(0.3, self._stop_flash)
+
+    def _stop_flash(self) -> None:
+        self.flashing = False
+
+    def render(self) -> RenderableType:
+        colour = "#00d4ff" if self.flashing else "#555555"
+        return f"[{colour}]↻ {self.count}[/]"
 
 
 class HeaderBar(Static):
@@ -911,7 +990,11 @@ class DriftApp(App[None]):
     #lock {
         width: auto; height: 3; margin: 0 2 0 2; content-align: center middle;
     }
-    #security { width: 1fr; height: 3; align-horizontal: right; content-align: right middle; }
+    #header-spacer { width: 1fr; height: 3; }
+    #security { width: auto; height: 3; content-align: right middle; }
+    UptimePill, LatencyPill, RatchetPill {
+        width: auto; height: 3; padding: 0 1; content-align: center middle;
+    }
     SecurityPill {
         width: auto; height: 3; padding: 0 1; margin: 0 0 0 1;
         background: #0a0a0a; content-align: center middle;
@@ -1037,7 +1120,11 @@ class DriftApp(App[None]):
                 with Horizontal(id="header-top"):
                     yield LogoBox(id="logo")
                     yield LockIndicator(id="lock")
+                    yield Static(id="header-spacer")
                     yield SecurityBar(id="security")
+                    yield UptimePill(id="uptime")
+                    yield LatencyPill(_ws_to_http(self._relay_url), id="latency")
+                    yield RatchetPill(id="ratchet")
                 yield HeaderBar(id="headerinfo")
                 yield Static(RichRule(style="#1a5c1a", characters="─"), id="header-rule")
             yield CryptoTicker(id="ticker")
@@ -1164,6 +1251,8 @@ class DriftApp(App[None]):
         self._stealth_count = 0
         self._stealth_recent = []
         self._session_start = time.monotonic()
+        self.query_one(UptimePill).start(self._session_start)
+        self.query_one(RatchetPill).count = 0
         await self._sidebar.populate(self._contacts, self._active, self._unread)
 
         # Replay this contact's history into a fresh pane.
@@ -1225,6 +1314,8 @@ class DriftApp(App[None]):
         elif event.kind == "recv":
             self._recv_count += 1
             self._note_addr(event.detail)
+        elif event.kind == "ratchet":
+            self.query_one(RatchetPill).bump()
         # "burn" events are ticker-only; no counters needed.
         if self._infopanel.display:
             self._refresh_info()
