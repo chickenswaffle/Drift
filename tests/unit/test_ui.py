@@ -18,6 +18,7 @@ from rich.console import Console
 from drift.crypto import Identity
 from drift.ui.app import (
     _SECURITY,
+    _THEMES,
     AddContactModal,
     BurnEvent,
     CommandPalette,
@@ -40,6 +41,7 @@ from drift.ui.app import (
     SecurityPill,
     Sidebar,
     UptimePill,
+    _build_css,
 )
 
 
@@ -561,3 +563,63 @@ async def test_network_pane_update_graph_reflects_state() -> None:
         net.update_graph(NetworkState(relay_url="ws://test:9999", relay_connected=True))
         await pilot.pause()
         assert "test:9999" in str(net._state.relay_url)
+
+
+# --------------------------------------------------------------------------- #
+# Enhancement 4 — themes
+# --------------------------------------------------------------------------- #
+
+def test_all_five_themes_are_defined() -> None:
+    assert set(_THEMES.keys()) == {"matrix", "amber", "frost", "redacted", "ghost"}
+
+
+def test_each_theme_has_required_keys() -> None:
+    required = {"primary", "secondary", "bg", "dim_bg", "modal_bg",
+                "border", "hover_bg", "hover_bg_off", "dim", "warning", "scanlines"}
+    for name, theme in _THEMES.items():
+        missing = required - set(theme.keys())
+        assert not missing, f"theme '{name}' missing keys: {missing}"
+
+
+def test_build_css_substitutes_primary_color() -> None:
+    amber = _THEMES["amber"]
+    css = _build_css(amber)
+    assert amber["primary"] in css
+    assert "#00ff41" not in css  # matrix green must NOT appear in amber CSS
+
+
+def test_build_css_no_raw_placeholders_remain() -> None:
+    for name, theme in _THEMES.items():
+        css = _build_css(theme)
+        for key in theme:
+            token = f"__{key.upper()}__"
+            assert token not in css, f"unresolved token {token!r} in {name} CSS"
+
+
+def test_drift_theme_env_matrix_has_no_hardcoded_00ff41_in_css() -> None:
+    import os
+    os.environ.pop("DRIFT_THEME", None)
+    # The active CSS (matrix) should still have #00ff41 since that IS matrix's primary.
+    # But other themes must not have #00ff41 as a cross-contamination.
+    frost_css = _build_css(_THEMES["frost"])
+    assert "#00ff41" not in frost_css
+
+
+def test_build_css_contains_valid_css_selectors() -> None:
+    css = _build_css(_THEMES["matrix"])
+    assert "Screen" in css
+    assert "#root" in css
+    assert "#pane" in css
+    assert "SecurityPill" in css
+
+
+def test_ghost_theme_primary_in_logo_render() -> None:
+    from drift.ui import app as appmod
+    original = appmod._P
+    try:
+        appmod._P = _THEMES["ghost"]["primary"]  # "#bbbbbb"
+        logo = LogoBox()
+        # The style is set as the Text base style — it contains the theme color.
+        assert "#bbbbbb" in str(logo.render().style)
+    finally:
+        appmod._P = original
