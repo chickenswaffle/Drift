@@ -1,5 +1,9 @@
 # DRIFT
 
+[![CI](https://github.com/chickenswaffle/Drift/actions/workflows/ci.yml/badge.svg)](https://github.com/chickenswaffle/Drift/actions/workflows/ci.yml)
+[![Version](https://img.shields.io/badge/version-v0.4.3-blue)](https://github.com/chickenswaffle/Drift/releases/tag/v0.4.3)
+[![Phase](https://img.shields.io/badge/phase-2%20%E2%80%94%20Double%20Ratchet-brightgreen)](#project-status)
+
 > A terminal-first, end-to-end encrypted messenger with rotating, unlinkable receiving addresses.
 
 No phone numbers. No accounts. No central authority that can read or hand over your messages.
@@ -48,14 +52,14 @@ Being precise here is what separates a serious tool from snake oil.
 
 ## Project status
 
-🚧 **Pre-alpha — Phase 0 in progress.** Not ready for production use.
+🚧 **Pre-alpha — Phase 2 complete.** Not ready for production use.
 
 | Phase | Goal | Status |
 |-------|------|--------|
-| 0 | Basic E2E encryption — X25519 + XChaCha20, no rotation | 🔨 In progress |
-| 1 | Stealth rotating addresses | 📋 Planned |
-| 2 | Double Ratchet (forward secrecy) | 📋 Planned |
-| 3 | Tor transport + sealed sender | 📋 Planned |
+| 0 | Basic E2E encryption — X25519 + XChaCha20 | ✅ Complete (`v0.1.0`) |
+| 1 | Stealth rotating addresses + TUI | ✅ Complete (`v0.3.0`) |
+| 2 | Double Ratchet (forward secrecy) | ✅ Complete (`v0.4.3`) |
+| 3 | Tor transport + sealed sender | 🔨 Next |
 | 4 | Federated relays + cover traffic | 📋 Planned |
 | 5 | Panic key, decoy volumes, FMD | 📋 Planned |
 
@@ -66,7 +70,7 @@ Being precise here is what separates a serious tool from snake oil.
 **Requirements:** Python 3.11+, pip
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/drift.git
+git clone https://github.com/chickenswaffle/Drift.git
 cd drift
 pip install -e ".[dev]"
 
