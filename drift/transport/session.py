@@ -48,12 +48,14 @@ exchange (Phase 3); for now the common one-sided open works correctly.
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 from collections.abc import AsyncGenerator, Callable
 
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
 from drift.crypto import Identity, Keypair, derive_message_key
+from drift.crypto.burn import generate_burn_token, verify_burn_token
 from drift.crypto.ratchet import (
     Header,
     RatchetState,
@@ -63,13 +65,18 @@ from drift.crypto.ratchet import (
     ratchet_encrypt,
 )
 from drift.crypto.stealth import derive_one_time_address, scan_for_message
-from drift.transport.client import Envelope, RelayClient
+from drift.transport.client import BurnFrame, Envelope, RelayClient
 
 logger = logging.getLogger("drift.transport.session")
 
 # Shared firehose channel every stealth client subscribes to. The relay
 # fans every envelope out to all subscribers; clients scan locally.
 STEALTH_CHANNEL = "drift-stealth-v1"
+
+# Callback invoked when a verified burn tombstone arrives from the relay.
+# Args: (scope, message_id) — scope is "message" or "conversation";
+# message_id is the base64 one-time address for message-scope burns, else None.
+BurnHook = Callable[[str, str | None], None]
 
 
 def _keypair_from_private(private_bytes: bytes) -> Keypair:
@@ -113,11 +120,14 @@ class Session:
         *,
         ping_interval: float = 30.0,
         on_event: EventHook | None = None,
+        on_burn: BurnHook | None = None,
     ) -> None:
         # Optional sink for observable (non-secret) transport events; the UI
         # passes a callback that re-emits them as typed messages. Never carries
         # plaintext or key material.
         self._on_event = on_event
+        # Optional callback for verified burn tombstones from the relay.
+        self._on_burn = on_burn
 
         # Contact's public keys — used to address messages *to* them.
         self._their_scan_pub, self._their_spend_pub = Identity.parse_contact_code(
@@ -143,6 +153,9 @@ class Session:
         # otherwise advance past its key and surface as a spurious InvalidTag.
         self._seen_addrs: set[bytes] = set()
 
+        # One-time address of the most recently sent message — used by burn_last_message().
+        self._last_sent_addr: bytes | None = None
+
         # Subscribe to the shared firehose; the relay routes by this key only.
         self._client = RelayClient(relay_url, STEALTH_CHANNEL, ping_interval=ping_interval)
 
@@ -156,6 +169,11 @@ class Session:
             static_ecdh, info=b"drift-ratchet-v1-responder"
         )
         self._responder_keypair = _keypair_from_private(responder_priv)
+
+        # Raw ECDH output used as the base material for burn tokens.
+        # generate_burn_token() runs its own HKDF with info=b"drift-burn-v1",
+        # so this is domain-separated from all ratchet key material.
+        self._burn_shared = static_ecdh
 
         # Everyone starts as a receiver; the first sender promotes lazily.
         logger.debug("bootstrap: starting as receiver, awaiting first speaker")
@@ -222,6 +240,7 @@ class Session:
             self._their_scan_pub,
             self._their_spend_pub,
         )
+        self._last_sent_addr = one_time_addr  # tracked for burn_last_message()
         self._emit("send", _addr_digest(one_time_addr))
         await self._client.send(
             Envelope(
@@ -234,6 +253,22 @@ class Session:
         )
         self._emit("erase", "message key erased")
 
+    async def burn_last_message(self) -> None:
+        """Send a burn request for the last message we sent."""
+        if self._last_sent_addr is None:
+            from drift.transport.client import RelayError
+            raise RelayError("no message sent in this session")
+        addr_b64 = base64.b64encode(self._last_sent_addr).decode()
+        token = generate_burn_token(self._burn_shared, "message", addr_b64)
+        await self._client.post_burn(token, "message", addr_b64, STEALTH_CHANNEL)
+        self._emit("burn", f"message burn requested · {addr_b64[:8]}···")
+
+    async def burn_conversation(self) -> None:
+        """Send a burn request to erase this conversation from the relay and both clients."""
+        token = generate_burn_token(self._burn_shared, "conversation")
+        await self._client.post_burn(token, "conversation", None, STEALTH_CHANNEL)
+        self._emit("burn", "conversation burn requested")
+
     async def messages(self) -> AsyncGenerator[str, None]:
         """
         Async generator yielding decrypted messages addressed to us.
@@ -244,7 +279,20 @@ class Session:
         the message is genuinely ours, so a decrypt failure is real tampering
         — ``InvalidTag`` is allowed to propagate.
         """
-        async for envelope in self._client:
+        async for item in self._client:
+            # Burn tombstone from the relay — verify token, then call hook.
+            if isinstance(item, BurnFrame):
+                if item.token and verify_burn_token(
+                    self._burn_shared, item.token, item.scope, item.message_id
+                ):
+                    logger.debug("messages: verified burn tombstone scope=%s", item.scope)
+                    if self._on_burn is not None:
+                        self._on_burn(item.scope, item.message_id)
+                else:
+                    logger.debug("messages: ignoring burn tombstone — token invalid or missing")
+                continue
+
+            envelope = item
             if envelope.ephemeral_pub is None or envelope.one_time_addr is None:
                 continue  # not a stealth envelope
             detected = scan_for_message(

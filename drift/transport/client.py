@@ -27,7 +27,7 @@ import base64
 import json
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, NamedTuple
 
 import httpx
 import websockets
@@ -36,6 +36,13 @@ from websockets.exceptions import ConnectionClosed
 
 class RelayError(Exception):
     """Raised when the relay rejects a request or the connection is lost."""
+
+
+class BurnFrame(NamedTuple):
+    """A burn tombstone received from the relay via WebSocket."""
+    scope: str                # "message" or "conversation"
+    message_id: str | None    # base64 one-time addr for message scope; None otherwise
+    token: str | None         # HMAC-SHA256 hex token — clients verify before honouring
 
 
 @dataclass
@@ -98,7 +105,7 @@ class RelayClient:
         self._ws: Any = None
         self._http: httpx.AsyncClient | None = None
         # None sentinel signals a clean disconnect to receive()
-        self._queue: asyncio.Queue[Envelope | None] = asyncio.Queue()
+        self._queue: asyncio.Queue[Envelope | BurnFrame | None] = asyncio.Queue()
         self._listener: asyncio.Task[None] | None = None
         self._pinger: asyncio.Task[None] | None = None
         self._connected = False
@@ -173,9 +180,9 @@ class RelayClient:
         if not data.get("ok"):
             raise RelayError(f"relay rejected envelope: {data}")
 
-    async def receive(self) -> Envelope:
+    async def receive(self) -> Envelope | BurnFrame:
         """
-        Block until the next message envelope arrives.
+        Block until the next message envelope or burn tombstone arrives.
 
         Raises ``RelayError`` if the relay connection has been closed.
         """
@@ -185,6 +192,25 @@ class RelayClient:
         if item is None:
             raise RelayError("relay connection closed")
         return item
+
+    async def post_burn(
+        self,
+        token: str,
+        scope: str,
+        message_id: str | None,
+        channel: str,
+    ) -> None:
+        """POST a burn request to the relay's /burn endpoint."""
+        if self._http is None:
+            raise RelayError("not connected — call connect() first")
+        payload: dict[str, Any] = {"token": token, "scope": scope, "channel": channel}
+        if message_id is not None:
+            payload["message_id"] = message_id
+        try:
+            resp = await self._http.post(f"{self._http_base}/burn", json=payload)
+            resp.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise RelayError(f"burn failed: {exc}") from exc
 
     # ------------------------------------------------------------------
     # Async context manager
@@ -204,7 +230,7 @@ class RelayClient:
     def __aiter__(self) -> RelayClient:
         return self
 
-    async def __anext__(self) -> Envelope:
+    async def __anext__(self) -> Envelope | BurnFrame:
         try:
             return await self.receive()
         except RelayError as exc:
@@ -224,7 +250,15 @@ class RelayClient:
                     msg = json.loads(raw)
                 except json.JSONDecodeError:
                     continue
-                # Skip relay control frames (pong, error) and anything without ct
+                # Burn tombstone — put in queue for Session to handle.
+                if msg.get("type") == "BURNED":
+                    await self._queue.put(BurnFrame(
+                        scope=msg.get("scope") or "conversation",
+                        message_id=msg.get("message_id") or None,
+                        token=msg.get("token") or None,
+                    ))
+                    continue
+                # Skip other relay control frames (pong, error) and anything without ct.
                 if "ct" not in msg or msg.get("type"):
                     continue
                 try:

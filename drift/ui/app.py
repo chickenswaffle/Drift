@@ -60,6 +60,7 @@ from textual.events import Key
 from textual.message import Message
 from textual.reactive import reactive
 from textual.screen import ModalScreen
+from textual.timer import Timer
 from textual.widgets import Button, Input, Static
 
 from drift import __version__, storage
@@ -214,6 +215,15 @@ class SessionDown(Message):
         self.reason = reason
 
 
+class BurnEvent(Message):
+    """Worker → UI: a verified burn tombstone arrived for a conversation."""
+    def __init__(self, contact: str, scope: str, message_id: str | None) -> None:
+        super().__init__()
+        self.contact = contact
+        self.scope = scope         # "message" or "conversation"
+        self.message_id = message_id  # base64 one-time addr for message scope
+
+
 @dataclass
 class MessageRecord:
     """One rendered line of conversation history (model, not view)."""
@@ -340,6 +350,7 @@ class CryptoTicker(Static):
         "send": ("⬡", "#00ff41"),
         "recv": ("⬡", "#00ff41"),
         "erase": ("🔥", "#cc7722"),
+        "burn": ("🔥", "#ff4444"),
     }
 
     def on_mount(self) -> None:
@@ -353,6 +364,8 @@ class CryptoTicker(Static):
             body = f"inbound matched · {detail}"
         elif kind == "erase":
             body = "message key erased"
+        elif kind == "burn":
+            body = detail
         else:  # ratchet
             body = detail
         self.update(f"[#555555]\\[{ts}][/]  [{colour}]{icon} {body}[/]")
@@ -830,14 +843,19 @@ class HelpModal(_FadeModal[None]):
         "  [#00d4ff]Ctrl+G[/]  session info panel (your code, safety number, counters)\n"
         "  [#00d4ff]Ctrl+L[/]  crypto-event ticker on/off\n\n"
         "[bold #00ff41]Slash commands[/]\n"
-        "  [#00d4ff]/add[/]      add a contact\n"
-        "  [#00d4ff]/verify[/]   show the safety number\n"
-        "  [#00d4ff]/clear[/]    clear the current conversation\n"
-        "  [#00d4ff]/help[/]     this screen\n"
-        "  [#00d4ff]/quit[/]     exit\n\n"
+        "  [#00d4ff]/add[/]         add a contact\n"
+        "  [#00d4ff]/verify[/]      show the safety number\n"
+        "  [#00d4ff]/clear[/]       clear the current conversation (local only)\n"
+        "  [#00d4ff]/burn[/]        erase conversation from relay and both clients\n"
+        "  [#00d4ff]/burn last[/]   burn the last message you sent\n"
+        "  [#00d4ff]/burn 5m[/]     schedule auto-burn in 5 minutes (or Ns for seconds)\n"
+        "  [#00d4ff]/burn cancel[/] cancel a scheduled auto-burn\n"
+        "  [#00d4ff]/help[/]        this screen\n"
+        "  [#00d4ff]/quit[/]        exit\n\n"
         "[bold #00ff41]Composing[/]\n"
         "  [#888888]Enter[/] send   ·   [#888888]Shift+Enter[/] newline\n"
         "  [#888888]Esc[/] unfocus the input so letter shortcuts work\n\n"
+        "[#555555]⚠  Burn requests are best-effort — a non-compliant client can ignore them.[/]\n\n"
         "[#888888]Click any pill, contact, or security indicator with the mouse, too.[/]"
     )
 
@@ -1006,6 +1024,8 @@ class DriftApp(App[None]):
         self._stealth_count = 0
         self._stealth_recent: list[str] = []
         self._session_start: float | None = None
+        # Auto-burn timer (set by /burn Nm or /burn Ns).
+        self._burn_timer: Timer | None = None
 
     # ── Layout ────────────────────────────────────────────────────────────
 
@@ -1098,11 +1118,16 @@ class DriftApp(App[None]):
         from cryptography.exceptions import InvalidTag
 
         code = self._contacts[name]["code"]
+
+        def _burn_cb(scope: str, message_id: str | None) -> None:
+            self.post_message(BurnEvent(name, scope, message_id))
+
         session = Session(
             self._identity,
             code,
             self._relay_url,
             on_event=self._emit_crypto,
+            on_burn=_burn_cb,
         )
         self._session = session
         try:
@@ -1198,6 +1223,7 @@ class DriftApp(App[None]):
         elif event.kind == "recv":
             self._recv_count += 1
             self._note_addr(event.detail)
+        # "burn" events are ticker-only; no counters needed.
         if self._infopanel.display:
             self._refresh_info()
 
@@ -1213,6 +1239,18 @@ class DriftApp(App[None]):
     @on(SecurityPillClicked)
     def _on_security_pill(self, event: SecurityPillClicked) -> None:
         self._pane.write_system(f"{event.label} — {event.tooltip}")
+
+    @on(BurnEvent)
+    async def _on_burn_event(self, event: BurnEvent) -> None:
+        if event.contact != self._active:
+            return
+        ts = _now()
+        if event.scope == "conversation":
+            await self._pane.clear()
+            self._history[event.contact] = []
+            self._pane.write_separator(f"🔥 conversation burned · {ts}")
+        else:
+            self._pane.write_system(f"⛔ message burned · {ts}")
 
     # ── Contact selection ──────────────────────────────────────────────────
 
@@ -1319,7 +1357,9 @@ class DriftApp(App[None]):
         line.status = "sent"
 
     async def _handle_slash(self, text: str) -> None:
-        command = text[1:].split()[0].lower() if len(text) > 1 else ""
+        parts = text[1:].split() if len(text) > 1 else []
+        command = parts[0].lower() if parts else ""
+        args = parts[1:]
         match command:
             case "help":
                 self.push_screen(HelpModal())
@@ -1332,10 +1372,75 @@ class DriftApp(App[None]):
                 if self._active is not None:
                     self._history[self._active] = []
                     self._pane.write_separator(f"cleared · {self._active}")
+            case "burn":
+                await self._handle_burn_slash(args)
             case "quit" | "exit":
                 self.exit()
             case _:
                 self._pane.write_system(f"unknown command: /{command}")
+
+    async def _handle_burn_slash(self, args: list[str]) -> None:
+        """Handle /burn, /burn last, /burn Nm, /burn cancel."""
+        sub = args[0].lower() if args else ""
+        if sub == "cancel":
+            self._cancel_auto_burn()
+            return
+        if self._session is None or not self._connected:
+            self._pane.write_system("burn: no active session — connect to a contact first")
+            return
+        if sub == "last":
+            try:
+                await self._session.burn_last_message()
+            except Exception as exc:  # noqa: BLE001
+                self._pane.write_warning(f"burn failed: {exc}")
+        elif sub == "":
+            try:
+                await self._session.burn_conversation()
+            except Exception as exc:  # noqa: BLE001
+                self._pane.write_warning(f"burn failed: {exc}")
+        else:
+            secs = self._parse_burn_duration(sub)
+            if secs is None or secs <= 0:
+                self._pane.write_system(
+                    "usage: /burn · /burn last · /burn Nm · /burn Ns · /burn cancel"
+                )
+                return
+            self._schedule_auto_burn(secs)
+
+    @staticmethod
+    def _parse_burn_duration(arg: str) -> int | None:
+        """Parse '5m' or '30s' into seconds. Returns None on failure."""
+        arg = arg.strip().lower()
+        if arg.endswith("m") and arg[:-1].isdigit():
+            return int(arg[:-1]) * 60
+        if arg.endswith("s") and arg[:-1].isdigit():
+            return int(arg[:-1])
+        return None
+
+    def _schedule_auto_burn(self, secs: int) -> None:
+        if self._burn_timer is not None:
+            self._burn_timer.stop()
+        m, s = divmod(secs, 60)
+        self._pane.write_system(f"⏱ auto-burn in {m}:{s:02d} — /burn cancel to abort")
+        self._burn_timer = self.set_timer(secs, self._fire_auto_burn)
+
+    def _cancel_auto_burn(self) -> None:
+        if self._burn_timer is not None:
+            self._burn_timer.stop()
+            self._burn_timer = None
+            self._pane.write_system("auto-burn cancelled")
+        else:
+            self._pane.write_system("no auto-burn scheduled")
+
+    async def _fire_auto_burn(self) -> None:
+        self._burn_timer = None
+        if self._session is None or not self._connected:
+            self._pane.write_system("auto-burn: no active session — burn skipped")
+            return
+        try:
+            await self._session.burn_conversation()
+        except Exception as exc:  # noqa: BLE001
+            self._pane.write_warning(f"auto-burn failed: {exc}")
 
     async def on_key(self, event: Key) -> None:
         """Shift+Enter inserts a newline into the draft instead of sending."""
