@@ -25,13 +25,16 @@ from drift.ui.app import (
     HelpModal,
     InfoPanel,
     InputBar,
+    LatencyPill,
     LockIndicator,
     LockWatermark,
     LogoBox,
     MessagePane,
     PillButton,
+    RatchetPill,
     SecurityPill,
     Sidebar,
+    UptimePill,
 )
 
 
@@ -369,3 +372,97 @@ async def test_encrypt_animation_skipped_for_empty_input() -> None:
         await pilot.press("enter")
         await pilot.pause()
         assert app._input.value == ""
+
+
+# --------------------------------------------------------------------------- #
+# Enhancement 2 — ambient header indicators
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.asyncio
+async def test_e2_pills_mount_in_header() -> None:
+    """UptimePill, LatencyPill, RatchetPill must be present in the header."""
+    async with _app().run_test() as pilot:
+        app = pilot.app
+        assert app.query_one(UptimePill)
+        assert app.query_one(LatencyPill)
+        assert app.query_one(RatchetPill)
+
+
+@pytest.mark.asyncio
+async def test_uptime_pill_starts_idle_then_ticks() -> None:
+    async with _app_active().run_test() as pilot:
+        app = pilot.app
+        pill = app.query_one(UptimePill)
+        # After _open_conversation the pill should have a start time.
+        assert pill._start is not None
+        # elapsed is a non-negative integer (seconds since start).
+        assert isinstance(pill.elapsed, int)
+        assert pill.elapsed >= 0
+        rendered = str(pill.render())
+        assert "⏱" in rendered
+        # Should show HH:MM:SS format, not the idle dash.
+        assert "—" not in rendered
+
+
+@pytest.mark.asyncio
+async def test_uptime_pill_idle_shows_dash() -> None:
+    async with _app(with_contacts=True).run_test() as pilot:
+        pill = pilot.app.query_one(UptimePill)
+        # No conversation opened — should show idle state.
+        assert "—" in str(pill.render())
+
+
+@pytest.mark.asyncio
+async def test_ratchet_pill_starts_at_zero() -> None:
+    async with _app().run_test() as pilot:
+        pill = pilot.app.query_one(RatchetPill)
+        assert pill.count == 0
+
+
+@pytest.mark.asyncio
+async def test_ratchet_pill_bumps_on_ratchet_event() -> None:
+    async with _app_active().run_test() as pilot:
+        app = pilot.app
+        pill = app.query_one(RatchetPill)
+        assert pill.count == 0
+        app.post_message(CryptoEvent("ratchet", "DH step"))
+        await pilot.pause()
+        assert pill.count == 1
+        assert pill.flashing is True  # flash is still active right after bump
+
+
+@pytest.mark.asyncio
+async def test_ratchet_pill_flash_clears_after_timer() -> None:
+    async with _app_active().run_test() as pilot:
+        app = pilot.app
+        pill = app.query_one(RatchetPill)
+        app.post_message(CryptoEvent("ratchet", "DH step"))
+        await pilot.pause()
+        await pilot.pause(0.5)  # wait out the 300 ms timer
+        assert pill.flashing is False
+
+
+@pytest.mark.asyncio
+async def test_latency_pill_idle_shows_dash() -> None:
+    async with _app().run_test() as pilot:
+        pill = pilot.app.query_one(LatencyPill)
+        assert pill.latency_ms is None
+        assert "—" in str(pill.render())
+
+
+@pytest.mark.asyncio
+async def test_latency_pill_colour_coding() -> None:
+    async with _app().run_test() as pilot:
+        pill = pilot.app.query_one(LatencyPill)
+        pill.latency_ms = 50
+        assert "#00ff41" in str(pill.render())
+        pill.latency_ms = 200
+        assert "#cccc00" in str(pill.render())
+        pill.latency_ms = 500
+        assert "#ff4444" in str(pill.render())
+
+
+def test_ratchet_pill_render_shows_count() -> None:
+    pill = RatchetPill()
+    pill.count = 7
+    assert "7" in str(pill.render())
