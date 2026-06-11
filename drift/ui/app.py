@@ -46,7 +46,7 @@ import hashlib
 import importlib.util
 import random
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
@@ -642,6 +642,114 @@ class InputBar(Vertical):
         return self.query_one("#msg-input", Input)
 
 
+@dataclass
+class NetworkState:
+    """Snapshot of the current network topology. Extensible for Phase 3/4."""
+
+    relay_url: str = ""
+    relay_connected: bool = False
+    relay_latency_ms: int | None = None
+    peer_name: str | None = None
+    peer_connected: bool = False
+    ratchet_steps: int = 0
+    stealth_addrs: int = 0
+    # Phase 3 extensibility (Tor)
+    tor_active: bool = False
+    tor_hops: int = 0
+    # Phase 4 extensibility (relay federation)
+    federation_peers: list[str] = field(default_factory=list)
+
+
+class NetworkPane(Static):
+    """
+    ASCII network topology diagram. Hidden by default; toggle with Ctrl+N.
+
+    Call `update_graph(state)` whenever session state changes. The Phase 3/4
+    fields in NetworkState are wired up but not yet populated — extend by
+    passing a richer state when Tor and federation land.
+    """
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._state = NetworkState()
+
+    def on_mount(self) -> None:
+        self._redraw()
+
+    def update_graph(self, state: NetworkState) -> None:
+        self._state = state
+        self._redraw()
+
+    def _redraw(self) -> None:
+        self.update(self._build())
+
+    def _build(self) -> RenderableType:
+        s = self._state
+        rc = "#00ff41" if s.relay_connected else "#555555"
+        pc = "#00d4ff" if s.peer_connected else "#555555"
+
+        relay_host = s.relay_url.replace("ws://", "").replace("wss://", "")
+        lat = f"⚡ {s.relay_latency_ms}ms" if s.relay_latency_ms is not None else "⚡ —"
+        relay_status = "● connected" if s.relay_connected else "○ offline"
+        down_arrow = "│ E2E + ↻ Ratchet" if s.relay_connected else "│"
+        peer_arrow = "│ stealth" if s.peer_connected else "│"
+
+        if s.peer_name:
+            peer_label = s.peer_name
+            peer_status = "● connected" if s.peer_connected else "○ offline"
+        else:
+            peer_label = "(no contact selected)"
+            peer_status = "press C to select"
+
+        # Tor note (Phase 3)
+        tor_line = (
+            f"\n  [#00d4ff]⬡ Tor active · {s.tor_hops} hops[/]" if s.tor_active else ""
+        )
+
+        # Federation note (Phase 4)
+        fed_line = (
+            f"\n  [#888888]⧉ {len(s.federation_peers)} federation peer(s)[/]"
+            if s.federation_peers else ""
+        )
+
+        stats = (
+            f"  [#888888]↻ {s.ratchet_steps} ratchet steps"
+            f"  ·  ⬡ {s.stealth_addrs} stealth addrs[/]"
+        )
+
+        body = (
+            "\n"
+            "  ┌──────────┐\n"
+            f"  │ [bold #00ff41]YOU[/]      │\n"
+            "  │ [#888888]local[/]    │\n"
+            "  └────┬─────┘\n"
+            f"       [#888888]{down_arrow}[/]\n"
+            "       ▼\n"
+            "  ┌────────────────────────────┐\n"
+            f"  │ [{rc}]{relay_host}[/]\n"
+            f"  │ [#888888]{relay_status}  {lat}[/]\n"
+            "  └────────────┬───────────────┘\n"
+            f"               [#888888]{peer_arrow}[/]\n"
+            "               ▼\n"
+            "  ┌────────────────────────────┐\n"
+            f"  │ [{pc}]{peer_label}[/]\n"
+            f"  │ [#888888]{peer_status}[/]\n"
+            "  └────────────────────────────┘\n"
+            f"{tor_line}{fed_line}"
+        )
+
+        return Group(
+            Text.from_markup(
+                "\n  [bold #888888]▶ NETWORK TOPOLOGY[/]  "
+                "[#333333](^N to return to chat)[/]"
+            ),
+            RichRule(style="#1a5c1a", characters="─"),
+            Text.from_markup(body),
+            RichRule(style="#1a5c1a", characters="─"),
+            Text.from_markup(f"{stats}\n"),
+        )
+
+
 class InfoPanel(Static):
     """Slide-in session info panel (Ctrl+I). Rendered from app-supplied data."""
 
@@ -971,6 +1079,7 @@ class DriftApp(App[None]):
         Binding("question_mark", "command('help')", "Help", show=False),
         Binding("ctrl+g", "toggle_info", "Info", show=False),
         Binding("ctrl+l", "toggle_log", "Log", show=False),
+        Binding("ctrl+n", "toggle_network", "Network", show=False),
         Binding("escape", "blur_input", "Unfocus", show=False),
     ]
 
@@ -1048,6 +1157,12 @@ class DriftApp(App[None]):
     }
     #pane > Static { width: 100%; height: auto; }
     #pane.flash { border: solid #88ffaa; background: #001800; }
+    #netpane {
+        display: none; height: 1fr;
+        background: #0a0a0a; border: solid #1a5c1a;
+        padding: 1 2; overflow-y: auto;
+        scrollbar-color: #00ff41; scrollbar-size-vertical: 1;
+    }
 
     /* ── Session info panel (slide-in, right) ───────────────── */
     #infopanel {
@@ -1136,6 +1251,7 @@ class DriftApp(App[None]):
                     with Container(id="pane-wrap"):
                         yield LockWatermark(id="watermark")
                         yield MessagePane(id="pane")
+                    yield NetworkPane(id="netpane")
                     yield InputBar(id="input")
                 yield InfoPanel(id="infopanel")
 
@@ -1570,6 +1686,28 @@ class DriftApp(App[None]):
     def action_toggle_log(self) -> None:
         """Show/hide the crypto-event ticker."""
         self._ticker.display = not self._ticker.display
+
+    def action_toggle_network(self) -> None:
+        """Toggle the ASCII network topology panel (replaces message pane)."""
+        net = self.query_one("#netpane", NetworkPane)
+        pane_wrap = self.query_one("#pane-wrap")
+        showing = not net.display
+        net.display = showing
+        pane_wrap.display = not showing
+        if showing:
+            self._sync_network_state()
+
+    def _sync_network_state(self) -> None:
+        state = NetworkState(
+            relay_url=self._relay_url,
+            relay_connected=self._connected,
+            relay_latency_ms=self.query_one(LatencyPill).latency_ms,
+            peer_name=self._active,
+            peer_connected=self._connected,
+            ratchet_steps=self.query_one(RatchetPill).count,
+            stealth_addrs=self._stealth_count,
+        )
+        self.query_one("#netpane", NetworkPane).update_graph(state)
 
     def action_toggle_info(self) -> None:
         """Slide the session info panel in/out from the right."""
