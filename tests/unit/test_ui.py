@@ -14,6 +14,7 @@ import pytest
 
 from drift.crypto import Identity
 from drift.ui.app import (
+    _SECURITY,
     AddContactModal,
     CommandPalette,
     CryptoEvent,
@@ -23,6 +24,8 @@ from drift.ui.app import (
     HelpModal,
     InfoPanel,
     InputBar,
+    LockIndicator,
+    LockWatermark,
     LogoBox,
     MessagePane,
     PillButton,
@@ -107,6 +110,57 @@ async def test_header_has_logo_security_pills_and_ticker() -> None:
         assert app.query_one(InfoPanel)
         # Four indicators: E2E, RATCHET, STEALTH, TOR.
         assert len(app.query(SecurityPill)) == 4
+
+
+@pytest.mark.asyncio
+async def test_header_has_lock_indicator_starting_unsecured() -> None:
+    async with _app().run_test() as pilot:
+        lock = pilot.app.query_one(LockIndicator)
+        assert lock.secure is False
+        # Open padlock, dim red, before any session connects.
+        rendered = str(lock.render())
+        assert "🔓" in rendered
+        assert "#aa3333" in rendered
+
+
+@pytest.mark.asyncio
+async def test_lock_indicator_reflects_secure_and_maximum_states() -> None:
+    async with _app().run_test() as pilot:
+        lock = pilot.app.query_one(LockIndicator)
+        lock.secure = True
+        await pilot.pause()
+        secured = str(lock.render())
+        assert "🔒" in secured and "#00ff41" in secured
+
+        lock.maximum = True
+        await pilot.pause()
+        maxed = str(lock.render())
+        # Closed lock plus a cyan superscript.
+        assert "🔒" in maxed and "⁺" in maxed and "#00d4ff" in maxed
+
+
+def test_stealth_pill_uses_hexagon_not_ghost() -> None:
+    labels = [label for label, _tip, _active in _SECURITY]
+    assert not any("👻" in label for label in labels)
+    assert any("⬡" in label for label in labels)
+
+
+@pytest.mark.asyncio
+async def test_watermark_tracks_session_security_state() -> None:
+    async with _app().run_test() as pilot:
+        mark = pilot.app.query_one(LockWatermark)
+        assert mark.state == "unsecured"
+        open_shape = str(mark.render())
+
+        pilot.app._set_secure(True)
+        await pilot.pause()
+        assert mark.state == "secured"
+        assert str(mark.render()) != open_shape  # shackle now closed
+
+        pilot.app._set_secure(True, maximum=True)
+        await pilot.pause()
+        assert mark.state == "max"
+        assert "╋" in str(mark.render())  # faint cross in the keyhole
 
 
 @pytest.mark.asyncio

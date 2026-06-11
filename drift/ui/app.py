@@ -8,14 +8,17 @@ layout can later be ported to a web UI almost one-to-one:
     DriftApp                     (root / state container — like <App/>)
     ├─ Header
     │  ├─ LogoBox                condensed block wordmark
-    │  ├─ SecurityBar            🔒 E2E · ⚡ RATCHET · 👻 STEALTH · 🌐 TOR pills
+    │  ├─ LockIndicator          🔓/🔒 boxed channel-security signal
+    │  ├─ SecurityBar            🔒 E2E · ⚡ RATCHET · ⬡ STEALTH · 🌐 TOR pills
     │  └─ HeaderBar              active contact · relay · connection
     ├─ CryptoTicker              live (non-secret) crypto-event feed (Ctrl+L)
     ├─ CommandPalette            [I] [A] [V] [C] [/] [Q]  (PillButton ×N)
     ├─ Body
     │  ├─ Sidebar                contact list (ContactItem ×N) + add
     │  ├─ ChatColumn
-    │  │  ├─ MessagePane         scrollable message log (per-line status)
+    │  │  ├─ pane-wrap           layered: LockWatermark (behind) + MessagePane
+    │  │  │  ├─ LockWatermark    dim block padlock behind the messages
+    │  │  │  └─ MessagePane      scrollable message log (per-line status)
     │  │  └─ InputBar            rule · prompt · input · counter · help bar
     │  └─ InfoPanel              slide-in session info (Ctrl+I)
     └─ Modals (pushed)           AddContactModal · VerifyModal · HelpModal ·
@@ -52,7 +55,7 @@ from rich.text import Text
 from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
-from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.events import Key
 from textual.message import Message
 from textual.reactive import reactive
@@ -90,7 +93,7 @@ _SECURITY: list[tuple[str, str, bool]] = [
                "The relay only ever sees ciphertext.", True),
     ("⚡ RATCHET", "Double Ratchet — every message uses a fresh key; a leaked key "
                    "cannot decrypt past or future messages.", True),
-    ("👻 STEALTH", "Stealth addresses — each message goes to a one-time address only "
+    ("⬡ STEALTH", "Stealth addresses — each message goes to a one-time address only "
                    "you can recognise; the relay can't link your messages.", True),
     ("🌐 TOR", "Tor transport — NOT active yet (Phase 3). Your IP is currently "
                "visible to the relay.", False),
@@ -102,6 +105,45 @@ _LOGO_ROWS: tuple[str, ...] = (
     "█ █ █▀▄ █ █▀   █ ",
     "▀▀  ▀ ▀ ▀ ▀    ▀ ",
 )
+
+# Large block padlock rendered as a dim watermark behind the message pane. One
+# shape per security state; lines are horizontally symmetric so centre-aligning
+# them keeps the lock symmetric regardless of leading whitespace.
+#   unsecured — shackle swung open (no secured session)
+#   secured   — shackle closed (E2E + ratchet active)
+#   max       — closed, with a faint cross in the keyhole (Tor also active; P3)
+_LOCK_WATERMARK: dict[str, tuple[str, ...]] = {
+    "unsecured": (
+        "██████",
+        "██    ██",
+        "██",
+        "████████████",
+        "█  ██████  █",
+        "█  ██████  █",
+        "█  ██████  █",
+        "████████████",
+    ),
+    "secured": (
+        "██████",
+        "██    ██",
+        "██    ██",
+        "████████████",
+        "█  ██████  █",
+        "█  ██████  █",
+        "█  ██████  █",
+        "████████████",
+    ),
+    "max": (
+        "██████",
+        "██    ██",
+        "██    ██",
+        "████████████",
+        "█  ██████  █",
+        "█  ██╋╋██  █",
+        "█  ██████  █",
+        "████████████",
+    ),
+}
 
 
 def _now() -> str:
@@ -193,6 +235,39 @@ class LogoBox(Static):
         return logo
 
 
+class LockIndicator(Static):
+    """
+    The single most prominent security signal in the header: a boxed padlock
+    whose colour and glyph track the live channel state. Sits just left of the
+    security pills so it's the first thing the eye lands on.
+
+        🔓  dim red    — unsecured (no active, connected session)
+        🔒  bright green — secured (E2E + Double Ratchet active)
+        🔒⁺ green + cyan superscript — maximum security (Tor also active; Phase 3)
+
+    The box-drawing frame makes it read as a status panel rather than a bare
+    emoji. ``maximum`` only has meaning when ``secure`` is also set.
+    """
+
+    secure: reactive[bool] = reactive(False)
+    maximum: reactive[bool] = reactive(False)
+
+    def render(self) -> RenderableType:
+        if self.secure and self.maximum:
+            # Closed lock + a small cyan superscript plus.
+            colour = "#00ff41"
+            mid = f"[{colour}]│🔒[/][#00d4ff]⁺[/][{colour}]│[/]"
+        elif self.secure:
+            colour = "#00ff41"
+            mid = f"[{colour}]│ 🔒│[/]"
+        else:
+            colour = "#aa3333"  # dim red — channel not secured
+            mid = f"[{colour}]│ 🔓│[/]"
+        top = f"[{colour}]╭───╮[/]"
+        bot = f"[{colour}]╰───╯[/]"
+        return f"{top}\n{mid}\n{bot}"
+
+
 class SecurityPill(Static):
     """A security indicator pill — bright green if active, dim+struck if not."""
 
@@ -262,8 +337,8 @@ class CryptoTicker(Static):
 
     _ICON: ClassVar[dict[str, tuple[str, str]]] = {
         "ratchet": ("⚡", "#00d4ff"),
-        "send": ("👻", "#00ff41"),
-        "recv": ("👻", "#00ff41"),
+        "send": ("⬡", "#00ff41"),
+        "recv": ("⬡", "#00ff41"),
         "erase": ("🔥", "#cc7722"),
     }
 
@@ -391,6 +466,21 @@ class _SentLine(Static):
         line.append(self._text, style="#b0ffb0")
         line.append(f"  {glyph}", style=colour)
         return line
+
+
+class LockWatermark(Static):
+    """
+    A large, very dim block padlock painted *behind* the message pane (on a
+    lower layer). It echoes the channel state — open lock when unsecured,
+    closed when secured, closed-with-a-cross at maximum security — as a ghost
+    image that never obscures message text (messages render on the layer above).
+    """
+
+    state: reactive[str] = reactive("unsecured")
+
+    def render(self) -> RenderableType:
+        rows = _LOCK_WATERMARK.get(self.state, _LOCK_WATERMARK["unsecured"])
+        return Text("\n".join(rows), no_wrap=True)
 
 
 class MessagePane(VerticalScroll):
@@ -798,6 +888,9 @@ class DriftApp(App[None]):
     #header { height: 5; padding: 0 1; background: #0a0a0a; }
     #header-top { height: 3; }
     #logo { width: auto; height: 3; content-align: left middle; }
+    #lock {
+        width: auto; height: 3; margin: 0 2 0 2; content-align: center middle;
+    }
     #security { width: 1fr; height: 3; align-horizontal: right; content-align: right middle; }
     SecurityPill {
         width: auto; height: 3; padding: 0 1; margin: 0 0 0 1;
@@ -837,8 +930,16 @@ class DriftApp(App[None]):
 
     /* ── Chat column ────────────────────────────────────────── */
     #chat { width: 1fr; }
+    /* The watermark layer sits behind the message layer; messages render on
+       top of the dim lock. */
+    #pane-wrap { height: 1fr; layers: watermark messages; }
+    #watermark {
+        layer: watermark; width: 100%; height: 100%;
+        content-align: center middle; text-align: center;
+        color: #00ff41 8%;
+    }
     #pane {
-        height: 1fr; background: #0a0a0a; border: solid #1a5c1a;
+        layer: messages; height: 100%; background: transparent; border: solid #1a5c1a;
         scrollbar-color: #00ff41; scrollbar-background: #0a0a0a;
         scrollbar-gutter: stable; scrollbar-size-vertical: 1; padding: 0 1;
     }
@@ -913,6 +1014,7 @@ class DriftApp(App[None]):
             with Vertical(id="header"):
                 with Horizontal(id="header-top"):
                     yield LogoBox(id="logo")
+                    yield LockIndicator(id="lock")
                     yield SecurityBar(id="security")
                 yield HeaderBar(id="headerinfo")
                 yield Static(RichRule(style="#1a5c1a", characters="─"), id="header-rule")
@@ -921,7 +1023,10 @@ class DriftApp(App[None]):
             with Horizontal(id="body"):
                 yield Sidebar(id="sidebar")
                 with Vertical(id="chat"):
-                    yield MessagePane(id="pane")
+                    # The pane sits on a layer above a dim lock watermark.
+                    with Container(id="pane-wrap"):
+                        yield LockWatermark(id="watermark")
+                        yield MessagePane(id="pane")
                     yield InputBar(id="input")
                 yield InfoPanel(id="infopanel")
 
@@ -970,6 +1075,22 @@ class DriftApp(App[None]):
     def _infopanel(self) -> InfoPanel:
         return self.query_one("#infopanel", InfoPanel)
 
+    @property
+    def _lock(self) -> LockIndicator:
+        return self.query_one("#lock", LockIndicator)
+
+    @property
+    def _watermark(self) -> LockWatermark:
+        return self.query_one("#watermark", LockWatermark)
+
+    def _set_secure(self, secure: bool, *, maximum: bool = False) -> None:
+        """Drive the header lock and the pane watermark from one place."""
+        self._lock.secure = secure
+        self._lock.maximum = maximum
+        self._watermark.state = (
+            "max" if (secure and maximum) else "secured" if secure else "unsecured"
+        )
+
     # ── Background session worker (UI never touches crypto) ────────────────
 
     @work(exclusive=True, group="session")
@@ -1009,6 +1130,7 @@ class DriftApp(App[None]):
         self._connected = False
         self._header.contact_name = name
         self._header.connected = False
+        self._set_secure(False)  # not secured until the relay handshake completes
         # Reset per-session telemetry.
         self._sent_count = 0
         self._recv_count = 0
@@ -1043,6 +1165,7 @@ class DriftApp(App[None]):
             return
         self._connected = True
         self._header.connected = True
+        self._set_secure(True)  # E2E + ratchet active (Tor is Phase 3 → not maximum)
         self._pane.write_system(f"⣿ secured channel to {self._relay_url}")
 
     @on(SessionDown)
@@ -1051,6 +1174,7 @@ class DriftApp(App[None]):
             return
         self._connected = False
         self._header.connected = False
+        self._set_secure(False)
         self._pane.write_warning(event.reason)
 
     @on(IncomingMessage)

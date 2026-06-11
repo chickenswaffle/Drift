@@ -9,6 +9,19 @@ DRIFT uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Header lock indicator** — a prominent boxed padlock left of the security
+  pills that tracks the live channel state: 🔓 dim red (unsecured), 🔒 green
+  (E2E + ratchet active), 🔒⁺ green with a cyan superscript (maximum security,
+  once Tor lands in Phase 3).
+- **Lock watermark** behind the message pane — a large, very dim block padlock
+  on a layer beneath the messages; open when unsecured, closed when secured,
+  closed-with-a-cross at maximum security. Never obscures message text.
+
+### Changed
+- Replaced the 👻 ghost on the STEALTH pill (and in the crypto ticker) with ⬡,
+  matching the hexagon motif already used elsewhere in the UI.
+
 ---
 
 ## [0.4.4] — 2026-06-11
