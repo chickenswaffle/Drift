@@ -10,7 +10,10 @@ Run: pytest tests/unit/test_ui.py -v
 
 from __future__ import annotations
 
+from io import StringIO
+
 import pytest
+from rich.console import Console
 
 from drift.crypto import Identity
 from drift.ui.app import (
@@ -30,6 +33,8 @@ from drift.ui.app import (
     LockWatermark,
     LogoBox,
     MessagePane,
+    NetworkPane,
+    NetworkState,
     PillButton,
     RatchetPill,
     SecurityPill,
@@ -466,3 +471,93 @@ def test_ratchet_pill_render_shows_count() -> None:
     pill = RatchetPill()
     pill.count = 7
     assert "7" in str(pill.render())
+
+
+# --------------------------------------------------------------------------- #
+# Enhancement 3 — network visualization panel
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.asyncio
+async def test_network_pane_mounts_hidden() -> None:
+    async with _app().run_test() as pilot:
+        net = pilot.app.query_one(NetworkPane)
+        assert net.display is False
+
+
+@pytest.mark.asyncio
+async def test_ctrl_n_toggles_network_pane() -> None:
+    async with _app().run_test() as pilot:
+        app = pilot.app
+        net = pilot.app.query_one(NetworkPane)
+        pane_wrap = pilot.app.query_one("#pane-wrap")
+        assert net.display is False
+        assert pane_wrap.display is True
+        app.action_toggle_network()
+        await pilot.pause()
+        assert net.display is True
+        assert pane_wrap.display is False
+        # Toggle back.
+        app.action_toggle_network()
+        await pilot.pause()
+        assert net.display is False
+        assert pane_wrap.display is True
+
+
+def test_network_state_defaults() -> None:
+    s = NetworkState()
+    assert s.relay_connected is False
+    assert s.peer_name is None
+    assert s.tor_active is False
+    assert s.federation_peers == []
+
+
+def _render(renderable: object) -> str:
+    buf = StringIO()
+    Console(file=buf, force_terminal=False, width=120).print(renderable)
+    return buf.getvalue()
+
+
+def test_network_pane_build_shows_relay_url() -> None:
+    pane = NetworkPane()
+    state = NetworkState(
+        relay_url="ws://localhost:8765",
+        relay_connected=True,
+        relay_latency_ms=42,
+        peer_name="alice",
+        peer_connected=True,
+        ratchet_steps=5,
+        stealth_addrs=10,
+    )
+    pane._state = state
+    rendered = _render(pane._build())
+    assert "localhost:8765" in rendered
+    assert "alice" in rendered
+    assert "42ms" in rendered
+    assert "5 ratchet steps" in rendered
+
+
+def test_network_pane_build_shows_tor_when_active() -> None:
+    pane = NetworkPane()
+    state = NetworkState(tor_active=True, tor_hops=3)
+    pane._state = state
+    rendered = _render(pane._build())
+    assert "Tor active" in rendered
+    assert "3 hops" in rendered
+
+
+def test_network_pane_build_shows_federation_peers() -> None:
+    pane = NetworkPane()
+    state = NetworkState(federation_peers=["relay2.example.com"])
+    pane._state = state
+    rendered = _render(pane._build())
+    assert "federation peer" in rendered
+
+
+@pytest.mark.asyncio
+async def test_network_pane_update_graph_reflects_state() -> None:
+    async with _app().run_test() as pilot:
+        app = pilot.app
+        net = app.query_one(NetworkPane)
+        net.update_graph(NetworkState(relay_url="ws://test:9999", relay_connected=True))
+        await pilot.pause()
+        assert "test:9999" in str(net._state.relay_url)
