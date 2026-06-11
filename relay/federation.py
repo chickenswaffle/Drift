@@ -193,6 +193,14 @@ class Federation:
         """Known peer base URLs (http form), sorted for stable output."""
         return sorted(self._peers)
 
+    def set_self_url(self, url: str) -> None:
+        """Set this node's external URL (e.g. its .onion) after construction."""
+        self._self_url = to_http(url) if url else None
+
+    def set_dedup_capacity(self, capacity: int) -> None:
+        """Resize the dedup LRU (a low-power node tunes this down to ~1k)."""
+        self._seen.set_capacity(capacity)
+
     def _add_peer_url(self, url: str) -> bool:
         """Add a peer (normalised); never add ourselves. True if newly added."""
         norm = to_http(url)
