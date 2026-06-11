@@ -14,10 +14,12 @@ Run: pytest tests/integration/ -v
 from __future__ import annotations
 
 import asyncio
+import json
 import socket
 
 import pytest
 import uvicorn
+import websockets
 
 import relay.server as relay_module
 from drift.crypto import Identity
@@ -228,9 +230,7 @@ async def test_replayed_envelope_is_deduped_not_double_delivered(relay_url: str)
         env = Envelope(
             to=STEALTH_CHANNEL,
             ciphertext=captured.ciphertext,
-            ephemeral_pub=captured.ephemeral_pub,
             one_time_addr=captured.one_time_addr,
-            ratchet_header=captured.ratchet_header,
         )
         # Bob's own subscribe already replayed the genuine "once" from the
         # buffer; now inject a byte-identical duplicate.
@@ -273,13 +273,19 @@ async def test_messages_use_rotating_addresses(relay_url: str) -> None:
         env2 = await asyncio.wait_for(observer.receive(), timeout=5.0)
 
         # Wire-level unlinkability: different one-time address + ephemeral key.
+        # Sealed sender — the ephemeral key now lives *inside* the opaque blob.
+        from drift.crypto.sealed import parse as parse_sealed
+        r1, sealed_hdr1, _ = parse_sealed(env1.ciphertext)
+        r2, sealed_hdr2, _ = parse_sealed(env2.ciphertext)
         assert env1.one_time_addr != env2.one_time_addr
-        assert env1.ephemeral_pub != env2.ephemeral_pub
+        assert r1 != r2                          # distinct per-message ephemeral keys
+        assert env1.ciphertext != env2.ciphertext
         # Both still route to the shared channel — the relay learns nothing else.
         assert env1.to == STEALTH_CHANNEL == env2.to
-        # Each carries a ratchet header (the content key schedule).
-        assert env1.ratchet_header is not None
-        assert env2.ratchet_header is not None
+        # The ratchet header is no longer a clear wire field — it is sealed
+        # inside the blob, so the relay can't link a sender by their ratchet key.
+        assert not hasattr(env1, "ratchet_header")
+        assert sealed_hdr1 and sealed_hdr2
 
         # Despite rotation, Bob decrypts both in order.
         bob_msgs = bob_session.messages()
@@ -348,9 +354,12 @@ async def test_tampered_ciphertext_raises_invalid_tag(relay_url: str) -> None:
     # injection below should reach Bob.
     relay_module._recent.clear()
 
-    assert captured.ratchet_header is not None
+    # Flip a bit in the trailing ratchet-content auth tag (the blob ends with
+    # the ratchet ciphertext; R and the sealed header sit ahead of it, so the
+    # scan still matches and the header still unseals — the corruption only
+    # surfaces when the ratchet body is authenticated).
     corrupt = bytearray(captured.ciphertext)
-    corrupt[-1] ^= 0xFF  # flip a bit in the auth tag
+    corrupt[-1] ^= 0xFF
 
     injector = RelayClient(relay_url, "injector")
     async with Session(bob, alice.contact_code(), relay_url) as bob_session, injector:
@@ -358,12 +367,51 @@ async def test_tampered_ciphertext_raises_invalid_tag(relay_url: str) -> None:
             Envelope(
                 to=STEALTH_CHANNEL,
                 ciphertext=bytes(corrupt),
-                ephemeral_pub=captured.ephemeral_pub,
                 one_time_addr=captured.one_time_addr,
-                ratchet_header=captured.ratchet_header,
             )
         )
 
         bob_msgs = bob_session.messages()
         with pytest.raises(InvalidTag):
             await asyncio.wait_for(bob_msgs.__anext__(), timeout=5.0)
+
+
+# ---------------------------------------------------------------------------
+# Sealed sender (Phase 3b) — the relay sees no sender metadata
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_relay_sees_only_address_and_opaque_blob(relay_url: str) -> None:
+    """
+    A raw observer on the firehose (standing in for the relay operator) sees the
+    exact JSON the relay broadcasts. Sealed sender guarantees it carries only the
+    recipient's one-time address and an opaque ciphertext — never the sender's
+    ephemeral key ("R") or the Double Ratchet header ("hdr"), which used to be in
+    the clear and let the relay link a sender's messages.
+    """
+    alice, bob = _alice_and_bob()
+
+    # Subscribe a raw websocket to the firehose *before* Alice sends.
+    async with websockets.connect(f"{relay_url}/ws/{STEALTH_CHANNEL}") as raw:
+        async with Session(alice, bob.contact_code(), relay_url) as alice_session:
+            await alice_session.send("metadata?")
+
+            # Read frames until the message envelope arrives (skip control frames).
+            for _ in range(10):
+                frame = json.loads(await asyncio.wait_for(raw.recv(), timeout=5.0))
+                if "ct" in frame and not frame.get("type"):
+                    break
+            else:
+                raise AssertionError("relay never broadcast the message envelope")
+
+    # The relay forwards the one-time address (to route/detect) + opaque blob …
+    assert "addr" in frame
+    assert "ct" in frame
+    # … and crucially NOT the sender's ephemeral key or ratchet header.
+    assert "R" not in frame
+    assert "hdr" not in frame
+
+    # The plaintext is nowhere in the broadcast, and neither is any structured
+    # sender metadata — just an opaque base64 blob.
+    assert "metadata?" not in json.dumps(frame)

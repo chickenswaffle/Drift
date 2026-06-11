@@ -228,26 +228,22 @@ async def send_message(envelope: dict[str, Any]) -> JSONResponse:
     """
     POST a message envelope to the relay.
 
-    Expected body (Phase 0):
+    Expected body (sealed sender — Phase 3b):
         {
-            "to":  "<addr>",         // routing key (opaque to relay)
-            "ct":  "<base64>",       // ciphertext (opaque to relay)
-            "ts":  1234567890        // unix timestamp (for TTL)
+            "to":   "<channel>",     // firehose routing key (opaque to relay)
+            "ct":   "<base64>",      // opaque sealed blob (opaque to relay)
+            "ts":   1234567890,      // unix timestamp (for TTL)
+            "addr": "<base64>"       // recipient one-time stealth address
         }
 
-    Phase 1 stealth fields (optional, opaque to relay):
-        "R":    "<base64>",          // sender's ephemeral public key
-        "addr": "<base64>"           // derived one-time stealth address
+    The relay never inspects "ct" or "addr". The sender's ephemeral key and the
+    Double Ratchet header used to ride here in the clear ("R"/"hdr"); as of
+    sealed sender they are encrypted inside "ct", so the relay can no longer
+    group a sender's messages by ratchet header. Only the recipient, scanning
+    with their private scan key, can tell which one-time address is theirs.
 
-    Phase 2 ratchet field (optional, opaque to relay):
-        "hdr":  "<base64>"           // serialized Double Ratchet header
-
-    The relay never inspects "ct", "R", "addr", or "hdr" — it routes and
-    forgets. Only the recipient, scanning with their private scan key, can
-    tell which one-time address (and therefore which message) is theirs.
-
-    We rebuild the forwarded record from known fields only, so the relay
-    never re-broadcasts arbitrary client-supplied JSON to other clients.
+    We rebuild the forwarded record from known fields only, so the relay never
+    re-broadcasts arbitrary client-supplied JSON to other clients.
     """
     to_addr = envelope.get("to", "")
     if not to_addr:
@@ -260,14 +256,9 @@ async def send_message(envelope: dict[str, Any]) -> JSONResponse:
         "_relay_ts": time.time(),
         "_id": str(uuid4()),
     }
-    # Carry Phase 1 stealth-address fields through untouched, if present.
-    if "R" in envelope:
-        record["R"] = envelope["R"]
+    # Carry the recipient's one-time address through untouched (routing/detection).
     if "addr" in envelope:
         record["addr"] = envelope["addr"]
-    # Carry the Phase 2 ratchet header through untouched, if present.
-    if "hdr" in envelope:
-        record["hdr"] = envelope["hdr"]
 
     envelope = record
 

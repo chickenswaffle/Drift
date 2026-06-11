@@ -64,28 +64,24 @@ class Envelope:
     """
     A message blob as seen by the transport layer.
 
-    ``ciphertext`` is opaque bytes — the transport layer base64-encodes
-    them for JSON transit and decodes them on receipt.  Nothing here
-    knows what the bytes contain.
+    ``ciphertext`` is opaque bytes — the transport layer base64-encodes them for
+    JSON transit and decodes them on receipt. Nothing here knows what the bytes
+    contain.
 
-    Phase 1 stealth-address fields (both optional, opaque to transport):
-      ``ephemeral_pub``  — the sender's one-time public key R
-      ``one_time_addr``  — the derived one-time address A_once
+    Phase 3b (sealed sender): the *only* metadata the relay sees besides the
+    opaque ciphertext is the recipient's one-time stealth address, used to detect
+    and route the message. The sender's ephemeral key and the Double Ratchet
+    header — which previously rode in the clear and let the relay link a sender's
+    messages — are now sealed *inside* ``ciphertext`` by the session layer (see
+    drift.crypto.sealed). The transport layer never interprets any of it.
 
-    Phase 2 ratchet field (optional, opaque to transport):
-      ``ratchet_header`` — serialized Double Ratchet header
-
-    All are carried verbatim so the receiver can scan for messages
-    addressed to it and turn its ratchet. The transport layer never
-    interprets them.
+      ``one_time_addr`` — A_once, the recipient's one-time stealth address
     """
 
     to: str            # destination/routing key — opaque to transport
-    ciphertext: bytes  # encrypted payload — opaque to transport
+    ciphertext: bytes  # opaque sealed blob — R || sealed_header || content (Phase 3b)
     timestamp: int = field(default_factory=lambda: int(time.time()))
-    ephemeral_pub: bytes | None = None    # R — stealth ephemeral public key
-    one_time_addr: bytes | None = None    # A_once — stealth one-time address
-    ratchet_header: bytes | None = None   # serialized Double Ratchet header
+    one_time_addr: bytes | None = None    # A_once — recipient one-time stealth address
 
 
 class RelayClient:
@@ -323,14 +319,11 @@ class RelayClient:
             "ct": base64.b64encode(envelope.ciphertext).decode(),
             "ts": envelope.timestamp,
         }
-        # Phase 1: carry stealth-address fields when present.
-        if envelope.ephemeral_pub is not None:
-            payload["R"] = base64.b64encode(envelope.ephemeral_pub).decode()
+        # Sealed sender (Phase 3b): the recipient's one-time address is the only
+        # metadata on the wire besides the opaque ciphertext. The ephemeral key
+        # and ratchet header are sealed inside ``ct`` by the session layer.
         if envelope.one_time_addr is not None:
             payload["addr"] = base64.b64encode(envelope.one_time_addr).decode()
-        # Phase 2: carry the ratchet header when present.
-        if envelope.ratchet_header is not None:
-            payload["hdr"] = base64.b64encode(envelope.ratchet_header).decode()
         try:
             resp = await self._http.post(f"{self._http_base}/send", json=payload)
             resp.raise_for_status()
@@ -430,11 +423,9 @@ class RelayClient:
                     continue
                 try:
                     ciphertext = base64.b64decode(msg["ct"])
-                    # Phase 1 stealth fields are optional; decode when present.
-                    ephemeral_pub = base64.b64decode(msg["R"]) if "R" in msg else None
+                    # Sealed sender: the one-time address is the only clear
+                    # metadata; everything else is inside the opaque ciphertext.
                     one_time_addr = base64.b64decode(msg["addr"]) if "addr" in msg else None
-                    # Phase 2 ratchet header is optional too.
-                    ratchet_header = base64.b64decode(msg["hdr"]) if "hdr" in msg else None
                 except ValueError:
                     continue
                 await self._queue.put(
@@ -442,9 +433,7 @@ class RelayClient:
                         to=msg.get("to", ""),
                         ciphertext=ciphertext,
                         timestamp=int(msg.get("ts", 0)),
-                        ephemeral_pub=ephemeral_pub,
                         one_time_addr=one_time_addr,
-                        ratchet_header=ratchet_header,
                     )
                 )
         except (ConnectionClosed, asyncio.CancelledError):
