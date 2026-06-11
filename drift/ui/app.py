@@ -811,7 +811,7 @@ class DriftApp(App[None]):
             return
         name, code = result
         try:
-            self._contacts = storage.add_contact(name, code)
+            self._contacts = storage.add_contact(self._identity, name, code)
         except storage.StorageError as exc:
             self._pane.write_warning(f"could not add {name}: {exc}")
             return
