@@ -135,6 +135,38 @@ async def test_bidirectional_exchange(relay_url: str) -> None:
 
 
 @pytest.mark.asyncio
+async def test_first_sender_may_be_key_order_responder(relay_url: str) -> None:
+    """
+    Regression for the handshake bug: whoever sends first becomes the ratchet
+    initiator. The initiator used to be fixed by static-key comparison, so if
+    the key-order *responder* opened the conversation, send() raised
+    "no sending chain yet". Here the higher-key party deliberately speaks first
+    — the case _alice_and_bob() (which always sorts the initiator first) hides.
+    """
+    a = Identity.generate()
+    b = Identity.generate()
+    # `first` is the party the OLD code treated as the responder (higher key).
+    if a.spend_keypair.public_bytes() < b.spend_keypair.public_bytes():
+        first, second = b, a
+    else:
+        first, second = a, b
+
+    async with (
+        Session(first, second.contact_code(), relay_url) as first_session,
+        Session(second, first.contact_code(), relay_url) as second_session,
+    ):
+        second_msgs = second_session.messages()
+        await first_session.send("responder speaks first")
+        got = await asyncio.wait_for(second_msgs.__anext__(), timeout=5.0)
+        assert got == "responder speaks first"
+
+        # The other side can still reply once it has received and turned its ratchet.
+        first_msgs = first_session.messages()
+        await second_session.send("reply")
+        assert await asyncio.wait_for(first_msgs.__anext__(), timeout=5.0) == "reply"
+
+
+@pytest.mark.asyncio
 async def test_many_messages_each_way(relay_url: str) -> None:
     """Ten messages each way, interleaved, all the way through the ratchet."""
     alice, bob = _alice_and_bob()

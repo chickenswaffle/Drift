@@ -23,16 +23,32 @@ We derive both deterministically so no extra handshake round-trip is needed:
   - responder's key  = HKDF(same ECDH) → a deterministic X25519 keypair both
                        sides can reconstruct
 
-Roles are assigned by comparing the two static spend keys (lower = initiator),
-so both peers agree on who bootstraps as sender vs. receiver without talking.
-The responder's *initial* ratchet key is the only deterministic key material;
-every key after the first DH ratchet step is freshly random (see ratchet.py).
-A production build would source these from an X3DH prekey exchange instead.
+Who sends first is the initiator
+--------------------------------
+Both peers bootstrap as *receivers* holding that shared deterministic responder
+keypair. Whoever sends the first message lazily promotes itself to initiator at
+that moment (``init_sender`` against the deterministic responder key); the peer
+turns its DH ratchet on receipt, exactly as in the normal flow. This is the only
+deterministic key material; every key after the first DH ratchet step is freshly
+random (see ratchet.py).
+
+We previously fixed the initiator role by comparing static spend keys (lower =
+initiator). That decoupled "who may speak first" from "who actually opens the
+chat", so ~half of real conversations could not start — the first sender, if it
+was the key-order responder, hit ``RatchetError: no sending chain yet``. Lazy
+promotion ties the role to who actually speaks first instead.
+
+Known limitation: if both peers send their very first message before either has
+received the other's, they each promote independently and the two ratchets do
+not line up — the mismatched message surfaces as ``InvalidTag`` (a clean reject,
+never silent corruption). A production build resolves this with an X3DH prekey
+exchange (Phase 3); for now the common one-sided open works correctly.
 """
 
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import AsyncGenerator
 
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
@@ -48,6 +64,8 @@ from drift.crypto.ratchet import (
 )
 from drift.crypto.stealth import derive_one_time_address, scan_for_message
 from drift.transport.client import Envelope, RelayClient
+
+logger = logging.getLogger("drift.transport.session")
 
 # Shared firehose channel every stealth client subscribes to. The relay
 # fans every envelope out to all subscribers; clients scan locally.
@@ -72,9 +90,8 @@ class Session:
             async for msg in s.messages():
                 print(msg)
 
-    Note: as in Signal/X3DH, only the *initiator* can send the first message.
-    The responder must receive that message (turning its DH ratchet) before it
-    can reply; calling :meth:`send` earlier raises ``RatchetError``.
+    Either peer may send the first message: whoever speaks first becomes the
+    ratchet initiator (see the module docstring's "Who sends first" section).
     """
 
     def __init__(
@@ -106,24 +123,39 @@ class Session:
 
     def _bootstrap_ratchet(self, identity: Identity) -> RatchetState:
         static_ecdh = identity.spend_keypair.ecdh(self._their_spend_pub)
-        root_secret = derive_message_key(static_ecdh, info=b"drift-ratchet-v1-root")
+        # Stash the root secret + deterministic responder keypair so that
+        # whichever side speaks first can promote itself to initiator on demand
+        # (see _promote_to_initiator). Both peers reconstruct identical values.
+        self._root_secret = derive_message_key(static_ecdh, info=b"drift-ratchet-v1-root")
         responder_priv = derive_message_key(
             static_ecdh, info=b"drift-ratchet-v1-responder"
         )
-        responder_keypair = _keypair_from_private(responder_priv)
+        self._responder_keypair = _keypair_from_private(responder_priv)
 
-        # Lower static spend key initiates; both peers compute this identically.
-        i_am_initiator = self._my_spend_pub < self._their_spend_pub
-        if i_am_initiator:
-            return init_sender(root_secret, responder_keypair.public_bytes())
-        return init_receiver(root_secret, responder_keypair)
+        # Everyone starts as a receiver; the first sender promotes lazily.
+        logger.debug("bootstrap: starting as receiver, awaiting first speaker")
+        return init_receiver(self._root_secret, self._responder_keypair)
+
+    def _promote_to_initiator(self) -> None:
+        """
+        Turn this side into the ratchet initiator on its first send.
+
+        Only valid before any message has been received (no sending chain yet
+        and no DH ratchet has turned). Idempotent guard lives in :meth:`send`.
+        """
+        logger.debug("send: no sending chain — promoting receiver → initiator")
+        self._ratchet = init_sender(
+            self._root_secret, self._responder_keypair.public_bytes()
+        )
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
     async def connect(self) -> None:
+        logger.debug("connect: subscribing to firehose %s", STEALTH_CHANNEL)
         await self._client.connect()
+        logger.debug("connect: subscribed")
 
     async def close(self) -> None:
         await self._client.close()
@@ -148,6 +180,9 @@ class Session:
         unlinkable on the wire.
         """
         async with self._lock:
+            if self._ratchet.sending_chain_key is None:
+                # First to speak in this conversation → become the initiator.
+                self._promote_to_initiator()
             header, ciphertext = ratchet_encrypt(self._ratchet, plaintext.encode())
 
         ephemeral = Keypair.generate()
@@ -186,11 +221,13 @@ class Session:
                 self._my_spend_pub,
             )
             if detected is None:
-                continue  # not addressed to us
+                continue  # not addressed to us (someone else's, or our own echo)
             if envelope.ratchet_header is None:
                 continue  # addressed to us but carries no ratchet header
 
+            logger.debug("messages: scan matched — decrypting our envelope")
             header = Header.from_bytes(envelope.ratchet_header)
             async with self._lock:
                 plaintext = ratchet_decrypt(self._ratchet, header, envelope.ciphertext)
             yield plaintext.decode()
+        logger.debug("messages: firehose ended — relay connection closed")
