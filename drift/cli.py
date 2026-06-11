@@ -154,13 +154,20 @@ def chat(
     name: str = typer.Argument(None, help="Contact to open (omit for the full client)"),
     relay: str = typer.Option("ws://localhost:8765", "--relay", help="Relay WebSocket URL"),
     no_tui: bool = typer.Option(False, "--no-tui", help="Plain-text mode (no Textual TUI)"),
+    no_tor: bool = typer.Option(
+        False, "--no-tor", help="Skip Tor and connect to the relay directly (dev/testing)"
+    ),
+    tor_only: bool = typer.Option(
+        False, "--tor-only", help="Refuse to connect at all if Tor fails to bootstrap"
+    ),
 ) -> None:
     """
     Open the DRIFT chat client.
 
     Phase 1: stealth addresses with rotating one-time addressing.
     Phase 2: Double Ratchet content encryption.
-    Phase 3: routes over Tor automatically.
+    Phase 3: routes over Tor automatically. Use --no-tor to bypass it, or
+             --tor-only to refuse a clearnet fallback.
     """
     identity = _require_identity()
     saved = storage.load_contacts(identity)
@@ -169,15 +176,31 @@ def chat(
         console.print(f"[red]Unknown contact:[/red] {name}")
         raise typer.Exit(1)
 
+    if no_tor and tor_only:
+        console.print("[red]--no-tor and --tor-only are mutually exclusive.[/red]")
+        raise typer.Exit(1)
+
+    use_tor = not no_tor
+
     if no_tui:
         if name is None:
             console.print("[red]--no-tui requires a contact name.[/red]")
             raise typer.Exit(1)
-        asyncio.run(_chat_async(name, identity, saved[name]["code"], relay))
+        ok = asyncio.run(
+            _chat_async(
+                name, identity, saved[name]["code"], relay,
+                use_tor=use_tor, tor_only=tor_only,
+            )
+        )
+        if not ok:
+            raise typer.Exit(1)
         return
 
     from drift.ui.app import DriftApp
-    DriftApp(identity, dict(saved), relay, active=name).run()
+    DriftApp(
+        identity, dict(saved), relay,
+        active=name, use_tor=use_tor, tor_required=tor_only,
+    ).run()
 
 
 @app.command()
@@ -191,15 +214,31 @@ def version() -> None:
 # ---------------------------------------------------------------------------
 
 async def _chat_async(
-    name: str, identity: Identity, contact_code: str, relay_url: str
-) -> None:
+    name: str,
+    identity: Identity,
+    contact_code: str,
+    relay_url: str,
+    *,
+    use_tor: bool = True,
+    tor_only: bool = False,
+) -> bool:
+    """
+    Headless chat loop. Returns True on a clean run, False if it could not start
+    (e.g. --tor-only and Tor was unavailable).
+    """
     from cryptography.exceptions import InvalidTag
 
     from drift.transport.session import Session
 
+    tor_client = await _bootstrap_tor_cli(use_tor=use_tor, tor_only=tor_only)
+    if tor_client is False:
+        return False  # --tor-only and bootstrap failed → refuse to connect
+
     console.print(f"[dim]Connecting to {relay_url} …[/dim]")
     try:
-        async with Session(identity, contact_code, relay_url) as session:
+        async with Session(
+            identity, contact_code, relay_url, tor_client=tor_client
+        ) as session:
             console.print(
                 f"[green]Connected.[/green] Chatting with [bold]{name}[/bold]. "
                 "Ctrl+C to quit.\n"
@@ -229,6 +268,47 @@ async def _chat_async(
                     pass
     except Exception as exc:  # noqa: BLE001
         console.print(f"[red]Connection error:[/red] {exc}")
+    finally:
+        if tor_client is not None:
+            await tor_client.close()
+    return True
+
+
+async def _bootstrap_tor_cli(*, use_tor: bool, tor_only: bool) -> Any:
+    """
+    Bring up Tor for the headless client.
+
+    Returns the :class:`TorClient` on success, ``None`` to proceed on clearnet
+    (Tor disabled or unavailable without --tor-only), or ``False`` to signal
+    the caller must abort (--tor-only and bootstrap failed).
+    """
+    if not use_tor:
+        return None
+
+    from drift.transport import tor
+
+    console.print("[dim]⚛ Bootstrapping Tor …[/dim]")
+
+    def _progress(pct: int, _detail: str) -> None:
+        console.print(f"[dim]  Bootstrapping Tor... {pct}%[/dim]")
+
+    try:
+        client = await tor.bootstrap(on_progress=_progress)
+    except tor.TorError as exc:
+        if tor_only:
+            console.print(
+                f"[red]Tor required (--tor-only) but unavailable:[/red] {exc}"
+            )
+            return False
+        console.print(
+            f"[yellow]⚠ Tor unavailable — connecting direct:[/yellow] {exc}"
+        )
+        return None
+    console.print(
+        f"[green]✓ Tor circuit established[/green] "
+        f"[dim]· {client.num_hops} hops[/dim]"
+    )
+    return client
 
 
 async def _receive_loop(session: Any, name: str) -> None:

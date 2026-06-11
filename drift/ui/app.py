@@ -69,6 +69,7 @@ from textual.widgets import Button, Input, Static
 
 from drift import __version__, storage
 from drift.transport.session import Session
+from drift.transport.tor import TOR_DEFAULT_HOPS, TorClient
 
 if TYPE_CHECKING:
     from textual.await_remove import AwaitRemove
@@ -434,6 +435,21 @@ class SessionDown(Message):
         self.reason = reason
 
 
+class TorProgress(Message):
+    """Worker → UI: Tor bootstrap progress (0–100%). Thread-safe to post."""
+    def __init__(self, percent: int, detail: str) -> None:
+        super().__init__()
+        self.percent = percent
+        self.detail = detail
+
+
+class TorActiveEvent(Message):
+    """Worker → UI: a Tor circuit is now carrying this session's traffic."""
+    def __init__(self, hops: int) -> None:
+        super().__init__()
+        self.hops = hops
+
+
 class BurnEvent(Message):
     """Worker → UI: a verified burn tombstone arrived for a conversation."""
     def __init__(self, contact: str, scope: str, message_id: str | None) -> None:
@@ -515,6 +531,19 @@ class SecurityPill(Static):
             return f"[{_P}]{self._label}[/]"
         return f"[#555555 strike]{self._label}[/]"
 
+    @property
+    def label(self) -> str:
+        return self._label
+
+    def set_active(self, active: bool, *, tooltip: str | None = None) -> None:
+        """Flip the pill bright/dim at runtime (e.g. TOR once a circuit is up)."""
+        self._active = active
+        if tooltip is not None:
+            self._tip = tooltip
+            self.tooltip = tooltip
+        self.set_class(not active, "inactive")
+        self.refresh()
+
     def on_click(self) -> None:
         self.post_message(SecurityPillClicked(self._label, self._tip))
 
@@ -530,6 +559,19 @@ class SecurityBar(Horizontal):
     def compose(self) -> ComposeResult:
         for label, tooltip_text, active in _SECURITY:
             yield SecurityPill(label, tooltip_text, active)
+
+    def set_tor_active(self, active: bool) -> None:
+        """Light up (or dim) the 🌐 TOR pill once a circuit is established."""
+        tip = (
+            "Tor transport — ACTIVE. Relay traffic is routed through a 3-hop "
+            "Tor circuit; the relay sees a Tor exit, not your IP."
+            if active
+            else _SECURITY[-1][1]
+        )
+        for pill in self.query(SecurityPill):
+            if pill.label.endswith("TOR"):
+                pill.set_active(active, tooltip=tip)
+                break
 
 
 def _ws_to_http(url: str) -> str:
@@ -563,9 +605,17 @@ class UptimePill(Static):
 
 
 class LatencyPill(Static):
-    """Relay round-trip latency: ⚡ Nms, color-coded green/yellow/red."""
+    """
+    Relay round-trip latency: ⚡ Nms, color-coded green/yellow/red.
+
+    During Phase 3 Tor bootstrap this same slot hosts the progress readout
+    (``⚛ Bootstrapping Tor... 42%``); ``bootstrap_pct`` takes precedence over
+    the latency display while it is set, and clears back to latency once the
+    circuit is up (or the attempt is abandoned).
+    """
 
     latency_ms: reactive[int | None] = reactive(None)
+    bootstrap_pct: reactive[int | None] = reactive(None)
 
     def __init__(self, health_url: str, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -583,7 +633,17 @@ class LatencyPill(Static):
         except Exception:  # noqa: BLE001
             self.latency_ms = None
 
+    def set_bootstrap(self, pct: int) -> None:
+        """Show Tor bootstrap progress in place of the latency readout."""
+        self.bootstrap_pct = max(0, min(100, pct))
+
+    def clear_bootstrap(self) -> None:
+        """Drop back to the normal latency readout."""
+        self.bootstrap_pct = None
+
     def render(self) -> RenderableType:
+        if self.bootstrap_pct is not None:
+            return f"[{_S}]⚛ Bootstrapping Tor... {self.bootstrap_pct}%[/]"
         if self.latency_ms is None:
             return "[#444444]⚡ —[/]"
         ms = self.latency_ms
@@ -647,6 +707,7 @@ class CryptoTicker(Static):
         "recv": ("⬡", _P),
         "erase": ("🔥", "#cc7722"),
         "burn": ("🔥", _WN),
+        "tor": ("⬡", _S),
     }
 
     def on_mount(self) -> None:
@@ -662,6 +723,8 @@ class CryptoTicker(Static):
             body = "message key erased"
         elif kind == "burn":
             body = detail
+        elif kind == "tor":
+            body = f"tor {detail}"
         else:  # ratchet
             body = detail
         self.update(f"[#555555]\\[{ts}][/]  [{colour}]{icon} {body}[/]")
@@ -898,6 +961,28 @@ class NetworkPane(Static):
     def _redraw(self) -> None:
         self.update(self._build())
 
+    @staticmethod
+    def _tor_segment(s: NetworkState) -> str:
+        """The anonymising Tor circuit drawn between YOU and the relay."""
+        hops = s.tor_hops or TOR_DEFAULT_HOPS
+        # Label the conventional three relays; fall back to "hop N" beyond that.
+        digits = "①②③④⑤⑥⑦⑧⑨"
+        names = ["guard", "middle", "exit"]
+        chain = "  →  ".join(
+            f"{digits[i] if i < len(digits) else '·'} "
+            f"{names[i] if i < len(names) else f'hop{i + 1}'}"
+            for i in range(hops)
+        )
+        return (
+            f"       [{_DM}]│ E2E + ↻ Ratchet[/]\n"
+            "       ▼\n"
+            f"  ╭─ [{_S}]tor circuit · {hops} hops[/] ──────────╮\n"
+            f"  │ [{_S}]{chain}[/]\n"
+            "  ╰──────────────┬───────────────╯\n"
+            f"               [{_DM}]│ anonymised[/]\n"
+            "               ▼\n"
+        )
+
     def _build(self) -> RenderableType:
         s = self._state
         rc = _P if s.relay_connected else "#555555"
@@ -916,9 +1001,11 @@ class NetworkPane(Static):
             peer_label = "(no contact selected)"
             peer_status = "press C to select"
 
-        # Tor note (Phase 3)
-        tor_line = (
-            f"\n  [{_S}]⬡ Tor active · {s.tor_hops} hops[/]" if s.tor_active else ""
+        # YOU → relay connector. With Tor active it expands into the anonymising
+        # 3-hop circuit (guard → middle → exit); otherwise a single arrow.
+        connector = self._tor_segment(s) if s.tor_active else (
+            f"       [{_DM}]{down_arrow}[/]\n"
+            "       ▼\n"
         )
 
         # Federation note (Phase 4)
@@ -938,8 +1025,7 @@ class NetworkPane(Static):
             f"  │ [bold {_P}]YOU[/]      │\n"
             f"  │ [{_DM}]local[/]    │\n"
             "  └────┬─────┘\n"
-            f"       [{_DM}]{down_arrow}[/]\n"
-            "       ▼\n"
+            f"{connector}"
             "  ┌────────────────────────────┐\n"
             f"  │ [{rc}]{relay_host}[/]\n"
             f"  │ [{_DM}]{relay_status}  {lat}[/]\n"
@@ -950,7 +1036,7 @@ class NetworkPane(Static):
             f"  │ [{pc}]{peer_label}[/]\n"
             f"  │ [{_DM}]{peer_status}[/]\n"
             "  └────────────────────────────┘\n"
-            f"{tor_line}{fed_line}"
+            f"{fed_line}"
         )
 
         return Group(
@@ -1306,12 +1392,22 @@ class DriftApp(App[None]):
         relay_url: str,
         *,
         active: str | None = None,
+        use_tor: bool = False,
+        tor_required: bool = False,
     ) -> None:
         super().__init__()
         self._identity = identity
         self._contacts: Contacts = contacts
         self._relay_url = relay_url
         self._active: str | None = active if active in contacts else None
+        # Phase 3 Tor policy (set by the CLI). ``use_tor`` defaults off here so
+        # that embedding the app in tests never reaches for the network; the
+        # `drift chat` command turns it on by default. ``tor_required`` is the
+        # --tor-only mode: refuse to fall back to a direct connection.
+        self._use_tor = use_tor
+        self._tor_required = tor_required
+        self._tor_client: TorClient | None = None
+        self._tor_active = False
         self._unread: dict[str, int] = {}
         self._history: dict[str, list[MessageRecord]] = {}
         self._session: Session | None = None
@@ -1360,10 +1456,71 @@ class DriftApp(App[None]):
         await self._sidebar.populate(self._contacts, self._active, self._unread)
         self.set_interval(0.8, self._tick_pulse)
         self._input.focus()
+        # Phase 3: bring up Tor before any session connects, so the very first
+        # byte to the relay already rides the circuit. The header shows live
+        # bootstrap progress; on failure we warn and continue on clearnet
+        # (unless --tor-only). aborted == True means we must not connect at all.
+        if self._use_tor and await self._bootstrap_tor():
+            return
         if self._active is not None:
             await self._open_conversation(self._active)
         else:
             self._pane.write_system("select a contact (press C) or add one (press A)")
+
+    async def _bootstrap_tor(self) -> bool:
+        """
+        Start Tor and wire up the header indicators.
+
+        Returns ``True`` only when --tor-only was set and bootstrap failed — the
+        signal to on_mount that it must abort rather than fall back to clearnet.
+        """
+        from drift.transport import tor
+
+        latency = self.query_one(LatencyPill)
+        latency.set_bootstrap(0)
+        self._pane.write_system("⚛ bootstrapping Tor — routing relay traffic through the network")
+
+        def _progress(pct: int, _detail: str) -> None:
+            # May fire from a worker thread (stem) → post_message is thread-safe.
+            self.post_message(TorProgress(pct, _detail))
+
+        try:
+            self._tor_client = await tor.bootstrap(on_progress=_progress)
+        except tor.TorError as exc:
+            latency.clear_bootstrap()
+            if self._tor_required:
+                self._pane.write_warning(
+                    f"Tor required (--tor-only) but unavailable: {exc} — not connecting"
+                )
+                return True
+            self._pane.write_warning(f"Tor unavailable — connecting direct: {exc}")
+            return False
+
+        latency.clear_bootstrap()
+        self._activate_tor(self._tor_client.num_hops)
+        self._pane.write_system(
+            f"⬡ Tor circuit established · {self._tor_client.num_hops} hops · "
+            "maximum security"
+        )
+        return False
+
+    def _activate_tor(self, hops: int) -> None:
+        """
+        Light up every Tor indicator. Idempotent: called on bootstrap success
+        and again on the per-session TorActiveEvent.
+
+          · 🌐 TOR header pill  dim → bright green
+          · 🔒 lock             → 🔒⁺ (maximum) when the channel is secured
+          · network graph       → routes YOU→relay through the 3-hop circuit
+        """
+        self._tor_active = True
+        self.query_one(SecurityBar).set_tor_active(True)
+        # Lock upgrades to 🔒⁺ only while a session is actually secured; reflect
+        # Tor now so the next _set_secure(True) lands on maximum.
+        if self._lock.secure:
+            self._set_secure(True, maximum=True)
+        if self.query_one("#netpane", NetworkPane).display:
+            self._sync_network_state()
 
     async def on_unmount(self) -> None:
         if self._session is not None:
@@ -1431,6 +1588,7 @@ class DriftApp(App[None]):
             self._relay_url,
             on_event=self._emit_crypto,
             on_burn=_burn_cb,
+            tor_client=self._tor_client,
         )
         self._session = session
         try:
@@ -1495,7 +1653,8 @@ class DriftApp(App[None]):
             return
         self._connected = True
         self._header.connected = True
-        self._set_secure(True)  # E2E + ratchet active (Tor is Phase 3 → not maximum)
+        # E2E + ratchet active → secured. With a live Tor circuit it's maximum (🔒⁺).
+        self._set_secure(True, maximum=self._tor_active)
         self._pane.write_system(f"⣿ secured channel to {self._relay_url}")
 
     @on(SessionDown)
@@ -1535,8 +1694,21 @@ class DriftApp(App[None]):
             self._refresh_info()
 
     def _emit_crypto(self, kind: str, detail: str) -> None:
-        """Session worker → UI bridge for non-secret crypto events."""
+        """Session worker → UI bridge for non-secret crypto/transport events."""
+        if kind == "tor":
+            # Circuit is now carrying this session's traffic.
+            self.post_message(TorActiveEvent(int(detail)))
+            return
         self.post_message(CryptoEvent(kind, detail))
+
+    @on(TorProgress)
+    def _on_tor_progress(self, event: TorProgress) -> None:
+        self.query_one(LatencyPill).set_bootstrap(event.percent)
+
+    @on(TorActiveEvent)
+    def _on_tor_active(self, event: TorActiveEvent) -> None:
+        self._activate_tor(event.hops)
+        self._ticker.push(_now(), "tor", f"circuit live · {event.hops} hops")
 
     def _note_addr(self, prefix: str) -> None:
         self._stealth_count += 1
@@ -1804,6 +1976,8 @@ class DriftApp(App[None]):
             peer_connected=self._connected,
             ratchet_steps=self.query_one(RatchetPill).count,
             stealth_addrs=self._stealth_count,
+            tor_active=self._tor_active,
+            tor_hops=self._tor_client.num_hops if self._tor_client else 0,
         )
         self.query_one("#netpane", NetworkPane).update_graph(state)
 

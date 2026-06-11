@@ -66,6 +66,7 @@ from drift.crypto.ratchet import (
 )
 from drift.crypto.stealth import derive_one_time_address, scan_for_message
 from drift.transport.client import BurnFrame, Envelope, RelayClient
+from drift.transport.tor import TorClient
 
 logger = logging.getLogger("drift.transport.session")
 
@@ -121,6 +122,7 @@ class Session:
         ping_interval: float = 30.0,
         on_event: EventHook | None = None,
         on_burn: BurnHook | None = None,
+        tor_client: TorClient | None = None,
     ) -> None:
         # Optional sink for observable (non-secret) transport events; the UI
         # passes a callback that re-emits them as typed messages. Never carries
@@ -128,6 +130,11 @@ class Session:
         self._on_event = on_event
         # Optional callback for verified burn tombstones from the relay.
         self._on_burn = on_burn
+        # Phase 3: when a Tor circuit is supplied the session stays oblivious to
+        # it — it only forwards the SOCKS5 endpoint to the transport, which dials
+        # through it. The E2E crypto above is unchanged: Tor carries ciphertext
+        # only. We keep the handle purely to report the circuit to the UI.
+        self._tor_client = tor_client
 
         # Contact's public keys — used to address messages *to* them.
         self._their_scan_pub, self._their_spend_pub = Identity.parse_contact_code(
@@ -157,7 +164,15 @@ class Session:
         self._last_sent_addr: bytes | None = None
 
         # Subscribe to the shared firehose; the relay routes by this key only.
-        self._client = RelayClient(relay_url, STEALTH_CHANNEL, ping_interval=ping_interval)
+        # When Tor is active, hand the transport the SOCKS5 endpoint so every
+        # byte is proxied through the circuit.
+        socks_proxy = tor_client.socks_proxy if tor_client is not None else None
+        self._client = RelayClient(
+            relay_url,
+            STEALTH_CHANNEL,
+            ping_interval=ping_interval,
+            socks_proxy=socks_proxy,
+        )
 
     def _bootstrap_ratchet(self, identity: Identity) -> RatchetState:
         static_ecdh = identity.spend_keypair.ecdh(self._their_spend_pub)
@@ -204,6 +219,10 @@ class Session:
         logger.debug("connect: subscribing to firehose %s", STEALTH_CHANNEL)
         await self._client.connect()
         logger.debug("connect: subscribed")
+        if self._tor_client is not None:
+            # Circuit is carrying our traffic now — let the UI light up the
+            # TOR indicators. Detail is the (public, non-secret) hop count.
+            self._emit("tor", str(self._tor_client.num_hops))
 
     async def close(self) -> None:
         await self._client.close()

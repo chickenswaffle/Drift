@@ -16,8 +16,12 @@ Wire format (Phase 0)
 ---------------------
 { "to": "<addr>", "ct": "<base64>", "ts": <unix_int> }
 
-Phase 3 upgrade point: route self._http and the WS connection through
-Tor (via a SOCKS proxy) without touching any other module.
+Phase 3 (Tor): pass ``socks_proxy=(host, port)`` and both the WebSocket
+subscription and the HTTP /send + /burn calls route through that SOCKS5
+proxy — i.e. through a Tor circuit. Nothing above this layer changes; the
+bytes are identical, they just travel anonymised. The proxy is opaque here:
+this module does not start Tor, it only dials through whatever SOCKS5
+endpoint it is handed (see drift.transport.tor).
 """
 
 from __future__ import annotations
@@ -97,10 +101,14 @@ class RelayClient:
         listen_addr: str,
         *,
         ping_interval: float = 30.0,
+        socks_proxy: tuple[str, int] | None = None,
     ) -> None:
         self._ws_url = f"{relay_url}/ws/{listen_addr}"
         self._http_base = relay_url.replace("ws://", "http://").replace("wss://", "https://")
         self._ping_interval = ping_interval
+        # Optional SOCKS5 proxy (host, port) — when set, every WS/HTTP byte is
+        # routed through it (Phase 3: a Tor circuit). None → direct connect.
+        self._socks_proxy = socks_proxy
 
         self._ws: Any = None
         self._http: httpx.AsyncClient | None = None
@@ -116,9 +124,20 @@ class RelayClient:
 
     async def connect(self) -> None:
         """Open the WebSocket subscription and start background tasks."""
-        self._http = httpx.AsyncClient()
+        if self._socks_proxy is not None:
+            # Route HTTP through the same SOCKS5 proxy as the WebSocket.
+            host, port = self._socks_proxy
+            self._http = httpx.AsyncClient(proxy=f"socks5://{host}:{port}")
+        else:
+            self._http = httpx.AsyncClient()
         try:
-            self._ws = await websockets.connect(self._ws_url)
+            if self._socks_proxy is not None:
+                from drift.transport.tor import open_socks_websocket
+
+                host, port = self._socks_proxy
+                self._ws = await open_socks_websocket(self._ws_url, host, port)
+            else:
+                self._ws = await websockets.connect(self._ws_url)
         except Exception as exc:
             await self._http.aclose()
             self._http = None
