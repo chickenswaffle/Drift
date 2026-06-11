@@ -11,6 +11,26 @@ DRIFT uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.4.4] — 2026-06-11
+
+Delivery-reliability fix for two parties on the firehose.
+
+### Fixed
+- **Reliable two-party delivery on the firehose** — messages are no longer
+  lost when one peer hits send a moment before the other's socket finishes
+  subscribing, or opens the chat slightly later. The relay's old
+  `delivered == 0` mailbox never fired (the sender is itself a live subscriber
+  on the shared channel, so something was always "delivered"), so any message
+  sent before the recipient connected vanished. Replaced it with a short
+  (30 s), bounded, TTL'd replay buffer that the relay hands to each new
+  subscriber. `/health` now reports `recent` instead of `queued`.
+- **Idempotent receipt** — the session deduplicates incoming messages by
+  one-time address, so a replayed envelope (late join / reconnect) is dropped
+  before it reaches the ratchet rather than advancing past its key and
+  surfacing as a spurious `InvalidTag`.
+
+---
+
 ## [0.4.3] — 2026-06-11
 
 Phase 2 polish: TUI visual upgrade, real scannable QR codes, and the
@@ -185,7 +205,8 @@ Storage refactor and UI foundation — the `drift.storage` model seam.
 
 ---
 
-[Unreleased]: https://github.com/chickenswaffle/Drift/compare/v0.4.3...HEAD
+[Unreleased]: https://github.com/chickenswaffle/Drift/compare/v0.4.4...HEAD
+[0.4.4]: https://github.com/chickenswaffle/Drift/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/chickenswaffle/Drift/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/chickenswaffle/Drift/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/chickenswaffle/Drift/compare/v0.4.0...v0.4.1

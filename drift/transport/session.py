@@ -135,6 +135,14 @@ class Session:
         # access so concurrent send/receive tasks can't interleave a mutation.
         self._lock = asyncio.Lock()
 
+        # One-time addresses of messages we've already accepted. The relay
+        # replays recent traffic to late-joining / reconnecting sockets, so the
+        # same envelope can arrive twice; each genuine message has a unique
+        # one-time address, so a repeat means a duplicate. We drop it before it
+        # reaches the ratchet — a replayed, already-consumed message would
+        # otherwise advance past its key and surface as a spurious InvalidTag.
+        self._seen_addrs: set[bytes] = set()
+
         # Subscribe to the shared firehose; the relay routes by this key only.
         self._client = RelayClient(relay_url, STEALTH_CHANNEL, ping_interval=ping_interval)
 
@@ -249,6 +257,9 @@ class Session:
                 continue  # not addressed to us (someone else's, or our own echo)
             if envelope.ratchet_header is None:
                 continue  # addressed to us but carries no ratchet header
+            if envelope.one_time_addr in self._seen_addrs:
+                continue  # relay replayed a message we've already accepted
+            self._seen_addrs.add(envelope.one_time_addr)
 
             logger.debug("messages: scan matched — decrypting our envelope")
             self._emit("recv", _addr_digest(envelope.one_time_addr))
