@@ -73,7 +73,11 @@ def test_burn_message_scope_requires_message_id(client: TestClient) -> None:
 # Conversation burn
 # --------------------------------------------------------------------------- #
 
-def test_burn_conversation_clears_recent(client: TestClient) -> None:
+def test_burn_conversation_does_not_touch_shared_buffer(client: TestClient) -> None:
+    # Audit H2: a conversation-scope burn must NOT wipe the shared firehose
+    # buffer (that was an unauthenticated channel-wide DoS). The relay leaves the
+    # buffer alone — conversation erasure is end-to-end via the verified
+    # tombstone plus the buffer's own TTL.
     _recent[_CHANNEL].append({"_relay_ts": time.time(), "ct": "blob", "_id": "x"})
     _recent[_CHANNEL].append({"_relay_ts": time.time(), "ct": "blob2", "_id": "y"})
     r = client.post("/burn", json={
@@ -81,7 +85,32 @@ def test_burn_conversation_clears_recent(client: TestClient) -> None:
     })
     assert r.status_code == 200
     assert r.json()["ok"] is True
-    assert len(_recent[_CHANNEL]) == 0
+    assert len(_recent[_CHANNEL]) == 2  # untouched
+
+
+def test_anonymous_burn_cannot_drop_another_users_queued_message(client: TestClient) -> None:
+    # Audit H2 regression: an attacker who does not know a victim's one-time
+    # address cannot evict the victim's queued message — neither via a
+    # conversation-scope burn (no longer wipes anything) nor a message-scope burn
+    # naming an address the attacker doesn't hold.
+    victim_addr = "dmljdGlt"   # b64 "victim"
+    ts = time.time()
+    _recent[_CHANNEL].append({"_relay_ts": ts, "ct": "secret", "addr": victim_addr, "_id": "v"})
+
+    # (1) Channel-wide conversation burn from an anonymous caller: no effect.
+    r = client.post("/burn", json={
+        "token": _VALID_TOKEN, "scope": "conversation", "channel": _CHANNEL,
+    })
+    assert r.status_code == 200
+    assert any(e.get("addr") == victim_addr for e in _recent[_CHANNEL])
+
+    # (2) Message burn for an address the attacker guessed/owns, not the victim's.
+    r = client.post("/burn", json={
+        "token": _VALID_TOKEN, "scope": "message",
+        "channel": _CHANNEL, "message_id": "YXR0YWNrZXI=",  # b64 "attacker"
+    })
+    assert r.status_code == 200
+    assert any(e.get("addr") == victim_addr for e in _recent[_CHANNEL])
 
 
 def test_burn_conversation_returns_ok_with_no_subscribers(client: TestClient) -> None:

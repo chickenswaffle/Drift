@@ -132,6 +132,19 @@ The index hash is **domain-separated** (a fixed `drift-beacon-lookup-v1` prefix,
 
 **What it does *not* give you.** The Ed25519 signature inside a beacon proves the payload wasn't altered in transit, but it does **not** prove the handle's owner is who you expect — a handle is just a string, and anyone can light a beacon claiming any handle and pointing at any contact code. So beacon resolution ends at "here is a contact code," never at "this is definitely Diego." The finder must still confirm the safety number out of band (`drift verify`) before trusting the channel. Beacon is a discovery convenience layered on top of DRIFT's verification model, not a replacement for it.
 
+### Burn requests (Phase 5)
+
+A burn lets either party erase messages after the fact — both clients delete their local copies, and the relay drops any matching blob still sitting in its short replay buffer. A burn is a signed control message: the token is `HMAC(HKDF(static_ECDH), scope ‖ message_id)`, a MAC only the two conversation participants can produce. The relay broadcasts the burn as a **tombstone**; each client *verifies the token end-to-end* before deleting anything. **That verification is the whole security boundary — the relay authenticates nothing.**
+
+**Why the relay can't be trusted to erase a "conversation."** The relay has no shared secret, so it cannot check a burn token. It also cannot tell which buffered blobs belong to one conversation — stealth addresses are unlinkable *by design*, which is the point of the whole system. An earlier version honoured a conversation-scope burn by wiping the entire channel's replay buffer; because the firehose is shared by every user and the relay can't authenticate the request, **any anonymous caller could erase every user's recent traffic with a single POST** (audit finding H2).
+
+**What the relay does now.** Relay-side erasure is addr-scoped only: a burn deletes *only* the single blob whose one-time address is explicitly named (`scope=message`). A `scope=conversation` burn does **not** touch the shared buffer at all. Conversation erasure is delivered entirely end-to-end — each client verifies the token and deletes its own copy on the tombstone — and any blob left in the relay buffer simply expires on its short `RECENT_TTL` (30 s on the full relay).
+
+**The honest tradeoff.**
+- A conversation burn no longer instantly clears the relay's buffer; those opaque, already-encrypted blobs linger for up to `RECENT_TTL` before expiring. The *durable* erasure — your peer's stored copy — still happens immediately via the verified tombstone.
+- Because a one-time address is public on the firehose (it's the routing key), anyone who *observed* a message can name its address and evict that one blob from the replay buffer. This is bounded: it only affects the ≤30 s late-join window, never a message already delivered to a connected peer, and it is per-message rather than a one-shot channel wipe. Eliminating even this residue needs authenticated, per-recipient storage (Phase 4).
+- Burn remains **best-effort against a non-compliant client**: a peer that chooses to ignore the tombstone keeps its copy. Burn defends against honest clients and an honest-but-curious relay, not against an endpoint that has already decided to retain your message.
+
 ---
 
 ## 6. Infrastructure: "unstoppable" = no single chokepoint

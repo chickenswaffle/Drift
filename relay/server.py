@@ -438,12 +438,21 @@ async def burn_request(body: dict[str, Any]) -> JSONResponse:
         }
 
     The relay does NOT verify the HMAC (it has no shared secret). Clients
-    verify the token end-to-end before honouring the tombstone.
+    verify the token end-to-end before honouring the tombstone — that is the
+    security boundary, not anything the relay does.
 
-    NOTE: The stealth firehose is shared by all users; a conversation-scope
-    burn clears all recent traffic on the channel, not just the requesting
-    pair's messages. The 30 s RECENT_TTL limits the blast radius.
-    (Phase 4 will add per-recipient storage.)
+    Relay-side erasure is therefore deliberately minimal and addr-scoped (audit
+    H2). The firehose is shared by every user, and stealth addresses are
+    unlinkable *by design*, so the relay cannot tell which buffered blobs belong
+    to one conversation without breaking the core privacy property. It used to
+    honour a conversation-scope burn by wiping the whole channel's replay buffer
+    — which let *any* unauthenticated caller erase every user's recent traffic
+    with one request. The relay now only ever deletes the single blob whose
+    one-time address is explicitly named (message scope); a conversation-scope
+    burn does not touch the shared buffer at all. Conversation erasure happens
+    end-to-end: each client verifies the token and deletes its own copy on the
+    tombstone, and any blob left in the relay's buffer expires on its short
+    RECENT_TTL. See DESIGN.md ("Burn requests") for the full tradeoff.
     """
     token = body.get("token", "")
     scope = body.get("scope", "")
@@ -459,10 +468,12 @@ async def burn_request(body: dict[str, Any]) -> JSONResponse:
     if scope == "message" and not message_id:
         return JSONResponse({"error": "message_id required for scope=message"}, status_code=400)
 
-    # Erase matching blobs from the replay buffer.
-    if scope == "conversation":
-        _recent[channel] = []
-    else:
+    # Erase only the exact named blob from the replay buffer. A conversation-scope
+    # burn intentionally mutates nothing here (the relay can't identify a
+    # conversation's blobs without defeating unlinkability, and a blanket wipe was
+    # an unauthenticated channel-wide DoS); it relies on the end-to-end-verified
+    # tombstone below plus the buffer's own TTL.
+    if scope == "message":
         _recent[channel] = [
             e for e in _recent[channel] if e.get("addr") != message_id
         ]
