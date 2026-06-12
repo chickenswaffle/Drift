@@ -1422,6 +1422,7 @@ class HelpModal(_FadeModal[None]):
         f"  [{_S}]/burn last[/]   burn the last message you sent\n"
         f"  [{_S}]/burn 5m[/]     schedule auto-burn in 5 minutes (or Ns for seconds)\n"
         f"  [{_S}]/burn cancel[/] cancel a scheduled auto-burn\n"
+        f"  [{_S}]/privacy[/]     show privacy settings (FMD rate)\n"
         f"  [{_S}]/help[/]        this screen\n"
         f"  [{_S}]/quit[/]        exit\n\n"
         f"[bold {_P}]Composing[/]\n"
@@ -1986,10 +1987,32 @@ class DriftApp(App[None]):
                     self._pane.write_separator(f"cleared · {self._active}")
             case "burn":
                 await self._handle_burn_slash(args)
+            case "privacy":
+                self._show_privacy()
             case "quit" | "exit":
                 self.exit()
             case _:
                 self._pane.write_system(f"unknown command: /{command}")
+
+    def _show_privacy(self) -> None:
+        """
+        Show privacy settings in the message pane.
+
+        Reports the FMD rate and a *constant* note about the unlock passphrase.
+        It deliberately reveals nothing about whether a duress passphrase exists
+        or which mode it uses — the screen is byte-for-byte identical whether or
+        not duress is configured, so an onlooker learns nothing.
+        """
+        rate = storage.get_fmd_rate()
+        if rate <= 0:
+            fmd = "off — you scan every message yourself (maximum privacy)"
+        else:
+            fmd = f"{rate:.4f} false-positive rate — relay may pre-filter your mail"
+        self._pane.write_system(f"privacy · FMD detection: {fmd}")
+        self._pane.write_system(
+            "privacy · unlock with your passphrase; a duress passphrase, if set, "
+            "unlocks the same way"
+        )
 
     async def _handle_burn_slash(self, args: list[str]) -> None:
         """Handle /burn, /burn last, /burn Nm, /burn cancel."""
