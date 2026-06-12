@@ -83,6 +83,8 @@ drift init
 drift chat <contact-code>
 ```
 
+> **Behavior change (v0.10.0):** `drift lock` now prompts for your unlock passphrase (it re-seals your identity *and* contacts into the vault before shredding the plaintext). In prior versions `drift lock` took no passphrase and left contacts on disk.
+
 Full setup guide: [`docs/getting-started.md`](docs/getting-started.md)
 
 ---
