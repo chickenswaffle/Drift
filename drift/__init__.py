@@ -5,5 +5,5 @@ Status: pre-alpha. Phases 0–2 complete (transport, stealth addresses, Double
 Ratchet); Phase 3 (Tor + sealed sender) is next.
 """
 
-__version__ = "0.5.0"
+__version__ = "0.10.0"
 __author__ = "DRIFT contributors"

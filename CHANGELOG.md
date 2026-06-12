@@ -11,6 +11,48 @@ DRIFT uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.10.0] — 2026-06-12
+
+Security hardening: the four high-severity findings from the June 2026 audit
+(`docs/audit-2026-06.md`), each fixed with a regression test. Full suite: 336
+passing.
+
+### Fixed
+- **H1 — ratchet state corruption from forged messages.** `ratchet_decrypt` is
+  now transactional: it runs on a snapshot and commits the advanced root/chain
+  keys and DH-ratchet step only on a successful authenticated decrypt. A forged
+  or tampered message (including one naming a fresh DH key, which previously
+  turned the ratchet before the body was authenticated and permanently desynced
+  the session) now leaves the ratchet byte-for-byte unchanged.
+- **H2 — unauthenticated `/burn` denial-of-service.** A conversation-scope burn
+  no longer makes the relay wipe the shared firehose replay buffer (an
+  unauthenticated, channel-wide DoS). The relay deletes only the single blob
+  whose one-time address is explicitly named; conversation erasure is delivered
+  end-to-end via the token-verified tombstone. Documented in DESIGN.md "Burn
+  requests".
+- **H3 — forward-secrecy gap in the ratchet bootstrap.** The initiator folds a
+  fresh single-use ephemeral (private half discarded immediately, never derived
+  from the long-term key) into the bootstrap root, carried to the peer in the
+  sealed envelope of every bootstrap-chain message. The opening burst is now
+  forward-secret against compromise of the sender's long-term key. The
+  recipient-key residual (fundamental without interactive prekeys/X3DH) is
+  documented exactly in DESIGN.md §4.
+- **H4 — duress/decoy deniability defeated by a plaintext contact list.**
+  Contacts are now sealed in the vault alongside the identity. `drift lock` takes
+  the passphrase, re-seals the identity + contacts (preserving the duress slot),
+  and shreds the plaintext identity *and* contacts files; a decoy unlock shreds
+  any prior identity's contacts, so the real contact graph leaves no trace on
+  disk. `PAYLOAD_SIZE` raised to 16 KiB so a real address book fits within the
+  indistinguishable fixed-length padding. DESIGN.md §8 documents the new
+  guarantee and remaining honest limits.
+
+### Changed
+- `drift lock` now requires your unlock passphrase (prompted if omitted) because
+  it re-seals the current identity + contacts into the vault before shredding the
+  plaintext; it refuses without shredding on a wrong passphrase.
+
+---
+
 ## [0.5.0] — 2026-06-11
 
 Burn requests: signed message and conversation erasure across relay and both clients.
@@ -243,7 +285,8 @@ Storage refactor and UI foundation — the `drift.storage` model seam.
 
 ---
 
-[Unreleased]: https://github.com/chickenswaffle/Drift/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/chickenswaffle/Drift/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/chickenswaffle/Drift/compare/v0.5.0...v0.10.0
 [0.5.0]: https://github.com/chickenswaffle/Drift/compare/v0.4.4...v0.5.0
 [0.4.4]: https://github.com/chickenswaffle/Drift/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/chickenswaffle/Drift/compare/v0.4.2...v0.4.3
