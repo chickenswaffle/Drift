@@ -234,6 +234,31 @@ class TestUnlockDispatch:
         assert storage.unlock("anything") == storage.UNLOCK_FAILED
 
 
+class TestLock:
+    def test_lock_shreds_identity_but_keeps_vault(self, store: Path) -> None:
+        real = Identity.generate()
+        storage.create_vault(real, "realpass", materialize=True)
+        assert (store / "identity.json").exists()
+
+        assert storage.lock() is True
+        # The unlocked working copy is gone; the sealed vault remains.
+        assert not (store / "identity.json").exists()
+        assert (store / "vault.bin").exists()
+        # Re-unlocking restores the real identity from the vault.
+        assert storage.unlock("realpass") == storage.UNLOCK_PROCEED
+        assert (Identity.load(store / "identity.json").scan_keypair.public_b58()
+                == real.scan_keypair.public_b58())
+
+    def test_lock_refuses_without_vault(self, store: Path) -> None:
+        # A legacy unencrypted identity has no vault — locking would be
+        # irrecoverable data loss, so lock() refuses and leaves the file intact.
+        save_identity_legacy = Identity.generate()
+        storage.save_identity(save_identity_legacy)
+        assert (store / "identity.json").exists()
+        assert storage.lock() is False
+        assert (store / "identity.json").exists()
+
+
 class TestFMDSettings:
     def test_default_off(self, store: Path) -> None:
         assert storage.get_fmd_rate() == 0.0

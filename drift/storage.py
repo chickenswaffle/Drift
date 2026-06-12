@@ -262,6 +262,25 @@ def shred_working_copy() -> None:
             panic.secure_overwrite(path)
 
 
+def lock() -> bool:
+    """
+    Re-seal the vault: securely shred the unlocked identity.json so only the
+    encrypted vault remains. The keys come back with ``unlock(passphrase)``.
+
+    Refuses (returns ``False``) when there is no vault, because then the
+    plaintext identity.json is the *only* copy of the keys and shredding it
+    would be unrecoverable data loss. Contacts are left as local working files
+    (they aren't sealed in the vault, so destroying them would also lose data);
+    the secret this protects is the private keys in identity.json.
+    """
+    if not VAULT_FILE.exists():
+        return False
+    from drift.crypto import panic
+
+    panic.secure_overwrite(IDENTITY_FILE)
+    return True
+
+
 def _wipe_everything() -> None:
     """Duress wipe: shred working copies AND the vault — irrecoverable."""
     from drift.crypto import panic
