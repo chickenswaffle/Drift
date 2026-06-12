@@ -58,9 +58,21 @@ class TestRoundTrip:
         assert info.contact_code == idy.contact_code()
         assert info.handle == "Diego552"
 
-    def test_lookup_hash_is_sha256_of_handle(self) -> None:
+    def test_lookup_hash_is_domain_separated_sha256(self) -> None:
         import hashlib
-        assert lookup_hash("Diego552") == hashlib.sha256(b"Diego552").hexdigest()
+
+        from drift.crypto.beacon import BEACON_LOOKUP_PREFIX
+
+        assert lookup_hash("Diego552") == hashlib.sha256(
+            BEACON_LOOKUP_PREFIX + b"Diego552"
+        ).hexdigest()
+
+    def test_lookup_hash_is_not_bare_sha256(self) -> None:
+        import hashlib
+
+        # The domain-separation prefix must actually change the digest, so a
+        # generic SHA256(handle) rainbow table doesn't apply.
+        assert lookup_hash("Diego552") != hashlib.sha256(b"Diego552").hexdigest()
 
     def test_handle_never_appears_in_ciphertext(self) -> None:
         b = create_beacon(Identity.generate(), "SecretHandle9", 300)

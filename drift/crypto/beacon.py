@@ -31,8 +31,10 @@ Let ``H`` be the handle string and ``id`` the lighting identity.
     trusting the binding (the signature proves integrity, not that the handle's
     owner is who you think — that's what ``drift verify`` is for).
 
-  - **Relay index.** The relay stores the beacon under ``SHA256(H)`` (computed
-    by the client). The plaintext handle never crosses the wire.
+  - **Relay index.** The relay stores the beacon under
+    ``SHA256("drift-beacon-lookup-v1" ‖ H)`` (computed by the client). The
+    plaintext handle never crosses the wire, and the domain-separation prefix
+    keeps a generic SHA256 rainbow table from applying to the index.
 
 What the relay learns is exactly: a hash of the handle, an opaque blob, and a
 TTL. What a *handle-knower* learns during the window is the contact code — that
@@ -54,6 +56,13 @@ from drift.crypto import Identity, decrypt, derive_message_key, encrypt
 
 # Domain separation for the handle-derived encryption key. Versioned.
 BEACON_INFO = b"drift-beacon-v1"
+
+# Domain separation for the relay index hash. Prefixed (not bare SHA256(handle))
+# so a relay can't reuse a generic SHA256 rainbow table against the index — the
+# lookup hash is tied to DRIFT's namespace. This does *not* defend a guessable
+# handle against a targeted dictionary attack (see DESIGN.md: handles are
+# semi-public — pick something unguessable for anything sensitive).
+BEACON_LOOKUP_PREFIX = b"drift-beacon-lookup-v1"
 
 # Hard cap on a beacon's lifetime, mirrored by the relay server-side.
 MAX_TTL_SECONDS = 600  # 10 minutes
@@ -83,8 +92,12 @@ class ContactInfo:
 
 
 def lookup_hash(handle: str) -> str:
-    """The relay index key for a handle: ``SHA256(handle)`` as hex."""
-    return hashlib.sha256(handle.encode("utf-8")).hexdigest()
+    """The relay index key for a handle: ``SHA256(prefix ‖ handle)`` as hex.
+
+    The fixed ``BEACON_LOOKUP_PREFIX`` domain-separates the index from a bare
+    ``SHA256(handle)`` so a generic rainbow table doesn't apply.
+    """
+    return hashlib.sha256(BEACON_LOOKUP_PREFIX + handle.encode("utf-8")).hexdigest()
 
 
 def _encryption_key(handle: str) -> bytes:

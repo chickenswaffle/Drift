@@ -430,9 +430,18 @@ def find(
     except StorageError as exc:
         console.print(f"[red]Found the beacon but could not add contact:[/red] {exc}")
         raise typer.Exit(1) from None
+    console.print(f"[green]✓ Found {handle}[/green] → added as a contact.")
     console.print(
-        f"[green]✓ Found {handle}[/green] → adding as contact. "
-        f"Run [bold]drift verify {handle}[/bold] before chatting."
+        Panel(
+            f"[bold yellow]⚠ Verify before trusting.[/bold yellow]\n"
+            f"Run [bold]drift verify {handle}[/bold] to confirm you're talking to "
+            f"who you think you are.\n\n"
+            f"Resolving this beacon proves the message wasn't [i]tampered with[/i] — "
+            f"[bold]not who sent it[/bold]. Anyone can light a beacon under any "
+            f"handle pointing at any contact code.",
+            border_style="yellow",
+            title="[yellow]unverified contact[/yellow]",
+        )
     )
 
 

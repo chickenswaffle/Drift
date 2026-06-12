@@ -150,8 +150,8 @@ async def _deliver_local(envelope: dict[str, Any]) -> int:
 # ---------------------------------------------------------------------------
 # Beacons (Phase 6) — ephemeral discoverable handles
 #
-# The relay indexes a beacon by lookup_hash = SHA256(handle), which the client
-# computes; the plaintext handle never reaches the relay. The stored payload is
+# The relay indexes a beacon by lookup_hash = SHA256(prefix ‖ handle), which the
+# client computes; the plaintext handle never reaches the relay. The stored payload is
 # opaque (only a handle-knower can decrypt it). Beacons auto-expire and are
 # *deleted* on expiry, never served stale.
 # ---------------------------------------------------------------------------
@@ -377,7 +377,8 @@ async def light_beacon(body: dict[str, Any]) -> JSONResponse:
     """
     Light a beacon. Body: ``{lookup_hash, payload, ttl_seconds}``.
 
-    ``lookup_hash`` is SHA256(handle) — the relay never sees the handle. The TTL
+    ``lookup_hash`` is a domain-separated SHA256 of the handle — the relay never
+    sees the handle itself. The TTL
     is capped at BEACON_MAX_TTL server-side regardless of the request. The
     beacon is stored locally and replicated to federation peers.
     """
