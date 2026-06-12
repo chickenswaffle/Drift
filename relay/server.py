@@ -147,6 +147,44 @@ async def _deliver_local(envelope: dict[str, Any]) -> int:
     return delivered
 
 
+# ---------------------------------------------------------------------------
+# Beacons (Phase 6) — ephemeral discoverable handles
+#
+# The relay indexes a beacon by lookup_hash = SHA256(handle), which the client
+# computes; the plaintext handle never reaches the relay. The stored payload is
+# opaque (only a handle-knower can decrypt it). Beacons auto-expire and are
+# *deleted* on expiry, never served stale.
+# ---------------------------------------------------------------------------
+
+BEACON_MAX_TTL = 600  # seconds (10 min), enforced regardless of the request
+
+# lookup_hash → {"payload": <base64 str>, "expires_at": <unix int>}
+_beacons: dict[str, dict[str, Any]] = {}
+
+# A lookup hash is SHA256 hex: 64 lowercase hex chars.
+_LOOKUP_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _prune_beacons() -> None:
+    """Delete expired beacons so a GET after expiry 404s rather than serving stale."""
+    now = time.time()
+    for h in [h for h, b in _beacons.items() if b["expires_at"] <= now]:
+        del _beacons[h]
+
+
+async def _store_beacon(beacon: dict[str, Any]) -> None:
+    """Store a beacon locally (the federation deliver-beacon callback)."""
+    lookup = beacon.get("lookup_hash")
+    payload = beacon.get("payload")
+    expires_at = beacon.get("expires_at")
+    if not (isinstance(lookup, str) and _LOOKUP_HASH_RE.match(lookup)
+            and isinstance(payload, str) and isinstance(expires_at, (int, float))):
+        return
+    if expires_at <= time.time():
+        return
+    _beacons[lookup] = {"payload": payload, "expires_at": int(expires_at)}
+
+
 # This node's externally-reachable base URL (so peers can re-announce it and we
 # never gossip a blob back to ourselves). Set via DRIFT_SELF_URL.
 SELF_URL = os.environ.get("DRIFT_SELF_URL") or None
@@ -156,6 +194,7 @@ federation = Federation(
     peers_file=os.environ.get("DRIFT_PEERS_FILE", "peers.json"),
     dedup_size=DEFAULT_DEDUP_SIZE,
     deliver=_deliver_local,
+    deliver_beacon=_store_beacon,
 )
 
 
@@ -316,6 +355,67 @@ async def federation_announce(body: dict[str, Any]) -> JSONResponse:
 async def federation_peers() -> JSONResponse:
     """Public peer list, used by clients and new relays to bootstrap."""
     return JSONResponse({"peers": federation.peers})
+
+
+@app.post("/federation/beacon")
+async def federation_beacon(body: dict[str, Any]) -> JSONResponse:
+    """Receive a beacon gossiped by a peer relay (dedup, store, forward)."""
+    beacon = body.get("beacon")
+    ttl = int(body.get("ttl", 0))
+    if not isinstance(beacon, dict) or not beacon.get("lookup_hash"):
+        return JSONResponse({"error": "missing beacon"}, status_code=400)
+    accepted = await federation.handle_beacon_gossip(beacon, ttl)
+    return JSONResponse({"ok": True, "accepted": accepted})
+
+
+# ---------------------------------------------------------------------------
+# Beacon endpoints (Phase 6)
+# ---------------------------------------------------------------------------
+
+@app.post("/beacon")
+async def light_beacon(body: dict[str, Any]) -> JSONResponse:
+    """
+    Light a beacon. Body: ``{lookup_hash, payload, ttl_seconds}``.
+
+    ``lookup_hash`` is SHA256(handle) — the relay never sees the handle. The TTL
+    is capped at BEACON_MAX_TTL server-side regardless of the request. The
+    beacon is stored locally and replicated to federation peers.
+    """
+    lookup = body.get("lookup_hash", "")
+    payload = body.get("payload", "")
+    if not isinstance(lookup, str) or not _LOOKUP_HASH_RE.match(lookup):
+        return JSONResponse({"error": "lookup_hash must be 64 lowercase hex chars"},
+                            status_code=400)
+    if not isinstance(payload, str) or not payload:
+        return JSONResponse({"error": "payload is required"}, status_code=400)
+    try:
+        requested = int(body.get("ttl_seconds", BEACON_MAX_TTL))
+    except (TypeError, ValueError):
+        return JSONResponse({"error": "ttl_seconds must be an integer"}, status_code=400)
+    ttl = max(1, min(requested, BEACON_MAX_TTL))  # hard cap
+    expires_at = int(time.time()) + ttl
+
+    record = {"lookup_hash": lookup, "payload": payload, "expires_at": expires_at}
+    await _store_beacon(record)
+    await federation.submit_beacon(record)
+    return JSONResponse({"ok": True, "expires_at": expires_at, "ttl_seconds": ttl})
+
+
+@app.get("/beacon/{lookup_hash}")
+async def get_beacon(lookup_hash: str) -> JSONResponse:
+    """Return a beacon's payload if live, 404 if absent or expired (and deleted)."""
+    _prune_beacons()
+    beacon = _beacons.get(lookup_hash)
+    if beacon is None:
+        return JSONResponse({"error": "beacon not found or expired"}, status_code=404)
+    return JSONResponse({"payload": beacon["payload"], "expires_at": beacon["expires_at"]})
+
+
+@app.delete("/beacon/{lookup_hash}")
+async def extinguish_beacon(lookup_hash: str) -> JSONResponse:
+    """Delete a beacon early (the holder extinguishing it). Idempotent."""
+    _beacons.pop(lookup_hash, None)
+    return JSONResponse({"ok": True})
 
 
 # HMAC-SHA256 token is 32 bytes = 64 lowercase hex characters.

@@ -92,6 +92,11 @@ def blob_id(envelope: dict[str, Any]) -> str:
     return hashlib.sha256(encoded.encode()).hexdigest()
 
 
+def _beacon_id(beacon: dict[str, Any]) -> str:
+    """Dedup id for a beacon — namespaced by its lookup hash (Phase 6)."""
+    return "beacon:" + str(beacon.get("lookup_hash", ""))
+
+
 # ---------------------------------------------------------------------------
 # Bounded LRU set (dedup cache)
 # ---------------------------------------------------------------------------
@@ -168,6 +173,7 @@ class Federation:
         min_replicas: int = DEFAULT_MIN_REPLICAS,
         sender: Sender | None = None,
         deliver: Deliver | None = None,
+        deliver_beacon: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     ) -> None:
         self._self_url = to_http(self_url) if self_url else None
         self._peers_file = Path(peers_file) if peers_file else None
@@ -176,6 +182,8 @@ class Federation:
         self._seen = LRUSet(dedup_size)
         self._sender: Sender = sender or _httpx_sender
         self._deliver = deliver
+        # Phase 6: a beacon (ephemeral discoverable handle) gossips like a blob.
+        self._deliver_beacon = deliver_beacon
 
         self._peers: set[str] = set()
         for url in peers or []:
@@ -304,6 +312,45 @@ class Federation:
         payload = {"envelope": envelope, "ttl": ttl}
         results = await asyncio.gather(
             *(self._sender(peer, "/federation/gossip", payload) for peer in self.peers),
+            return_exceptions=True,
+        )
+        accepted = sum(1 for r in results if r is True)
+        self._gossip_sent += accepted
+        return accepted
+
+    # -- beacons (Phase 6) ----------------------------------------------
+
+    async def submit_beacon(self, beacon: dict[str, Any]) -> int:
+        """
+        A beacon arrived from a client → replicate it to peers.
+
+        ``beacon`` carries ``{lookup_hash, payload, expires_at}``; the absolute
+        ``expires_at`` is gossiped so every relay expires it at the same instant.
+        Deduped by lookup_hash so the gossip echo is dropped.
+        """
+        self._seen.add(_beacon_id(beacon))
+        return await self._gossip_beacon(beacon, self._gossip_ttl)
+
+    async def handle_beacon_gossip(self, beacon: dict[str, Any], ttl: int) -> bool:
+        """Handle a beacon gossiped by a peer (dedup, store locally, forward)."""
+        self._gossip_received += 1
+        bid = _beacon_id(beacon)
+        if bid in self._seen:
+            self._dropped_duplicates += 1
+            return False
+        self._seen.add(bid)
+        if self._deliver_beacon is not None:
+            await self._deliver_beacon(beacon)
+        if ttl > 1:
+            await self._gossip_beacon(beacon, ttl - 1)
+        return True
+
+    async def _gossip_beacon(self, beacon: dict[str, Any], ttl: int) -> int:
+        if ttl <= 0 or not self._peers:
+            return 0
+        payload = {"beacon": beacon, "ttl": ttl}
+        results = await asyncio.gather(
+            *(self._sender(peer, "/federation/beacon", payload) for peer in self.peers),
             return_exceptions=True,
         )
         accepted = sum(1 for r in results if r is True)

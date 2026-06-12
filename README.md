@@ -1,8 +1,8 @@
 # DRIFT
 
 [![CI](https://github.com/chickenswaffle/Drift/actions/workflows/ci.yml/badge.svg)](https://github.com/chickenswaffle/Drift/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-v0.8.0-blue)](https://github.com/chickenswaffle/Drift/releases/tag/v0.8.0)
-[![Phase](https://img.shields.io/badge/phase-5%20%E2%80%94%20Panic%20%2B%20FMD-brightgreen)](#project-status)
+[![Version](https://img.shields.io/badge/version-v0.9.0-blue)](https://github.com/chickenswaffle/Drift/releases/tag/v0.9.0)
+[![Phase](https://img.shields.io/badge/phase-6%20%E2%80%94%20Beacon-brightgreen)](#project-status)
 
 > A terminal-first, end-to-end encrypted messenger with rotating, unlinkable receiving addresses.
 
@@ -52,7 +52,7 @@ Being precise here is what separates a serious tool from snake oil.
 
 ## Project status
 
-🧪 **Alpha — Phases 0–5 complete.** Usable end-to-end, but not yet independently audited; not ready for high-stakes production use.
+🧪 **Alpha — Phases 0–6 complete.** Usable end-to-end, but not yet independently audited; not ready for high-stakes production use.
 
 | Phase | Goal | Status |
 |-------|------|--------|
@@ -62,6 +62,7 @@ Being precise here is what separates a serious tool from snake oil.
 | 3 | Tor transport + sealed sender | ✅ Complete (`v0.6.0` + `v0.7.1`) |
 | 4 | Federated relays + Pi Zero mesh nodes | ✅ Complete (`v0.7.0`) |
 | 5 | Panic key (duress passphrase) + FMD privacy dial | ✅ Complete (`v0.8.0`) |
+| 6 | Beacon — ephemeral discoverable handles | ✅ Complete (`v0.9.0`) |
 
 ---
 
