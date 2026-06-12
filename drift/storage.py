@@ -178,11 +178,30 @@ def _identity_payload(identity: Identity) -> dict[str, object]:
     return {"identity": identity.to_dict()}
 
 
+def _shred_contacts_dir() -> None:
+    """Securely delete every plaintext contacts file (any identity's).
+
+    Used before materializing a different identity and on lock, so a previous
+    identity's address book never lingers in plaintext (audit H4 — a decoy
+    unlock must leave no trace of the real contact graph).
+    """
+    from drift.crypto import panic
+
+    if CONTACTS_DIR.exists():
+        for path in CONTACTS_DIR.glob("*.json"):
+            panic.secure_overwrite(path)
+
+
 def _materialize(identity_dict: dict[str, str], contacts: Contacts) -> None:
-    """Write identity.json + that identity's contacts file (the working copy)."""
+    """Write identity.json + that identity's contacts file (the working copy).
+
+    Any other identity's plaintext contacts are shredded first, so switching
+    identities (real ↔ decoy) never leaves a stale address book on disk.
+    """
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     IDENTITY_FILE.write_text(json.dumps(identity_dict, indent=2))
     IDENTITY_FILE.chmod(0o600)
+    _shred_contacts_dir()
     if contacts:
         CONTACTS_DIR.mkdir(parents=True, exist_ok=True)
         path = CONTACTS_DIR / f"{identity_dict['scan_pub']}.json"
@@ -206,25 +225,36 @@ def create_vault(
     *,
     duress_passphrase: str | None = None,
     duress_mode: str | None = None,
+    real_contacts: Contacts | None = None,
     materialize: bool = True,
     params: object | None = None,
 ) -> None:
     """
-    Seal ``real_identity`` into the vault under ``real_passphrase``.
+    Seal ``real_identity`` (and its ``real_contacts``) into the vault under
+    ``real_passphrase``.
 
     ``duress_mode`` is ``"wipe"`` or ``"decoy"`` (ignored unless
     ``duress_passphrase`` is given). For decoy a throwaway identity + a few
     innocuous contacts are generated and sealed under the duress passphrase; for
     wipe a tiny marker is sealed. With no duress passphrase the second slot is
     indistinguishable random bytes. When ``materialize`` is set (the default for
-    ``drift init``) the real identity.json is also written so the user is ready
-    to go immediately.
+    ``drift init``) the real identity.json + contacts are also written so the
+    user is ready to go immediately.
+
+    Contacts are sealed alongside the identity (audit H4): a locked device holds
+    no plaintext address book, and a decoy unlock exposes only the decoy's
+    contacts. At ``drift init`` the real address book is normally empty; ``lock``
+    re-seals it with whatever the user has since added.
     """
     from drift.crypto import panic
 
     kdf = params if params is not None else panic.DEFAULT_PARAMS
+    real_contacts = real_contacts or {}
 
-    real_payload = json.dumps({"role": "real", **_identity_payload(real_identity)}).encode()
+    real_payload = json.dumps({
+        "role": "real", **_identity_payload(real_identity),
+        "contacts": real_contacts,
+    }).encode()
 
     duress_payload = b""
     if duress_passphrase is not None:
@@ -249,7 +279,7 @@ def create_vault(
     VAULT_FILE.chmod(0o600)
 
     if materialize:
-        _materialize(real_identity.to_dict(), {})
+        _materialize(real_identity.to_dict(), real_contacts)
 
 
 def shred_working_copy() -> None:
@@ -262,22 +292,46 @@ def shred_working_copy() -> None:
             panic.secure_overwrite(path)
 
 
-def lock() -> bool:
+def lock(passphrase: str) -> bool:
     """
-    Re-seal the vault: securely shred the unlocked identity.json so only the
-    encrypted vault remains. The keys come back with ``unlock(passphrase)``.
+    Re-seal the vault from the current working state, then securely shred the
+    plaintext identity.json **and** every contacts file, so a locked device
+    holds no private keys and no plaintext address book (audit H4).
 
-    Refuses (returns ``False``) when there is no vault, because then the
-    plaintext identity.json is the *only* copy of the keys and shredding it
-    would be unrecoverable data loss. Contacts are left as local working files
-    (they aren't sealed in the vault, so destroying them would also lose data);
-    the secret this protects is the private keys in identity.json.
+    ``passphrase`` must open one of the vault's slots — it re-seals *that* slot
+    (preserving its role, so a real session re-seals the real slot and the duress
+    slot is carried over untouched) with the identity + contacts currently
+    materialized on disk. The keys and contacts come back with
+    ``unlock(passphrase)``.
+
+    Returns ``False`` without shredding anything when there is no vault (the
+    plaintext identity.json would be the only copy of the keys) or when the
+    passphrase opens neither slot (so a typo can't destroy data).
     """
     if not VAULT_FILE.exists():
         return False
     from drift.crypto import panic
 
+    vault = VAULT_FILE.read_bytes()
+    current = panic.try_unlock(vault, passphrase)
+    if current is None:
+        return False  # passphrase opens neither slot — refuse, shred nothing
+
+    # Refresh the opened slot's identity + contacts from the working copies,
+    # keeping its role/mode so duress semantics survive a lock.
+    identity = load_identity()
+    contacts = load_contacts(identity)
+    payload_obj = dict(json.loads(current))
+    payload_obj["identity"] = identity.to_dict()
+    payload_obj["contacts"] = contacts
+    new_vault = panic.reseal_slot(vault, passphrase, json.dumps(payload_obj).encode())
+    if new_vault is None:  # pragma: no cover - try_unlock already proved it opens
+        return False
+
+    VAULT_FILE.write_bytes(new_vault)
+    VAULT_FILE.chmod(0o600)
     panic.secure_overwrite(IDENTITY_FILE)
+    _shred_contacts_dir()
     return True
 
 
@@ -317,7 +371,7 @@ def unlock(passphrase: str) -> str:
 
     data = json.loads(payload)
     if data.get("role") == "real":
-        _materialize(data["identity"], {})
+        _materialize(data["identity"], data.get("contacts", {}))
         return UNLOCK_PROCEED
 
     # Duress.

@@ -179,27 +179,42 @@ def unlock(
 
 
 @app.command()
-def lock() -> None:
+def lock(
+    passphrase: str = typer.Argument(
+        None, help="Your unlock passphrase (re-seals identity + contacts; prompted if omitted)",
+    ),
+) -> None:
     """
-    Re-seal the vault: shred the unlocked identity from disk.
+    Re-seal the vault: shred the unlocked identity *and contacts* from disk.
 
-    While DRIFT is unlocked, your identity.json (private keys) sits readable on
-    disk. Run this — or just close the app — before handing your device to
-    anyone, so only the encrypted vault remains. Closing the app also ends the
-    in-memory session; the keys come back only with your unlock passphrase.
+    While DRIFT is unlocked, your identity.json (private keys) and your address
+    book sit readable on disk. Run this — or just close the app — before handing
+    your device to anyone, so only the encrypted vault remains. Your passphrase
+    re-seals the current identity and contacts into the vault before shredding
+    the plaintext; the keys and contacts come back only with
+    [bold]drift unlock <passphrase>[/bold].
     """
-    if storage.lock():
-        console.print(
-            "[green]✓[/green] Locked. Your keys are sealed in the vault — "
-            "run [bold]drift unlock <passphrase>[/bold] to use DRIFT again."
-        )
-    else:
+    if not storage.vault_exists():
         console.print(
             "[yellow]Nothing to lock:[/yellow] this identity has no vault (no unlock "
             "passphrase was set at init). Shredding it would destroy your only copy of "
             "the keys, so DRIFT refuses. Re-run [bold]drift init[/bold] with a passphrase "
             "to enable locking."
         )
+        raise typer.Exit(1)
+
+    if passphrase is None:
+        passphrase = typer.prompt("Unlock passphrase", hide_input=True)
+
+    if storage.lock(passphrase):
+        console.print(
+            "[green]✓[/green] Locked. Your keys and contacts are sealed in the vault — "
+            "run [bold]drift unlock <passphrase>[/bold] to use DRIFT again."
+        )
+    else:
+        # Identical generic failure for a wrong passphrase — never confirm or
+        # deny that a particular passphrase (e.g. a duress one) is configured.
+        console.print("[red]Could not lock.[/red]")
         raise typer.Exit(1)
 
 

@@ -240,7 +240,7 @@ class TestLock:
         storage.create_vault(real, "realpass", materialize=True)
         assert (store / "identity.json").exists()
 
-        assert storage.lock() is True
+        assert storage.lock("realpass") is True
         # The unlocked working copy is gone; the sealed vault remains.
         assert not (store / "identity.json").exists()
         assert (store / "vault.bin").exists()
@@ -255,8 +255,64 @@ class TestLock:
         save_identity_legacy = Identity.generate()
         storage.save_identity(save_identity_legacy)
         assert (store / "identity.json").exists()
-        assert storage.lock() is False
+        assert storage.lock("realpass") is False
         assert (store / "identity.json").exists()
+
+    def test_lock_refuses_wrong_passphrase_without_shredding(self, store: Path) -> None:
+        real = Identity.generate()
+        storage.create_vault(real, "realpass", materialize=True)
+        assert storage.lock("nope") is False
+        # A typo must not destroy the working copy.
+        assert (store / "identity.json").exists()
+
+    def test_lock_seals_and_restores_contacts(self, store: Path) -> None:
+        # Audit H4: contacts are sealed on lock and come back on unlock — they are
+        # not left as plaintext working files.
+        real = Identity.generate()
+        storage.create_vault(real, "realpass", materialize=True)
+        storage.add_contact(real, "alice", Identity.generate().contact_code())
+        secret_code = storage.load_contacts(real)["alice"]["code"]
+        assert _disk_contains(store / "contacts", secret_code)
+
+        assert storage.lock("realpass") is True
+        # No plaintext contact graph remains once locked.
+        assert not _disk_contains(store, secret_code)
+
+        assert storage.unlock("realpass") == storage.UNLOCK_PROCEED
+        assert storage.load_contacts(real)["alice"]["code"] == secret_code
+
+
+class TestDecoyContactDeniability:
+    def test_decoy_unlock_leaves_no_trace_of_real_contacts(self, store: Path) -> None:
+        # Audit H4 regression: the real contact graph must not survive a decoy
+        # unlock on disk in any form. Mirrors the wipe-irrecoverability check.
+        real = Identity.generate()
+        storage.create_vault(real, "realpass", duress_passphrase="duress",
+                             duress_mode="decoy", materialize=True)
+        # Build up a real address book, then lock so it is sealed (not plaintext).
+        real_contact_code = Identity.generate().contact_code()
+        storage.add_contact(real, "informant", real_contact_code)
+        assert storage.lock("realpass") is True
+        assert not _disk_contains(store, real_contact_code)  # sealed already
+
+        # Coercion: the duress passphrase opens a decoy. The real contact code
+        # must appear nowhere in plaintext on disk afterwards.
+        assert storage.unlock("duress") == storage.UNLOCK_PROCEED
+        assert not _disk_contains(store, real_contact_code)
+        # And the materialized address book is the decoy's, not the real one.
+        decoy = Identity.load(store / "identity.json")
+        assert "informant" not in storage.load_contacts(decoy)
+
+    def test_real_contacts_recover_after_decoy(self, store: Path) -> None:
+        real = Identity.generate()
+        storage.create_vault(real, "realpass", duress_passphrase="duress",
+                             duress_mode="decoy", materialize=True)
+        code = Identity.generate().contact_code()
+        storage.add_contact(real, "informant", code)
+        storage.lock("realpass")
+        storage.unlock("duress")          # decoy materialized, real sealed
+        assert storage.unlock("realpass") == storage.UNLOCK_PROCEED
+        assert storage.load_contacts(real)["informant"]["code"] == code
 
 
 class TestFMDSettings:

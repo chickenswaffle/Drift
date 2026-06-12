@@ -42,9 +42,13 @@ Honest limits
 filesystems, SSDs with wear-levelling, or snapshotted/backed-up volumes the
 original bytes may survive in copies this process cannot reach. Wipe mode raises
 the bar a great deal; it is not a guarantee against a forensic lab with the raw
-flash. And while a real session is open, the working identity is materialized in
-the clear (chmod 0600) — the vault protects the *locked* state, between sessions.
-These limits are stated plainly so nobody over-trusts the feature.
+flash. And while a real session is open, the working identity *and its contacts*
+are materialized in the clear (chmod 0600) — the vault protects the *locked*
+state, between sessions, so lock (or close the app) before handing over a device.
+The vault seals both the identity and the address book together, so a locked
+device leaves no plaintext contact graph and a decoy unlock exposes only the
+decoy's contacts (audit H4). These limits are stated plainly so nobody
+over-trusts the feature.
 """
 
 from __future__ import annotations
@@ -63,9 +67,12 @@ _MAGIC = b"DRIFTVLT"
 _VERSION = 1
 _SALT_LEN = 16
 # Every payload is padded to this size before sealing, so a wipe-marker slot and
-# a full-decoy-identity slot produce identical-length ciphertext. Big enough for
-# an identity plus a handful of decoy contacts.
-PAYLOAD_SIZE = 4096
+# a full-decoy-identity slot produce identical-length ciphertext. Sized to hold
+# an identity *and* its full address book (audit H4): contacts are sealed in the
+# vault, not left in plaintext on disk, so the real slot must fit them. ~16 KiB
+# leaves room for well over a hundred contacts while keeping the fixed-length
+# padding (and thus the real/decoy/wipe indistinguishability) intact.
+PAYLOAD_SIZE = 16384
 _LEN_PREFIX = 4  # u32 big-endian length header inside the padded block
 
 
@@ -227,6 +234,36 @@ def _parse_vault(vault: bytes) -> tuple[KDFParams, bytes, bytes]:
     if len(slot1) != _SLOT_SIZE or len(slot2) != _SLOT_SIZE:
         raise ValueError("truncated vault")
     return params, slot1, slot2
+
+
+def reseal_slot(vault: bytes, passphrase: str, new_payload: bytes) -> bytes | None:
+    """
+    Re-seal, in place, whichever slot ``passphrase`` opens, leaving the other
+    slot's ciphertext untouched.
+
+    Used by the storage layer to refresh the sealed identity + contacts on
+    ``lock`` (audit H4) without needing the *other* passphrase: the duress slot
+    is carried over byte-for-byte. The re-sealed slot gets a fresh salt and the
+    two slots are re-shuffled, so position still reveals nothing within a single
+    image. Returns the new vault bytes, or ``None`` if the passphrase opens
+    neither slot (the caller then refuses to lock rather than destroy data).
+
+    Honest limit: the *untouched* slot's bytes are stable across re-locks, so an
+    adversary who can diff multiple disk images over time could tell which slot
+    changed. That is outside the single-image threat model the vault defends; a
+    one-shot forced unlock still cannot prove a second passphrase exists.
+    """
+    params, slot1, slot2 = _parse_vault(vault)
+    if _open_slot(passphrase, slot1, params) is not None:
+        slots = [_seal_slot(passphrase, new_payload, params), slot2]
+    elif _open_slot(passphrase, slot2, params) is not None:
+        slots = [slot1, _seal_slot(passphrase, new_payload, params)]
+    else:
+        return None
+    if secrets.randbits(1):
+        slots.reverse()
+    header = _MAGIC + bytes([_VERSION]) + params.to_header()
+    return header + slots[0] + slots[1]
 
 
 def try_unlock(vault: bytes, passphrase: str) -> bytes | None:
