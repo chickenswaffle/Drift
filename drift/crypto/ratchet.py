@@ -217,6 +217,30 @@ def ratchet_decrypt(state: RatchetState, header: Header, ciphertext: bytes) -> b
     Handles out-of-order delivery via the skipped-message-key cache and turns
     the DH ratchet whenever the header advertises a new peer ratchet key.
     A genuine decryption (authentication) failure raises ``InvalidTag``.
+
+    The header rides outside the AEAD body and — under sealed sender — is sealed
+    with a key any *sender* can derive, so it authenticates integrity in transit
+    but not the peer's identity. A forged header could therefore name a new DH
+    public key and drive the DH ratchet / skipped-key derivation below before the
+    body is authenticated. To stop a forged or tampered message from corrupting a
+    live session, we snapshot every mutable field first and run the whole decrypt
+    on that snapshot; only on a successful (authenticated) decrypt do we commit
+    the advanced root/chain keys and DH ratchet step back to ``state``. On any
+    failure the live state is left byte-for-byte unchanged.
+    """
+    trial = _snapshot(state)
+    plaintext = _ratchet_decrypt_into(trial, header, ciphertext)
+    _restore(state, trial)
+    return plaintext
+
+
+def _ratchet_decrypt_into(
+    state: RatchetState, header: Header, ciphertext: bytes
+) -> bytes:
+    """Core decrypt, mutating ``state``. Raises before returning on any failure.
+
+    Run against a throwaway snapshot by :func:`ratchet_decrypt` so the live state
+    only ever sees the mutations of a message that actually authenticated.
     """
     # 1. A message we already skipped and cached.
     plaintext = _try_skipped_keys(state, header, ciphertext)
@@ -239,6 +263,42 @@ def ratchet_decrypt(state: RatchetState, header: Header, ciphertext: bytes) -> b
     state.receiving_chain_key, message_key = _kdf_ck(state.receiving_chain_key)
     state.recv_count += 1
     return decrypt(message_key, ciphertext, associated_data=header.to_bytes())
+
+
+def _snapshot(state: RatchetState) -> RatchetState:
+    """A trial copy of ``state`` for a not-yet-authenticated decrypt attempt.
+
+    Root/chain keys and ``their_ratchet_pub`` are immutable ``bytes``; counters
+    are ints; ``ratchet_keypair`` is only ever *replaced* (never mutated in
+    place) by the DH ratchet — so all of those are safe to share by reference.
+    ``message_keys`` is the one mutable container the decrypt path adds to and
+    pops from, so it gets a fresh shallow copy (its byte-string values are
+    immutable).
+    """
+    return RatchetState(
+        root_key=state.root_key,
+        sending_chain_key=state.sending_chain_key,
+        receiving_chain_key=state.receiving_chain_key,
+        ratchet_keypair=state.ratchet_keypair,
+        their_ratchet_pub=state.their_ratchet_pub,
+        send_count=state.send_count,
+        recv_count=state.recv_count,
+        prev_send_count=state.prev_send_count,
+        message_keys=dict(state.message_keys),
+    )
+
+
+def _restore(state: RatchetState, trial: RatchetState) -> None:
+    """Commit an authenticated trial decrypt back onto the live ``state``."""
+    state.root_key = trial.root_key
+    state.sending_chain_key = trial.sending_chain_key
+    state.receiving_chain_key = trial.receiving_chain_key
+    state.ratchet_keypair = trial.ratchet_keypair
+    state.their_ratchet_pub = trial.their_ratchet_pub
+    state.send_count = trial.send_count
+    state.recv_count = trial.recv_count
+    state.prev_send_count = trial.prev_send_count
+    state.message_keys = trial.message_keys
 
 
 # ---------------------------------------------------------------------------

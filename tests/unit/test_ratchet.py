@@ -184,6 +184,63 @@ class TestIntegrity:
         with pytest.raises(RatchetError):
             ratchet_decrypt(bob, forged, ct)
 
+    def test_forged_new_dh_does_not_corrupt_state(self) -> None:
+        # Regression for audit H1: a forged header advertising a *new* DH public
+        # key used to drive the DH ratchet (overwriting root + chain keys) before
+        # the body was authenticated, so the failed forgery permanently desynced
+        # the live ratchet and the next genuine message could no longer decrypt.
+        alice, bob = _bootstrap()
+
+        h1, c1 = ratchet_encrypt(alice, b"hello-1")
+        assert ratchet_decrypt(bob, h1, c1) == b"hello-1"
+
+        # An attacker who knows only the victim's public keys (enough to address a
+        # stealth message and seal a header) injects a header naming a fresh DH
+        # key. The ratchet body can't authenticate — it must be rejected.
+        evil_dh = Keypair.generate().public_bytes()
+        forged = Header(dh=evil_dh, pn=0, n=0)
+        with pytest.raises(InvalidTag):
+            ratchet_decrypt(bob, forged, c1)
+
+        # The forgery must have left Bob's ratchet byte-for-byte unchanged, so the
+        # next *legitimate* message still decrypts.
+        h2, c2 = ratchet_encrypt(alice, b"hello-2")
+        assert ratchet_decrypt(bob, h2, c2) == b"hello-2"
+
+    def test_forged_message_leaves_state_byte_for_byte_unchanged(self) -> None:
+        # Stronger form of the H1 regression: assert the snapshot/commit boundary
+        # leaves every observable field identical after a rejected forgery.
+        alice, bob = _bootstrap()
+        h1, c1 = ratchet_encrypt(alice, b"prime the chains")
+        assert ratchet_decrypt(bob, h1, c1) == b"prime the chains"
+
+        before = (
+            bob.root_key,
+            bob.sending_chain_key,
+            bob.receiving_chain_key,
+            bob.ratchet_keypair,
+            bob.their_ratchet_pub,
+            bob.send_count,
+            bob.recv_count,
+            bob.prev_send_count,
+            dict(bob.message_keys),
+        )
+        forged = Header(dh=Keypair.generate().public_bytes(), pn=3, n=7)
+        with pytest.raises(InvalidTag):
+            ratchet_decrypt(bob, forged, c1)
+        after = (
+            bob.root_key,
+            bob.sending_chain_key,
+            bob.receiving_chain_key,
+            bob.ratchet_keypair,
+            bob.their_ratchet_pub,
+            bob.send_count,
+            bob.recv_count,
+            bob.prev_send_count,
+            dict(bob.message_keys),
+        )
+        assert before == after
+
 
 # ---------------------------------------------------------------------------
 # Forward secrecy
