@@ -179,6 +179,31 @@ def unlock(
 
 
 @app.command()
+def lock() -> None:
+    """
+    Re-seal the vault: shred the unlocked identity from disk.
+
+    While DRIFT is unlocked, your identity.json (private keys) sits readable on
+    disk. Run this — or just close the app — before handing your device to
+    anyone, so only the encrypted vault remains. Closing the app also ends the
+    in-memory session; the keys come back only with your unlock passphrase.
+    """
+    if storage.lock():
+        console.print(
+            "[green]✓[/green] Locked. Your keys are sealed in the vault — "
+            "run [bold]drift unlock <passphrase>[/bold] to use DRIFT again."
+        )
+    else:
+        console.print(
+            "[yellow]Nothing to lock:[/yellow] this identity has no vault (no unlock "
+            "passphrase was set at init). Shredding it would destroy your only copy of "
+            "the keys, so DRIFT refuses. Re-run [bold]drift init[/bold] with a passphrase "
+            "to enable locking."
+        )
+        raise typer.Exit(1)
+
+
+@app.command()
 def privacy(
     fmd_rate: float = typer.Option(
         None, "--fmd-rate",

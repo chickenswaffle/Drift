@@ -119,3 +119,5 @@ MIT — see [`LICENSE`](LICENSE)
 ---
 
 > ⚠️ **Security notice:** DRIFT has not been independently audited. Do not use it for anything where your safety depends on it until a formal audit has been completed and published. We will announce audit results here.
+>
+> ⚠️ **The panic key protects you while DRIFT is locked. While unlocked, your identity file is readable on disk — lock DRIFT (`drift lock` or close the app) before handing over a device.**
