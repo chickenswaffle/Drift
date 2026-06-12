@@ -53,17 +53,71 @@ def _require_identity() -> Identity:
 @app.command()
 def init(
     force: bool = typer.Option(False, "--force", help="Overwrite existing identity"),
+    passphrase: str = typer.Option(
+        None, "--passphrase",
+        help="Unlock passphrase (enables the encrypted vault). Blank = no vault.",
+    ),
+    duress_passphrase: str = typer.Option(
+        None, "--duress-passphrase", help="Optional second passphrase for coercion (panic key)",
+    ),
+    duress_mode: str = typer.Option(
+        "wipe", "--duress-mode",
+        help="What the duress passphrase does: 'wipe' (destroy) or 'decoy' (innocuous identity)",
+    ),
 ) -> None:
-    """Generate a new DRIFT identity (keypairs stored locally)."""
-    identity = Identity.generate()
-    try:
-        storage.save_identity(identity, overwrite=force)
-    except StorageError:
+    """
+    Generate a new DRIFT identity (keypairs stored locally).
+
+    Optionally protect it with an unlock passphrase (an encrypted vault) and a
+    *duress* passphrase — a second passphrase that, entered under coercion,
+    silently wipes your keys or opens a believable decoy. Run interactively to
+    be guided through it, or pass --passphrase / --duress-passphrase to script it.
+    """
+    if storage.identity_exists() and not force:
         console.print(
             "[yellow]Identity already exists.[/yellow] "
             "Use --force to regenerate (this is destructive)."
         )
         raise typer.Exit(1) from None
+
+    identity = Identity.generate()
+
+    # Resolve the unlock passphrase (flag, else interactive prompt, else none).
+    interactive = sys.stdin.isatty()
+    if passphrase is None and interactive:
+        passphrase = typer.prompt(
+            "Unlock passphrase (blank to skip and store keys unencrypted)",
+            default="", hide_input=True, show_default=False,
+        ) or None
+
+    if not passphrase:
+        # Legacy path: plain identity.json, no vault, no unlock step.
+        storage.save_identity(identity, overwrite=force)
+    else:
+        # Vault path: optionally set up a duress passphrase.
+        if duress_passphrase is None and interactive and typer.confirm(
+            "Set up a duress passphrase? (recommended)", default=False
+        ):
+            duress_mode = typer.prompt(
+                "Duress mode — 'wipe' (destroy keys) or 'decoy' (show innocuous identity)",
+                default="wipe",
+            ).strip().lower()
+            if duress_mode not in ("wipe", "decoy"):
+                duress_mode = "wipe"
+            duress_passphrase = typer.prompt(
+                "Duress passphrase (must differ from your unlock passphrase)",
+                hide_input=True, confirmation_prompt=True,
+            )
+        if duress_passphrase is not None and duress_passphrase == passphrase:
+            console.print("[red]Duress passphrase must differ from the unlock passphrase.[/red]")
+            raise typer.Exit(1)
+        if duress_mode not in ("wipe", "decoy"):
+            duress_mode = "wipe"
+        storage.create_vault(
+            identity, passphrase,
+            duress_passphrase=duress_passphrase,
+            duress_mode=duress_mode,
+        )
 
     code = identity.contact_code()
     console.print()
@@ -74,8 +128,98 @@ def init(
         border_style="green",
     ))
     console.print()
-    console.print("[dim]Keys are stored in:[/dim]", str(storage.IDENTITY_FILE))
+    if passphrase:
+        console.print("[dim]Keys are sealed in an encrypted vault:[/dim]", str(storage.VAULT_FILE))
+        console.print("[dim]Start DRIFT with [bold]drift unlock <passphrase>[/bold].[/dim]")
+    else:
+        console.print("[dim]Keys are stored in:[/dim]", str(storage.IDENTITY_FILE))
     console.print("[dim]They never leave this machine.[/dim]")
+    console.print()
+
+
+@app.command()
+def unlock(
+    passphrase: str = typer.Argument(..., help="Your unlock passphrase (or duress passphrase)"),
+    relay: str = typer.Option("ws://localhost:8765", "--relay", help="Relay WebSocket URL"),
+    no_tor: bool = typer.Option(False, "--no-tor", help="Skip Tor; connect direct (dev/testing)"),
+    tor_only: bool = typer.Option(False, "--tor-only", help="Refuse to connect if Tor fails"),
+) -> None:
+    """
+    Unlock DRIFT and open the client — the entry point for vault-protected setups.
+
+    Enter your unlock passphrase to proceed normally. If you set up a duress
+    passphrase, entering it does its configured thing (wipe or decoy) and opens
+    the client exactly the same way — no error, no difference an onlooker could
+    see. Only a passphrase that matches neither is rejected.
+    """
+    if no_tor and tor_only:
+        console.print("[red]--no-tor and --tor-only are mutually exclusive.[/red]")
+        raise typer.Exit(1)
+
+    if storage.vault_exists():
+        outcome = storage.unlock(passphrase)
+        if outcome == storage.UNLOCK_FAILED:
+            # Generic, identical-for-any-wrong-passphrase rejection.
+            console.print("[red]Could not unlock.[/red]")
+            raise typer.Exit(1)
+        # PROCEED is returned for real, decoy, AND wipe — indistinguishable here.
+    elif not storage.identity_exists():
+        console.print("[red]No identity found. Run [bold]drift init[/bold] first.[/red]")
+        raise typer.Exit(1)
+    # No vault but a plain identity exists → legacy unprotected start (passphrase
+    # is not used; nothing to unlock).
+
+    identity = _require_identity()
+    saved = storage.load_contacts(identity)
+    from drift.ui.app import DriftApp
+    DriftApp(
+        identity, dict(saved), relay,
+        active=None, use_tor=not no_tor, tor_required=tor_only,
+    ).run()
+
+
+@app.command()
+def privacy(
+    fmd_rate: float = typer.Option(
+        None, "--fmd-rate",
+        help="Set the FMD false-positive rate (0 = off, pure client-side scanning)",
+    ),
+) -> None:
+    """
+    View or set privacy settings.
+
+    The FMD dial trades anonymity for efficiency: 0 scans everything yourself
+    (max privacy); higher rates let a relay pre-filter your mail at the cost of a
+    larger, noisier match set. Without --fmd-rate this prints the current state.
+    """
+    if fmd_rate is not None:
+        from drift.crypto.fmd import subkeys_for_rate
+
+        stored = storage.set_fmd_rate(fmd_rate)
+        n = subkeys_for_rate(stored)
+        effective = 2.0 ** -n if n else 0.0
+        if n == 0:
+            console.print("[green]✓[/green] FMD disabled — pure client-side stealth scanning.")
+        else:
+            console.print(
+                f"[green]✓[/green] FMD rate set to {effective:.4f} "
+                f"({n} sub-keys; relay may pre-filter ~{effective * 100:.1f}% of traffic to you)."
+            )
+        return
+
+    rate = storage.get_fmd_rate()
+    console.print()
+    console.print("[bold]Privacy settings[/bold]")
+    if rate <= 0:
+        console.print("  FMD detection:   [cyan]off[/cyan]  (you scan every message yourself)")
+    else:
+        console.print(f"  FMD detection:   [cyan]{rate:.4f}[/cyan] false-positive rate")
+    # Deliberately constant text — identical whether or not a duress passphrase
+    # is configured, so this screen never reveals that one exists.
+    console.print(
+        "  Unlock:          enter your passphrase at [bold]drift unlock[/bold]. "
+        "A duress passphrase, if set, unlocks the same way."
+    )
     console.print()
 
 
