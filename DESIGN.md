@@ -82,6 +82,22 @@ It buys you two things that static keys can't:
 
 Every individual message is sealed with an AEAD cipher — use **XChaCha20-Poly1305** (the extended-nonce variant is forgiving about nonce handling, which is exactly what you want when you're learning).
 
+### Bootstrap and the exact forward-secrecy boundary
+
+The "X3DH-style handshake" above is, in this build, **not** full X3DH — there is no prekey server and no interactive round trip. Instead both peers derive a shared root and an initial responder DH keypair *deterministically* from the static spend keys (`root = HKDF(ECDH(my_spend, their_spend))`), and whoever sends first promotes itself to ratchet initiator on the spot. Be precise about what that costs, because it is exactly where forward secrecy is subtle (audit H3):
+
+- **Once the DH ratchet has turned even once, forward secrecy is full.** Every chain after the first reply is keyed by fresh, deleted random DH keys, so later key theft reveals nothing about those messages. This is the ordinary Double Ratchet guarantee and it holds.
+
+- **The opening burst is the only special case.** These are the messages the initiator sends *before the peer's first reply* — they ride the bootstrap chain, whose root is the deterministic one above. A naive deterministic bootstrap means a later compromise of **either** party's long-term spend key reconstructs that root and decrypts the whole opening burst. To narrow that, the initiator now folds a **fresh single-use ephemeral** into the bootstrap root: it computes `ECDH(ephemeral, recipient_spend_pub)`, mixes it into the root, and **discards the ephemeral's private half immediately** (it is never stored, never derived from the long-term key). The ephemeral's public half travels inside the sealed-sender envelope of every bootstrap-chain message; the recipient recovers the same secret with `ECDH(recipient_spend_priv, ephemeral_pub)`.
+
+  The result — stated exactly:
+  - A later compromise of the **initiator's** long-term spend key **no longer** decrypts the opening burst. The mixed-in secret depended on an ephemeral private key that no longer exists, so the reconstructed deterministic root is not enough. ✅ This is the headline "steal today's keys, past messages stay safe" guarantee, now honoured for the sender's opening messages.
+  - A later compromise of the **recipient's** long-term spend key **still** decrypts the opening burst, because the recipient recovers the mix-in secret from `recipient_spend_priv` and the public ephemeral on the wire. ❌ This residue is **fundamental** to messaging someone from their long-term public key alone, with no prior interaction: the recipient contributes no deleted secret of their own, so their long-term key is the only thing protecting that first message, and compromising it must reveal it. Closing this needs an interactive prekey (true X3DH with one-time prekeys the recipient deletes) — a later phase.
+
+- **Post-compromise security** is unchanged: a transient state compromise heals on the next DH ratchet from fresh randomness.
+
+So the honest one-liner: *forward secrecy is complete from the first ratchet turn onward; for the initiator's pre-reply opening burst it now holds against the sender's own key theft but not against theft of the recipient's long-term key.*
+
 ---
 
 ## 5. Metadata privacy: the genuinely hard layer

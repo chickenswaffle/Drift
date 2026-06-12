@@ -57,6 +57,7 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 from drift.crypto import Identity, Keypair, derive_message_key
 from drift.crypto.burn import generate_burn_token, verify_burn_token
 from drift.crypto.ratchet import (
+    FS_BOOTSTRAP_INFO,
     Header,
     RatchetState,
     init_receiver,
@@ -87,6 +88,43 @@ def _keypair_from_private(private_bytes: bytes) -> Keypair:
     """Reconstruct an X25519 Keypair from raw private key bytes."""
     priv = X25519PrivateKey.from_private_bytes(private_bytes)
     return Keypair(private_key=priv, public_key=priv.public_key())
+
+
+# Inner sealed-payload framing (audit H3). The bytes sealed under the per-message
+# stealth key are normally just the 40-byte ratchet header. On the initiator's
+# *bootstrap* sending chain — every message it sends before the peer's first
+# reply — they are prefixed with a fresh forward-secrecy ephemeral public key
+# (32 bytes). A one-byte flag distinguishes the two layouts, so even a reordered
+# bootstrap message still carries the ephemeral the responder needs.
+_FS_FLAG_ABSENT = 0
+_FS_FLAG_PRESENT = 1
+_FS_PUB_LEN = 32
+
+
+def _pack_inner(header_bytes: bytes, fs_pub: bytes | None) -> bytes:
+    """Frame the ratchet header (+ optional bootstrap FS ephemeral) for sealing."""
+    if fs_pub is None:
+        return bytes([_FS_FLAG_ABSENT]) + header_bytes
+    return bytes([_FS_FLAG_PRESENT]) + fs_pub + header_bytes
+
+
+def _unpack_inner(blob: bytes) -> tuple[bytes | None, bytes]:
+    """Split a sealed inner payload into ``(fs_pub_or_None, ratchet_header)``.
+
+    Raises ``ValueError`` on a malformed frame — the caller (which has already
+    unsealed under the stealth key) treats that as a non-well-formed message and
+    skips it, so a forged but correctly-sealed blob can't crash the receive loop.
+    """
+    if not blob:
+        raise ValueError("empty sealed inner payload")
+    flag = blob[0]
+    if flag == _FS_FLAG_PRESENT:
+        if len(blob) < 1 + _FS_PUB_LEN:
+            raise ValueError("sealed inner payload too short for FS ephemeral")
+        return blob[1:1 + _FS_PUB_LEN], blob[1 + _FS_PUB_LEN:]
+    if flag != _FS_FLAG_ABSENT:
+        raise ValueError(f"unknown sealed inner-payload flag {flag}")
+    return None, blob[1:]
 
 
 def _addr_digest(addr: bytes) -> str:
@@ -147,6 +185,17 @@ class Session:
         # Our own keys — used to scan for messages addressed *to* us.
         self._my_scan_priv = identity.scan_keypair.private_bytes()
         self._my_spend_pub = identity.spend_keypair.public_bytes()
+        # Our spend private key, needed to recover a peer's bootstrap
+        # forward-secrecy ephemeral secret on receipt (audit H3).
+        self._my_spend_priv = identity.spend_keypair.private_bytes()
+
+        # Public half of the single-use forward-secrecy ephemeral we mix into the
+        # bootstrap root when we are the initiator (audit H3). None until we
+        # promote; carried in the sealed envelope of every bootstrap-chain message
+        # so the responder can fold the same secret into its root. The private
+        # half is generated and discarded inside _promote_to_initiator — never
+        # stored, never derived from the long-term spend key.
+        self._fs_send_pub: bytes | None = None
 
         # Bootstrap the Double Ratchet (see module docstring).
         self._ratchet = self._bootstrap_ratchet(identity)
@@ -203,11 +252,33 @@ class Session:
 
         Only valid before any message has been received (no sending chain yet
         and no DH ratchet has turned). Idempotent guard lives in :meth:`send`.
+
+        Forward secrecy for the opening burst (audit H3): the bootstrap root was
+        a pure function of the long-term spend keys (``_root_secret`` and the
+        deterministic responder keypair), so a later compromise of either party's
+        spend key could reconstruct it and decrypt every message sent before the
+        peer first replied. We now generate a fresh single-use ephemeral here,
+        fold ``ECDH(ephemeral, their_spend_pub)`` into the root, and immediately
+        discard the ephemeral's private half. A later compromise of *our* spend
+        key alone can no longer reconstruct that secret (its private half is gone
+        and is not derived from any stored key), so the messages we send before
+        the peer replies are forward-secret against our own key theft. The peer
+        recovers the same secret from the ephemeral's public half — carried in
+        the sealed envelope of every bootstrap-chain message — via
+        ``ECDH(their_spend_priv, ephemeral_pub)``. See DESIGN.md §4 for the exact
+        boundary (the recipient's long-term key still unlocks the opening burst —
+        unavoidable without an interactive prekey/X3DH).
         """
         logger.debug("send: no sending chain — promoting receiver → initiator")
-        self._ratchet = init_sender(
-            self._root_secret, self._responder_keypair.public_bytes()
+        fs_ephemeral = Keypair.generate()
+        fs_secret = fs_ephemeral.ecdh(self._their_spend_pub)
+        fs_root = derive_message_key(
+            fs_secret, salt=self._root_secret, info=FS_BOOTSTRAP_INFO
         )
+        self._fs_send_pub = fs_ephemeral.public_bytes()
+        self._ratchet = init_sender(fs_root, self._responder_keypair.public_bytes())
+        # fs_ephemeral (private half) and fs_secret fall out of scope here and are
+        # never retained — that is what makes the opening burst forward-secret.
 
     def _emit(self, kind: str, detail: str = "") -> None:
         """Report a non-secret transport event to the optional hook."""
@@ -277,6 +348,17 @@ class Session:
                 self._promote_to_initiator()
             header, ciphertext = ratchet_encrypt(self._ratchet, plaintext.encode())
             self._emit("ratchet", f"sending chain step · msg #{self._ratchet.send_count}")
+            # Carry the bootstrap forward-secrecy ephemeral on every message of
+            # the opening chain — i.e. while our ratchet still points at the
+            # deterministic responder key, before the peer's first reply turns it
+            # — so a reordered first message still delivers it (audit H3).
+            fs_pub = (
+                self._fs_send_pub
+                if self._ratchet.their_ratchet_pub
+                == self._responder_keypair.public_bytes()
+                else None
+            )
+            inner = _pack_inner(header.to_bytes(), fs_pub)
 
         ephemeral = Keypair.generate()
         # derive_one_time_address also returns the per-message stealth key — the
@@ -291,7 +373,7 @@ class Session:
         sealed_blob = seal_sender(
             stealth_key,
             ephemeral.public_bytes(),
-            header.to_bytes(),
+            inner,
             ciphertext,
             address=one_time_addr,
         )
@@ -370,12 +452,26 @@ class Session:
             logger.debug("messages: scan matched — unsealing our envelope")
             self._emit("recv", _addr_digest(envelope.one_time_addr))
             # Confirmed ours → unseal the header. Tampering surfaces as InvalidTag.
-            header_bytes = open_sender_header(
+            inner_bytes = open_sender_header(
                 stealth_key, sealed_header, address=envelope.one_time_addr
             )
-            header = Header.from_bytes(header_bytes)
+            try:
+                fs_pub, header_bytes = _unpack_inner(inner_bytes)
+                header = Header.from_bytes(header_bytes)
+            except ValueError:
+                continue  # malformed inner payload — skip (forged or corrupt)
             async with self._lock:
-                plaintext = ratchet_decrypt(self._ratchet, header, ratchet_ct)
+                # Bootstrap message from the initiator carries a forward-secrecy
+                # ephemeral (audit H3). Before we've turned our first DH ratchet,
+                # recover the matching secret from its public half so our root
+                # lines up with the initiator's. ratchet_decrypt folds it in on
+                # the trial state, so a forged bootstrap message rolls back clean.
+                root_mix = None
+                if self._ratchet.their_ratchet_pub is None and fs_pub is not None:
+                    root_mix = _keypair_from_private(self._my_spend_priv).ecdh(fs_pub)
+                plaintext = ratchet_decrypt(
+                    self._ratchet, header, ratchet_ct, root_mix=root_mix
+                )
                 self._emit("ratchet", f"receiving chain step · msg #{self._ratchet.recv_count}")
             self._emit("erase", "message key erased")
             yield plaintext.decode()

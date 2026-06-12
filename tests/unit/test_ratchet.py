@@ -17,8 +17,9 @@ import os
 import pytest
 from cryptography.exceptions import InvalidTag
 
-from drift.crypto import Keypair
+from drift.crypto import Keypair, derive_message_key
 from drift.crypto.ratchet import (
+    FS_BOOTSTRAP_INFO,
     Header,
     RatchetError,
     init_receiver,
@@ -183,6 +184,54 @@ class TestIntegrity:
         forged = Header(dh=header.dh, pn=header.pn, n=10_000)
         with pytest.raises(RatchetError):
             ratchet_decrypt(bob, forged, ct)
+
+
+class TestBootstrapForwardSecrecyMix:
+    """Audit H3: a session-supplied secret folded into the bootstrap root."""
+
+    @staticmethod
+    def _mixed_pair() -> tuple[object, object, bytes]:
+        # Mirror session bootstrap: the initiator mixes a fresh fs_secret into the
+        # long-term-derived root; the responder still holds only the long-term
+        # root and must fold the same secret in via root_mix.
+        shared = os.urandom(32)  # stands in for HKDF(static_ECDH)
+        bob_kp = Keypair.generate()
+        fs_secret = os.urandom(32)
+        fs_root = derive_message_key(fs_secret, salt=shared, info=FS_BOOTSTRAP_INFO)
+        alice = init_sender(fs_root, bob_kp.public_bytes())
+        bob = init_receiver(shared, bob_kp)
+        return alice, bob, fs_secret
+
+    def test_root_mix_roundtrips(self) -> None:
+        alice, bob, fs_secret = self._mixed_pair()
+        h, c = ratchet_encrypt(alice, b"opening secret")
+        assert ratchet_decrypt(bob, h, c, root_mix=fs_secret) == b"opening secret"
+
+    def test_mix_is_load_bearing(self) -> None:
+        # Without the fs_secret, the long-term-derived root alone (everything an
+        # attacker reconstructs from a later spend-key compromise of *our* side)
+        # cannot open the opening message — that is the forward-secrecy gain.
+        alice, bob, _ = self._mixed_pair()
+        h, c = ratchet_encrypt(alice, b"opening secret")
+        with pytest.raises(InvalidTag):
+            ratchet_decrypt(bob, h, c)  # no root_mix
+
+    def test_wrong_mix_rejected(self) -> None:
+        alice, bob, _ = self._mixed_pair()
+        h, c = ratchet_encrypt(alice, b"opening secret")
+        with pytest.raises(InvalidTag):
+            ratchet_decrypt(bob, h, c, root_mix=os.urandom(32))
+
+    def test_forged_bootstrap_with_mix_leaves_state_unchanged(self) -> None:
+        # H1 must still hold on the bootstrap+mix path: a forged bootstrap message
+        # (valid-looking root_mix, unauthenticated body) leaves the responder able
+        # to process the genuine bootstrap message afterwards.
+        alice, bob, fs_secret = self._mixed_pair()
+        h, c = ratchet_encrypt(alice, b"opening secret")
+        forged = Header(dh=Keypair.generate().public_bytes(), pn=0, n=0)
+        with pytest.raises(InvalidTag):
+            ratchet_decrypt(bob, forged, c, root_mix=os.urandom(32))
+        assert ratchet_decrypt(bob, h, c, root_mix=fs_secret) == b"opening secret"
 
     def test_forged_new_dh_does_not_corrupt_state(self) -> None:
         # Regression for audit H1: a forged header advertising a *new* DH public

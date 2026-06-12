@@ -35,12 +35,19 @@ from dataclasses import dataclass, field
 from cryptography.hazmat.primitives.hashes import SHA256
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
-from drift.crypto import Keypair, decrypt, encrypt
+from drift.crypto import Keypair, decrypt, derive_message_key, encrypt
 
 # Maximum number of message keys we will skip (and cache) within a single chain
 # before treating a header as hostile. Bounds memory against a flood of
 # large-gap message numbers.
 MAX_SKIP = 1000
+
+# Domain separation for the forward-secrecy secret the session folds into the
+# bootstrap root before the very first DH ratchet (audit H3). The initiator
+# mixes it into the root it hands to ``init_sender``; the responder supplies the
+# matching secret as ``ratchet_decrypt(..., root_mix=...)`` on the bootstrap
+# message. Both sides must use this exact info string.
+FS_BOOTSTRAP_INFO = b"drift-ratchet-v1-fs-bootstrap"
 
 _DH_PUB_LEN = 32
 _COUNTER_LEN = 4
@@ -210,7 +217,13 @@ def ratchet_encrypt(state: RatchetState, plaintext: bytes) -> tuple[Header, byte
     return header, ciphertext
 
 
-def ratchet_decrypt(state: RatchetState, header: Header, ciphertext: bytes) -> bytes:
+def ratchet_decrypt(
+    state: RatchetState,
+    header: Header,
+    ciphertext: bytes,
+    *,
+    root_mix: bytes | None = None,
+) -> bytes:
     """
     Decrypt one message, advancing / turning ratchets as needed.
 
@@ -227,15 +240,25 @@ def ratchet_decrypt(state: RatchetState, header: Header, ciphertext: bytes) -> b
     on that snapshot; only on a successful (authenticated) decrypt do we commit
     the advanced root/chain keys and DH ratchet step back to ``state``. On any
     failure the live state is left byte-for-byte unchanged.
+
+    ``root_mix`` is an optional secret the session folds into the root *before*
+    the bootstrap DH ratchet (audit H3): the responder passes the forward-secrecy
+    ephemeral secret recovered from the initiator's first message so its root
+    matches the one ``init_sender`` built. It is applied only at bootstrap (no
+    peer ratchet key seen yet) and, being part of the trial state, rolls back if
+    the message fails to authenticate.
     """
     trial = _snapshot(state)
-    plaintext = _ratchet_decrypt_into(trial, header, ciphertext)
+    plaintext = _ratchet_decrypt_into(trial, header, ciphertext, root_mix)
     _restore(state, trial)
     return plaintext
 
 
 def _ratchet_decrypt_into(
-    state: RatchetState, header: Header, ciphertext: bytes
+    state: RatchetState,
+    header: Header,
+    ciphertext: bytes,
+    root_mix: bytes | None = None,
 ) -> bytes:
     """Core decrypt, mutating ``state``. Raises before returning on any failure.
 
@@ -249,6 +272,14 @@ def _ratchet_decrypt_into(
 
     # 2. New peer ratchet key → skip the rest of the old chain, then DH ratchet.
     if header.dh != state.their_ratchet_pub:
+        # Bootstrap only (no peer key yet): fold the session-supplied
+        # forward-secrecy secret into the root before the first DH ratchet, so it
+        # matches the root the initiator built in init_sender (audit H3). Done on
+        # the trial state, so a forged bootstrap message rolls back cleanly.
+        if root_mix is not None and state.their_ratchet_pub is None:
+            state.root_key = derive_message_key(
+                root_mix, salt=state.root_key, info=FS_BOOTSTRAP_INFO
+            )
         _skip_message_keys(state, header.pn)
         _dh_ratchet(state, header)
 
