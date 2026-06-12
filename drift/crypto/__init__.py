@@ -45,6 +45,7 @@ from nacl.bindings import (
     crypto_aead_xchacha20poly1305_ietf_encrypt,
 )
 from nacl.exceptions import CryptoError
+from nacl.signing import SigningKey
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -183,7 +184,8 @@ class Identity:
     """
     A DRIFT identity: three keypairs + a human-readable contact code.
 
-    identity_key  — Ed25519-style signing anchor (Phase 0: stored, not yet used for signing)
+    identity_key  — Ed25519 signing anchor, derived from the spend key on demand
+                    (see signing_key()); used to sign Phase 6 beacons
     scan_key      — X25519: others use your public scan key to derive one-time addresses
     spend_key     — X25519: your private spend key lets you detect + decrypt incoming mail
 
@@ -204,6 +206,23 @@ class Identity:
         scan_pub = self.scan_keypair.public_b58()
         spend_pub = self.spend_keypair.public_b58()
         return f"drift:{scan_pub}.{spend_pub}"
+
+    def signing_key(self) -> SigningKey:
+        """
+        The identity's Ed25519 signing key (the design doc's "identity_key"
+        anchor). It is *derived* deterministically from the spend key via a
+        domain-separated HKDF rather than stored as a fourth keypair — so the
+        on-disk format and the contact code are unchanged, yet every identity
+        has a stable signing key for Phase 6 beacons. Same identity → same key.
+        """
+        seed = derive_message_key(
+            self.spend_keypair.private_bytes(), info=b"drift-identity-sign-v1"
+        )
+        return SigningKey(seed)
+
+    def verify_key_bytes(self) -> bytes:
+        """Public half of :meth:`signing_key`, for signature verification."""
+        return bytes(self.signing_key().verify_key)
 
     def to_dict(self) -> dict[str, str]:
         return {

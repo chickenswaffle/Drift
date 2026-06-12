@@ -118,6 +118,16 @@ ct = R (32 bytes)  ‖  sealed(ratchet_header)  ‖  ratchet_ciphertext
 
 **The honest limit — `R` is unavoidably public.** The per-message ephemeral key `R` is *not* encrypted, and cannot be: it is the Diffie–Hellman contribution the recipient needs to derive `s` in the first place, so encrypting it under a key derived from itself is circular. It sits inside the opaque blob rather than as a labeled field, but a determined relay can still read those 32 bytes. This is the same shape as **Signal's sealed sender**, where the outer ephemeral is likewise always public; the sealed part is the *identity*, not the ephemeral. In DRIFT `R` is fresh every message, unlinkable to any other message, and tied to no account — so it reveals nothing about who sent it. What sealed sender removes is the relay's ability to *correlate* a sender's traffic, not the existence of one public ephemeral per message.
 
+### Beacon: opt-in, time-boxed discoverability (Phase 6)
+
+Everything else in this section works to make you *unlinkable*. Beacon is the deliberate exception, and it should be understood as one — not pitched as "just as private as the rest."
+
+A beacon lets a user *light* a short human handle (e.g. `Diego552`) for a few minutes. While it's lit, **anyone who knows that exact handle** can resolve it to the user's contact code and add them. The relay indexes the beacon by `SHA256(handle)` and stores an opaque blob encrypted under `HKDF(handle, "drift-beacon-v1")` — so the relay never learns the handle or the contact code, only that *some* handle hashing to this value is briefly active. After the TTL (capped at 10 minutes) the entry is **deleted**, not hidden: a lookup afterwards 404s, and there is no retroactive way to discover who was behind it.
+
+**What you are trading.** During the window, the handle is a shared secret with a deliberately low bar: anyone you tell it to — and anyone *they* tell, or anyone who guesses a weak handle — can link that handle to your contact code for those minutes. That is a small, bounded amount of **temporal linkability** exchanged for the convenience of being found without exchanging a 90-character contact code out of band. It is opt-in (nothing is discoverable unless you light a beacon), time-boxed (minutes, then gone), and per-handle (lighting `Diego552` says nothing about any other handle or your default traffic).
+
+**What it does *not* give you.** The Ed25519 signature inside a beacon proves the payload wasn't altered in transit, but it does **not** prove the handle's owner is who you expect — a handle is just a string, and anyone can light a beacon claiming any handle and pointing at any contact code. So beacon resolution ends at "here is a contact code," never at "this is definitely Diego." The finder must still confirm the safety number out of band (`drift verify`) before trusting the channel. Beacon is a discovery convenience layered on top of DRIFT's verification model, not a replacement for it.
+
 ---
 
 ## 6. Infrastructure: "unstoppable" = no single chokepoint

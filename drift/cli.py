@@ -318,6 +318,144 @@ def verify(
     console.print()
 
 
+# ---------------------------------------------------------------------------
+# Beacon — ephemeral discoverable handles (Phase 6)
+# ---------------------------------------------------------------------------
+
+def _relay_http(relay: str) -> str:
+    """ws(s):// → http(s):// relay base for the beacon HTTP endpoints."""
+    return relay.replace("wss://", "https://", 1).replace("ws://", "http://", 1).rstrip("/")
+
+
+def _parse_ttl(ttl: str) -> int:
+    """Parse a human TTL (``1m``/``5m``/``10m`` or raw seconds) → seconds."""
+    ttl = ttl.strip().lower()
+    try:
+        if ttl.endswith("m"):
+            return int(ttl[:-1]) * 60
+        if ttl.endswith("s"):
+            return int(ttl[:-1])
+        return int(ttl)
+    except ValueError:
+        return 300
+
+
+@app.command()
+def beacon(
+    handle: str = typer.Argument(..., help="The handle to light, e.g. Diego552"),
+    ttl: str = typer.Option("5m", "--ttl", help="Lifetime: 1m, 5m, or 10m (max 10m)"),
+    relay: str = typer.Option("ws://localhost:8765", "--relay", help="Relay URL"),
+) -> None:
+    """
+    Light a beacon: make your contact code briefly discoverable by handle.
+
+    Anyone who knows the exact handle while it's lit can `drift find` you. After
+    it expires (or you press Ctrl+C) it's gone — no retroactive lookup. The relay
+    only ever sees a hash of the handle, never the handle itself.
+    """
+    from drift.crypto.beacon import MAX_TTL_SECONDS, create_beacon
+
+    identity = _require_identity()
+    seconds = min(_parse_ttl(ttl), MAX_TTL_SECONDS)
+    payload = create_beacon(identity, handle, seconds)
+    asyncio.run(_beacon_async(payload, _relay_http(relay)))
+
+
+async def _beacon_async(payload: Any, http_base: str) -> None:
+    import base64
+
+    import httpx
+    from rich.live import Live
+
+    body = {
+        "lookup_hash": payload.lookup_hash,
+        "payload": base64.b64encode(payload.encrypted).decode(),
+        "ttl_seconds": payload.ttl_seconds,
+    }
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(f"{http_base}/beacon", json=body, timeout=10.0)
+            resp.raise_for_status()
+    except httpx.HTTPError as exc:
+        console.print(f"[red]Could not light beacon:[/red] {exc}")
+        raise typer.Exit(1) from None
+
+    def _render(remaining: int) -> Text:
+        m, s = divmod(max(0, remaining), 60)
+        return Text.from_markup(
+            f"[green]✓ Beacon active[/green] — [bold cyan]{payload.handle}[/bold cyan] "
+            f"expires in [bold]{m}:{s:02d}[/bold]   [dim](Ctrl+C to extinguish)[/dim]"
+        )
+
+    import time as _time
+    try:
+        with Live(_render(payload.ttl_seconds), console=console, refresh_per_second=4) as live:
+            while True:
+                remaining = payload.expires_at - int(_time.time())
+                live.update(_render(remaining))
+                if remaining <= 0:
+                    break
+                await asyncio.sleep(0.25)
+        console.print(f"[dim]Beacon for {payload.handle} expired.[/dim]")
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        # Early extinguish — tell the relay to delete it immediately.
+        try:
+            async with httpx.AsyncClient() as client:
+                await client.delete(f"{http_base}/beacon/{payload.lookup_hash}", timeout=5.0)
+        except httpx.HTTPError:
+            pass
+        console.print(f"\n[dim]Beacon for {payload.handle} extinguished.[/dim]")
+
+
+@app.command()
+def find(
+    handle: str = typer.Argument(..., help="The handle to look up, e.g. Diego552"),
+    relay: str = typer.Option("ws://localhost:8765", "--relay", help="Relay URL"),
+) -> None:
+    """
+    Find a lit beacon by handle and add the person as a contact.
+
+    On success the contact is saved under the handle; verify them out of band
+    with `drift verify <handle>` before chatting.
+    """
+    from drift.crypto.beacon import lookup_hash, resolve_beacon
+
+    identity = _require_identity()
+    info = asyncio.run(_find_async(handle, _relay_http(relay), lookup_hash, resolve_beacon))
+    if info is None:
+        console.print("[yellow]Beacon not found or expired.[/yellow]")
+        raise typer.Exit(1)
+    try:
+        storage.add_contact(identity, handle, info.contact_code)
+    except StorageError as exc:
+        console.print(f"[red]Found the beacon but could not add contact:[/red] {exc}")
+        raise typer.Exit(1) from None
+    console.print(
+        f"[green]✓ Found {handle}[/green] → adding as contact. "
+        f"Run [bold]drift verify {handle}[/bold] before chatting."
+    )
+
+
+async def _find_async(handle: str, http_base: str, lookup_hash: Any, resolve_beacon: Any) -> Any:
+    import base64
+
+    import httpx
+
+    digest = lookup_hash(handle)
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(f"{http_base}/beacon/{digest}", timeout=10.0)
+    except httpx.HTTPError:
+        return None
+    if resp.status_code != 200:
+        return None
+    try:
+        encrypted = base64.b64decode(resp.json()["payload"])
+    except (KeyError, ValueError):
+        return None
+    return resolve_beacon(handle, encrypted)
+
+
 @app.command()
 def chat(
     name: str = typer.Argument(None, help="Contact to open (omit for the full client)"),

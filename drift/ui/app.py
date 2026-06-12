@@ -602,6 +602,19 @@ def _ws_to_http(url: str) -> str:
     return url.replace("wss://", "https://", 1).replace("ws://", "http://", 1)
 
 
+def _parse_ttl(ttl: str) -> int:
+    """Parse a beacon TTL (``1m``/``5m``/``10m`` or raw seconds) → seconds."""
+    ttl = ttl.strip().lower()
+    try:
+        if ttl.endswith("m"):
+            return int(ttl[:-1]) * 60
+        if ttl.endswith("s"):
+            return int(ttl[:-1])
+        return int(ttl)
+    except ValueError:
+        return 300
+
+
 class UptimePill(Static):
     """Session uptime counter: ⏱ HH:MM:SS. Ticks every second."""
 
@@ -720,6 +733,7 @@ class HeaderBar(Static):
     relay_url: reactive[str] = reactive("")
     connected: reactive[bool] = reactive(False)
     pulse: reactive[bool] = reactive(True)
+    beacon: reactive[str] = reactive("")  # Phase 6 beacon countdown, "" when none
 
     def render(self) -> RenderableType:
         if self.connected:
@@ -727,12 +741,13 @@ class HeaderBar(Static):
         else:
             dot = "[#555555]○ offline[/]"
         who = self.contact_name or "no contact selected"
+        beacon = f"[{_S}]{self.beacon}[/]  ·  " if self.beacon else ""
         grid = Table.grid(expand=True)
         grid.add_column(justify="left", ratio=1)
         grid.add_column(justify="right")
         grid.add_row(
             f"[{_S}]▶ {who}[/]",
-            f"[#888888]{self.relay_url}  ·  {VERSION}  ·[/]  {dot}",
+            f"{beacon}[#888888]{self.relay_url}  ·  {VERSION}  ·[/]  {dot}",
         )
         return grid
 
@@ -1422,6 +1437,8 @@ class HelpModal(_FadeModal[None]):
         f"  [{_S}]/burn last[/]   burn the last message you sent\n"
         f"  [{_S}]/burn 5m[/]     schedule auto-burn in 5 minutes (or Ns for seconds)\n"
         f"  [{_S}]/burn cancel[/] cancel a scheduled auto-burn\n"
+        f"  [{_S}]/beacon[/]      light a discoverable handle: /beacon <name> [1m|5m|10m]\n"
+        f"  [{_S}]/find[/]        resolve a handle and add them: /find <name>\n"
         f"  [{_S}]/privacy[/]     show privacy settings (FMD rate)\n"
         f"  [{_S}]/help[/]        this screen\n"
         f"  [{_S}]/quit[/]        exit\n\n"
@@ -1500,6 +1517,10 @@ class DriftApp(App[None]):
         self._node_count = 0
         self._onion_node = False
         self._relay_nodes: list[str] = []
+        # Phase 6 beacon countdown state (None when no beacon is lit).
+        self._beacon_handle: str = ""
+        self._beacon_expires: int | None = None
+        self._beacon_lookup: str = ""
         self._unread: dict[str, int] = {}
         self._history: dict[str, list[MessageRecord]] = {}
         self._session: Session | None = None
@@ -1989,10 +2010,111 @@ class DriftApp(App[None]):
                 await self._handle_burn_slash(args)
             case "privacy":
                 self._show_privacy()
+            case "beacon":
+                self._handle_beacon_slash(args)
+            case "find":
+                self._handle_find_slash(args)
             case "quit" | "exit":
                 self.exit()
             case _:
                 self._pane.write_system(f"unknown command: /{command}")
+
+    # -- Beacon (Phase 6) ---------------------------------------------------
+
+    def _handle_beacon_slash(self, args: list[str]) -> None:
+        """``/beacon <handle> [1m|5m|10m]`` — light a beacon from the TUI."""
+        if not args:
+            self._pane.write_system("usage: /beacon <handle> [1m|5m|10m]")
+            return
+        handle = args[0]
+        ttl = _parse_ttl(args[1]) if len(args) > 1 else 300
+        self._light_beacon(handle, ttl)
+
+    def _handle_find_slash(self, args: list[str]) -> None:
+        """``/find <handle>`` — resolve a beacon and add the person as a contact."""
+        if not args:
+            self._pane.write_system("usage: /find <handle>")
+            return
+        self._find_beacon(args[0])
+
+    @work(exclusive=False, group="beacon")
+    async def _light_beacon(self, handle: str, ttl: int) -> None:
+        import base64
+
+        import httpx
+
+        from drift.crypto.beacon import MAX_TTL_SECONDS, create_beacon
+
+        payload = create_beacon(self._identity, handle, min(ttl, MAX_TTL_SECONDS))
+        http_base = _ws_to_http(self._primary_relay)
+        body = {
+            "lookup_hash": payload.lookup_hash,
+            "payload": base64.b64encode(payload.encrypted).decode(),
+            "ttl_seconds": payload.ttl_seconds,
+        }
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(f"{http_base}/beacon", json=body, timeout=10.0)
+                resp.raise_for_status()
+        except httpx.HTTPError as exc:
+            self._pane.write_warning(f"could not light beacon: {exc}")
+            return
+        self._pane.write_system(f"🔦 beacon lit · {handle} · discoverable for {ttl // 60}m")
+        self._beacon_handle = handle
+        self._beacon_expires = payload.expires_at
+        self._beacon_lookup = payload.lookup_hash
+        self._tick_beacon()
+
+    def _tick_beacon(self) -> None:
+        """Update the header beacon countdown each second until it expires."""
+        if self._beacon_expires is None:
+            return
+        remaining = self._beacon_expires - int(time.time())
+        if remaining <= 0:
+            self._header.beacon = ""
+            self._beacon_expires = None
+            self._pane.write_system(f"🔦 beacon expired · {self._beacon_handle}")
+            return
+        m, s = divmod(remaining, 60)
+        self._header.beacon = f"🔦 {self._beacon_handle} {m}:{s:02d}"
+        self.set_timer(1.0, self._tick_beacon)
+
+    @work(exclusive=False, group="beacon")
+    async def _find_beacon(self, handle: str) -> None:
+        import base64
+
+        import httpx
+
+        from drift.crypto.beacon import lookup_hash, resolve_beacon
+
+        http_base = _ws_to_http(self._primary_relay)
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(f"{http_base}/beacon/{lookup_hash(handle)}", timeout=10.0)
+        except httpx.HTTPError as exc:
+            self._pane.write_warning(f"find failed: {exc}")
+            return
+        if resp.status_code != 200:
+            self._pane.write_system(f"🔦 beacon not found or expired · {handle}")
+            return
+        try:
+            encrypted = base64.b64decode(resp.json()["payload"])
+        except (KeyError, ValueError):
+            self._pane.write_system(f"🔦 beacon not found or expired · {handle}")
+            return
+        info = resolve_beacon(handle, encrypted)
+        if info is None:
+            self._pane.write_system(f"🔦 beacon not found or expired · {handle}")
+            return
+        try:
+            self._contacts = storage.add_contact(self._identity, handle, info.contact_code)
+        except storage.StorageError as exc:
+            self._pane.write_warning(f"found beacon but could not add contact: {exc}")
+            return
+        await self._sidebar.populate(self._contacts, self._active, self._unread)
+        self._pane.write_system(
+            f"🔦 found {handle} → added as contact · run /verify after selecting them"
+        )
 
     def _show_privacy(self) -> None:
         """
