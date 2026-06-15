@@ -26,7 +26,8 @@ from rich.panel import Panel
 from rich.text import Text
 
 from drift import __version__, storage
-from drift.crypto import Identity
+from drift.crypto import Identity, groups
+from drift.crypto.groups import ContactInfo, GroupError, create_group
 from drift.storage import StorageError
 
 app = typer.Typer(
@@ -480,9 +481,107 @@ async def _find_async(handle: str, http_base: str, lookup_hash: Any, resolve_bea
     return resolve_beacon(handle, encrypted)
 
 
+# ---------------------------------------------------------------------------
+# Groups (Phase 8)
+# ---------------------------------------------------------------------------
+
+group_app = typer.Typer(
+    name="group",
+    help="Create and manage group conversations (Phase 8, ≤10 members).",
+    no_args_is_help=True,
+)
+app.add_typer(group_app, name="group")
+
+
+@group_app.command("create")
+def group_create(
+    name: str = typer.Argument(..., help="Local label for the group"),
+    # Typer's variadic-positional idiom; B008 only exempts immutable-typed defaults.
+    members: list[str] = typer.Argument(..., help="Contact names to include"),  # noqa: B008
+) -> None:
+    """Create a group from saved contacts: drift group create <name> <c1> <c2> …"""
+    identity = _require_identity()
+    contacts = storage.load_contacts(identity)
+    infos: list[ContactInfo] = []
+    for m in members:
+        if m not in contacts:
+            console.print(f"[red]Unknown contact:[/red] {m}")
+            raise typer.Exit(1)
+        infos.append(ContactInfo(name=m, code=contacts[m]["code"]))
+    try:
+        g = create_group(name, infos)
+    except GroupError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1) from None
+    storage.add_group(identity, g)
+    console.print(
+        f"[green]✓[/green] Created group [bold]{name}[/bold] with "
+        f"{len(g.members)} member(s). Open it with [bold]drift chat {name}[/bold]."
+    )
+
+
+@group_app.command("add")
+def group_add(
+    group_name: str = typer.Argument(..., help="The group to modify"),
+    member: str = typer.Argument(..., help="Contact name to add"),
+) -> None:
+    """Add a saved contact to a group (announced to members when you next chat)."""
+    identity = _require_identity()
+    g = storage.get_group(identity, group_name)
+    if g is None:
+        console.print(f"[red]Unknown group:[/red] {group_name}")
+        raise typer.Exit(1)
+    contacts = storage.load_contacts(identity)
+    if member not in contacts:
+        console.print(f"[red]Unknown contact:[/red] {member}")
+        raise typer.Exit(1)
+    try:
+        groups.add_member(g, ContactInfo(name=member, code=contacts[member]["code"]))
+    except GroupError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1) from None
+    storage.add_group(identity, g)
+    console.print(f"[green]✓[/green] Added [bold]{member}[/bold] to [bold]{group_name}[/bold]")
+
+
+@group_app.command("remove")
+def group_remove(
+    group_name: str = typer.Argument(..., help="The group to modify"),
+    member: str = typer.Argument(..., help="Member name to remove"),
+) -> None:
+    """Remove a member from a group (announced to members when you next chat)."""
+    identity = _require_identity()
+    g = storage.get_group(identity, group_name)
+    if g is None:
+        console.print(f"[red]Unknown group:[/red] {group_name}")
+        raise typer.Exit(1)
+    code = next((m.code for m in g.members if m.name == member), None)
+    if code is None:
+        console.print(f"[red]{member} is not in {group_name}[/red]")
+        raise typer.Exit(1)
+    groups.remove_member(g, code)
+    storage.add_group(identity, g)
+    console.print(
+        f"[green]✓[/green] Removed [bold]{member}[/bold] from [bold]{group_name}[/bold]"
+    )
+
+
+@group_app.command("list")
+def group_list() -> None:
+    """List your groups and their members."""
+    identity = _require_identity()
+    saved = storage.load_groups(identity)
+    if not saved:
+        console.print("[dim]No groups yet. Use [bold]drift group create[/bold].[/dim]")
+        return
+    for name, g in saved.items():
+        names = ", ".join(m.name for m in g.members) or "(just you)"
+        console.print(f"  [bold]{name}[/bold]  [dim]{g.size} members:[/dim] {names}")
+
+
 @app.command()
 def chat(
-    name: str = typer.Argument(None, help="Contact to open (omit for the full client)"),
+    name: str = typer.Argument(None, help="Contact or group to open (omit for full client)"),
     relay: str = typer.Option("ws://localhost:8765", "--relay", help="Relay WebSocket URL"),
     no_tui: bool = typer.Option(False, "--no-tui", help="Plain-text mode (no Textual TUI)"),
     no_tor: bool = typer.Option(
@@ -502,9 +601,11 @@ def chat(
     """
     identity = _require_identity()
     saved = storage.load_contacts(identity)
+    # A name may refer to a group or a contact; groups take precedence.
+    group = storage.get_group(identity, name) if name is not None else None
 
-    if name is not None and name not in saved:
-        console.print(f"[red]Unknown contact:[/red] {name}")
+    if name is not None and group is None and name not in saved:
+        console.print(f"[red]Unknown contact or group:[/red] {name}")
         raise typer.Exit(1)
 
     if no_tor and tor_only:
@@ -515,14 +616,21 @@ def chat(
 
     if no_tui:
         if name is None:
-            console.print("[red]--no-tui requires a contact name.[/red]")
+            console.print("[red]--no-tui requires a contact or group name.[/red]")
             raise typer.Exit(1)
-        ok = asyncio.run(
-            _chat_async(
-                name, identity, saved[name]["code"], relay,
-                use_tor=use_tor, tor_only=tor_only,
+        if group is not None:
+            ok = asyncio.run(
+                _group_chat_async(
+                    identity, group, relay, use_tor=use_tor, tor_only=tor_only
+                )
             )
-        )
+        else:
+            ok = asyncio.run(
+                _chat_async(
+                    name, identity, saved[name]["code"], relay,
+                    use_tor=use_tor, tor_only=tor_only,
+                )
+            )
         if not ok:
             raise typer.Exit(1)
         return
@@ -530,7 +638,9 @@ def chat(
     from drift.ui.app import DriftApp
     DriftApp(
         identity, dict(saved), relay,
-        active=name, use_tor=use_tor, tor_required=tor_only,
+        active=name if group is None else None,
+        group=group,
+        use_tor=use_tor, tor_required=tor_only,
     ).run()
 
 
@@ -603,6 +713,79 @@ async def _chat_async(
         if tor_client is not None:
             await tor_client.close()
     return True
+
+
+async def _group_chat_async(
+    identity: Identity,
+    group: Any,
+    relay_url: str,
+    *,
+    use_tor: bool = True,
+    tor_only: bool = False,
+) -> bool:
+    """Headless group chat loop (--no-tui). Each message is prefixed with its
+    sender's name; membership changes print as system lines."""
+    from cryptography.exceptions import InvalidTag
+
+    from drift.transport.session import GroupSession
+
+    tor_client = await _bootstrap_tor_cli(use_tor=use_tor, tor_only=tor_only)
+    if tor_client is False:
+        return False
+
+    def _on_membership(change: Any) -> None:
+        verb = "added" if change.action == "add" else "removed"
+        console.print(f"[dim]→ {change.target.name} {verb} (membership change)[/dim]")
+
+    console.print(f"[dim]Connecting to {relay_url} …[/dim]")
+    try:
+        async with GroupSession(
+            identity, group, relay_url,
+            tor_client=tor_client, on_membership=_on_membership,
+        ) as gs:
+            console.print(
+                f"[green]Connected.[/green] Group [bold]{group.name}[/bold] "
+                f"({group.size} members). Ctrl+C to quit.\n"
+            )
+            recv_task = asyncio.create_task(_group_receive_loop(gs))
+            loop = asyncio.get_running_loop()
+            try:
+                while True:
+                    line = await loop.run_in_executor(None, sys.stdin.readline)
+                    if not line:
+                        break
+                    text = line.rstrip("\n")
+                    if text:
+                        try:
+                            await gs.send_to_group(text)
+                        except Exception as exc:  # noqa: BLE001
+                            console.print(f"[red]send error:[/red] {exc}")
+                            continue
+                        console.print(f"[bold green]you:[/bold green] {text}")
+            except (KeyboardInterrupt, asyncio.CancelledError):
+                pass
+            finally:
+                recv_task.cancel()
+                try:
+                    await recv_task
+                except (asyncio.CancelledError, InvalidTag):
+                    pass
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]Connection error:[/red] {exc}")
+    finally:
+        if tor_client is not None:
+            await tor_client.close()
+    return True
+
+
+async def _group_receive_loop(gs: Any) -> None:
+    from cryptography.exceptions import InvalidTag
+
+    try:
+        async for gm in gs.messages():
+            console.print(f"\n[bold cyan]{gm.sender_name}:[/bold cyan] {gm.text}")
+    except InvalidTag:
+        console.print("\n[red]Authentication failure — message rejected.[/red]")
 
 
 async def _bootstrap_tor_cli(*, use_tor: bool, tor_only: bool) -> Any:

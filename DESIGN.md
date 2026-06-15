@@ -248,3 +248,60 @@ A few things to state plainly so you build trust instead of overpromising:
 - **Metadata is hard.** You're doing more than most by even trying. Be proud of that and precise about its limits.
 
 Build it honest, build it in the open, and let the rotating addresses be the thing people remember.
+
+---
+
+## 11. Group messaging (Phase 8 — pairwise composition, ≤10 members)
+
+Groups in DRIFT are **not** a new cryptographic construction. A group is a
+composition of the primitives we already have: the pairwise Double Ratchet
+(Section 4) and rotating stealth addresses (Section 3). Every member keeps an
+independent pairwise ratchet session with every *other* member. A group message
+is encrypted **once per recipient** and each ciphertext is sent to that
+recipient's own one-time stealth address. The relay sees N-1 unrelated
+envelopes — never a "group message"; the group identifier is encrypted *inside*
+the payload, never on the envelope.
+
+The group identifier itself is fresh 32-byte randomness, owned by no member, so
+it can't be linked back to whoever created the group.
+
+### Be honest about the costs
+
+- **O(n) bandwidth per message.** Sending one group message costs one ciphertext
+  per other member (N-1 envelopes). That is fine for the small groups this phase
+  targets (hard cap: **10 members**) and it keeps us honest to the "no new
+  primitives" rule — it is pure ratchet + stealth composition. It does **not**
+  scale to large groups. The intended fix is **sender keys** (a single per-sender
+  message chain whose key is distributed once over the pairwise channels), which
+  brings send cost down to O(1) ciphertext + O(n) key distribution. That is
+  explicitly deferred to a future **Phase 8b**; do not pretend v1 groups scale.
+
+- **Membership is eventually consistent, not strongly consistent.** There is no
+  group state on the relay — the group exists only as the union of members'
+  local views, kept in sync by membership-change messages that propagate pairwise
+  (each signed with the author's Ed25519 identity key and additionally bound to
+  the pairwise channel that delivered it). Practically: **a member who is offline
+  during a membership change keeps a stale view until they reconnect and process
+  the queued change.** And a just-removed member may still receive one or two
+  messages that were already in flight from senders who hadn't yet processed the
+  removal. This is inherent to a serverless, no-central-authority design — it is a
+  property, not a bug. Joining is out-of-band (the inviter shares the roster, the
+  same trust model as exchanging a contact code in the first place).
+
+- **Removal is forward-secret, not retroactive.** Removing a member relies on the
+  *existing* forward-secrecy property of the pairwise ratchet — there is no new
+  mechanism. After removal the member is dropped from every sender's recipient
+  list, so they receive no further envelopes; and because each remaining pair's
+  ratchet advances on continued use, a removed member who somehow retained another
+  pair's session state still cannot follow future ratchet steps. But removal does
+  **not** reach backwards: a removed member who saved earlier message keys can
+  still decrypt messages from *before* their removal. This is true of essentially
+  every messenger (you cannot un-send a message someone already decrypted) — we
+  state it plainly rather than imply otherwise.
+
+### Why this is still worth shipping
+
+Even at O(n), a DRIFT group inherits the whole metadata story: the relay sees
+only a fan of unlinkable one-time addresses with independent ciphertexts and no
+shared field tying them together, so it cannot even tell that a "group" exists,
+let alone who is in it. That unlinkability — not raw throughput — is the point.

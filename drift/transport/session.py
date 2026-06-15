@@ -51,15 +51,18 @@ import asyncio
 import base64
 import logging
 from collections.abc import AsyncGenerator, Callable
+from dataclasses import dataclass
 
+from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
-from drift.crypto import Identity, Keypair, derive_message_key
+from drift.crypto import Identity, Keypair, derive_message_key, groups
 from drift.crypto.burn import generate_burn_token, verify_burn_token
+from drift.crypto.groups import ContactInfo, GroupState, MembershipChange
 from drift.crypto.ratchet import (
     FS_BOOTSTRAP_INFO,
     Header,
-    RatchetState,
+    RatchetError,
     init_receiver,
     init_sender,
     ratchet_decrypt,
@@ -138,6 +141,165 @@ def _addr_digest(addr: bytes) -> str:
 EventHook = Callable[[str, str], None]
 
 
+class PairwiseRatchet:
+    """
+    The per-peer crypto of one conversation, decoupled from the relay socket.
+
+    It owns a single Double Ratchet plus the deterministic bootstrap material
+    (root secret + responder keypair, derived from the static spend keys) and
+    the peer's public keys. It turns a plaintext into a sealed, stealth-addressed
+    envelope body (:meth:`encrypt`) and a ratchet ciphertext back into plaintext
+    (:meth:`decrypt_ratchet` / :meth:`attempt_ratchet`).
+
+    :class:`Session` composes exactly one of these (its single peer);
+    :class:`GroupSession` composes one per other member. All the subtle
+    sealed-sender + forward-secrecy *bootstrap* logic (audit H3) therefore lives
+    in exactly one place. Scanning the firehose for messages addressed to *us* is
+    identity-level (the same for every peer) and stays with the owner — see
+    :func:`_scan_and_unseal`.
+    """
+
+    def __init__(self, identity: Identity, contact_code: str) -> None:
+        self._their_scan_pub, self._their_spend_pub = Identity.parse_contact_code(
+            contact_code
+        )
+        static_ecdh = identity.spend_keypair.ecdh(self._their_spend_pub)
+        # Both peers reconstruct identical bootstrap material from the static
+        # keys, so whoever speaks first can promote itself to initiator on demand.
+        self._root_secret = derive_message_key(static_ecdh, info=b"drift-ratchet-v1-root")
+        self._responder_keypair = _keypair_from_private(
+            derive_message_key(static_ecdh, info=b"drift-ratchet-v1-responder")
+        )
+        # Raw ECDH output, base material for burn tokens (domain-separated by the
+        # burn module's own HKDF). Kept so the owner can issue burns.
+        self._burn_shared = static_ecdh
+        # Public half of the bootstrap forward-secrecy ephemeral (audit H3); set
+        # on promotion, carried on every opening-chain message. Private half is
+        # generated and discarded inside _promote_to_initiator.
+        self._fs_send_pub: bytes | None = None
+        self._ratchet = init_receiver(self._root_secret, self._responder_keypair)
+        self._last_sent_addr: bytes | None = None
+
+    @property
+    def burn_shared(self) -> bytes:
+        return self._burn_shared
+
+    @property
+    def last_sent_addr(self) -> bytes | None:
+        return self._last_sent_addr
+
+    @property
+    def send_count(self) -> int:
+        return self._ratchet.send_count
+
+    @property
+    def recv_count(self) -> int:
+        return self._ratchet.recv_count
+
+    def _promote_to_initiator(self) -> None:
+        """Promote receiver → initiator on first send (see Session's docstring,
+        audit H3). Folds a fresh, immediately-discarded forward-secrecy ephemeral
+        into the bootstrap root so the opening burst is forward-secret against our
+        own later key theft."""
+        fs_ephemeral = Keypair.generate()
+        fs_secret = fs_ephemeral.ecdh(self._their_spend_pub)
+        fs_root = derive_message_key(
+            fs_secret, salt=self._root_secret, info=FS_BOOTSTRAP_INFO
+        )
+        self._fs_send_pub = fs_ephemeral.public_bytes()
+        self._ratchet = init_sender(fs_root, self._responder_keypair.public_bytes())
+        # fs_ephemeral (private) and fs_secret fall out of scope and are never kept.
+
+    def encrypt(self, plaintext: bytes) -> tuple[bytes, bytes]:
+        """Ratchet-encrypt + seal + stealth-address ``plaintext`` for this peer.
+
+        Returns ``(one_time_addr, sealed_blob)`` ready to drop into an Envelope.
+        """
+        if self._ratchet.sending_chain_key is None:
+            self._promote_to_initiator()
+        header, ciphertext = ratchet_encrypt(self._ratchet, plaintext)
+        # Carry the bootstrap FS ephemeral on every opening-chain message — i.e.
+        # while our ratchet still points at the deterministic responder key.
+        fs_pub = (
+            self._fs_send_pub
+            if self._ratchet.their_ratchet_pub == self._responder_keypair.public_bytes()
+            else None
+        )
+        inner = _pack_inner(header.to_bytes(), fs_pub)
+        ephemeral = Keypair.generate()
+        one_time_addr, stealth_key = derive_one_time_address(
+            ephemeral.private_bytes(), self._their_scan_pub, self._their_spend_pub
+        )
+        sealed_blob = seal_sender(
+            stealth_key, ephemeral.public_bytes(), inner, ciphertext, address=one_time_addr
+        )
+        self._last_sent_addr = one_time_addr
+        return one_time_addr, sealed_blob
+
+    def decrypt_ratchet(
+        self, header: Header, ratchet_ct: bytes, root_mix: bytes | None
+    ) -> bytes:
+        """Ratchet-decrypt an already-unsealed message. ``InvalidTag`` propagates
+        (genuine tamper) — used by the 1:1 path where the peer is unambiguous."""
+        return ratchet_decrypt(self._ratchet, header, ratchet_ct, root_mix=root_mix)
+
+    def attempt_ratchet(
+        self, header: Header, ratchet_ct: bytes, root_mix: bytes | None
+    ) -> bytes | None:
+        """Trial ratchet-decrypt for group fan-in: return ``None`` instead of
+        raising when this peer's ratchet can't authenticate the message.
+
+        Safe to try against every member: :func:`ratchet_decrypt` runs on a
+        snapshot and rolls back on failure, so a wrong-peer attempt leaves this
+        ratchet byte-for-byte unchanged. A failure here means "not from this
+        member" (expected fan-in disambiguation), **not** tamper — tamper of a
+        message genuinely addressed to us is still caught loudly at the
+        identity-level unseal in :func:`_scan_and_unseal`.
+        """
+        try:
+            return ratchet_decrypt(self._ratchet, header, ratchet_ct, root_mix=root_mix)
+        except (InvalidTag, RatchetError):
+            return None
+
+
+def _scan_and_unseal(
+    envelope: Envelope, my_scan_priv: bytes, my_spend_pub: bytes
+) -> tuple[bytes | None, Header, bytes] | None:
+    """
+    Identity-level receive parsing shared by Session and GroupSession.
+
+    Returns ``(fs_pub, header, ratchet_ct)`` when ``envelope`` is a well-formed
+    stealth message addressed to *us*, else ``None`` (not ours / malformed).
+
+    A scan match means the message really is addressed to us (the stealth address
+    is bound to our scan + spend keys), so unsealing its header authenticates it:
+    a failure there is genuine tamper and ``InvalidTag`` is allowed to propagate
+    (project iron rule). Only the per-member *ratchet* trial in
+    :meth:`PairwiseRatchet.attempt_ratchet` swallows ``InvalidTag``, and only
+    because there a failure means "from a different member".
+    """
+    if envelope.one_time_addr is None:
+        return None
+    try:
+        ephemeral_pub, sealed_header, ratchet_ct = parse_sender(envelope.ciphertext)
+    except ValueError:
+        return None
+    stealth_key = scan_for_message(
+        ephemeral_pub, envelope.one_time_addr, my_scan_priv, my_spend_pub
+    )
+    if stealth_key is None:
+        return None
+    inner_bytes = open_sender_header(
+        stealth_key, sealed_header, address=envelope.one_time_addr
+    )
+    try:
+        fs_pub, header_bytes = _unpack_inner(inner_bytes)
+        header = Header.from_bytes(header_bytes)
+    except ValueError:
+        return None  # malformed inner payload — skip (forged or corrupt)
+    return fs_pub, header, ratchet_ct
+
+
 class Session:
     """
     An encrypted conversation channel: stealth-addressed delivery (Phase 1)
@@ -177,28 +339,18 @@ class Session:
         # only. We keep the handle purely to report the circuit to the UI.
         self._tor_client = tor_client
 
-        # Contact's public keys — used to address messages *to* them.
-        self._their_scan_pub, self._their_spend_pub = Identity.parse_contact_code(
-            contact_code
-        )
-
-        # Our own keys — used to scan for messages addressed *to* us.
+        # Our own keys — used to scan the firehose for messages addressed *to*
+        # us (identity-level: the same regardless of which peer sent them).
         self._my_scan_priv = identity.scan_keypair.private_bytes()
         self._my_spend_pub = identity.spend_keypair.public_bytes()
         # Our spend private key, needed to recover a peer's bootstrap
         # forward-secrecy ephemeral secret on receipt (audit H3).
         self._my_spend_priv = identity.spend_keypair.private_bytes()
 
-        # Public half of the single-use forward-secrecy ephemeral we mix into the
-        # bootstrap root when we are the initiator (audit H3). None until we
-        # promote; carried in the sealed envelope of every bootstrap-chain message
-        # so the responder can fold the same secret into its root. The private
-        # half is generated and discarded inside _promote_to_initiator — never
-        # stored, never derived from the long-term spend key.
-        self._fs_send_pub: bytes | None = None
-
-        # Bootstrap the Double Ratchet (see module docstring).
-        self._ratchet = self._bootstrap_ratchet(identity)
+        # All per-peer crypto — the Double Ratchet, its deterministic bootstrap
+        # material, the peer's public keys and the sealed-sender framing — lives
+        # in one PairwiseRatchet (shared, identical code, with GroupSession).
+        self._channel = PairwiseRatchet(identity, contact_code)
 
         # The ratchet state is mutated on every send and receive; serialize
         # access so concurrent send/receive tasks can't interleave a mutation.
@@ -212,9 +364,6 @@ class Session:
         # otherwise advance past its key and surface as a spurious InvalidTag.
         self._seen_addrs: set[bytes] = set()
 
-        # One-time address of the most recently sent message — used by burn_last_message().
-        self._last_sent_addr: bytes | None = None
-
         # Subscribe to the shared firehose; the relay routes by this key only.
         # When Tor is active, hand the transport the SOCKS5 endpoint so every
         # byte is proxied through the circuit.
@@ -225,60 +374,6 @@ class Session:
             ping_interval=ping_interval,
             socks_proxy=socks_proxy,
         )
-
-    def _bootstrap_ratchet(self, identity: Identity) -> RatchetState:
-        static_ecdh = identity.spend_keypair.ecdh(self._their_spend_pub)
-        # Stash the root secret + deterministic responder keypair so that
-        # whichever side speaks first can promote itself to initiator on demand
-        # (see _promote_to_initiator). Both peers reconstruct identical values.
-        self._root_secret = derive_message_key(static_ecdh, info=b"drift-ratchet-v1-root")
-        responder_priv = derive_message_key(
-            static_ecdh, info=b"drift-ratchet-v1-responder"
-        )
-        self._responder_keypair = _keypair_from_private(responder_priv)
-
-        # Raw ECDH output used as the base material for burn tokens.
-        # generate_burn_token() runs its own HKDF with info=b"drift-burn-v1",
-        # so this is domain-separated from all ratchet key material.
-        self._burn_shared = static_ecdh
-
-        # Everyone starts as a receiver; the first sender promotes lazily.
-        logger.debug("bootstrap: starting as receiver, awaiting first speaker")
-        return init_receiver(self._root_secret, self._responder_keypair)
-
-    def _promote_to_initiator(self) -> None:
-        """
-        Turn this side into the ratchet initiator on its first send.
-
-        Only valid before any message has been received (no sending chain yet
-        and no DH ratchet has turned). Idempotent guard lives in :meth:`send`.
-
-        Forward secrecy for the opening burst (audit H3): the bootstrap root was
-        a pure function of the long-term spend keys (``_root_secret`` and the
-        deterministic responder keypair), so a later compromise of either party's
-        spend key could reconstruct it and decrypt every message sent before the
-        peer first replied. We now generate a fresh single-use ephemeral here,
-        fold ``ECDH(ephemeral, their_spend_pub)`` into the root, and immediately
-        discard the ephemeral's private half. A later compromise of *our* spend
-        key alone can no longer reconstruct that secret (its private half is gone
-        and is not derived from any stored key), so the messages we send before
-        the peer replies are forward-secret against our own key theft. The peer
-        recovers the same secret from the ephemeral's public half — carried in
-        the sealed envelope of every bootstrap-chain message — via
-        ``ECDH(their_spend_priv, ephemeral_pub)``. See DESIGN.md §4 for the exact
-        boundary (the recipient's long-term key still unlocks the opening burst —
-        unavoidable without an interactive prekey/X3DH).
-        """
-        logger.debug("send: no sending chain — promoting receiver → initiator")
-        fs_ephemeral = Keypair.generate()
-        fs_secret = fs_ephemeral.ecdh(self._their_spend_pub)
-        fs_root = derive_message_key(
-            fs_secret, salt=self._root_secret, info=FS_BOOTSTRAP_INFO
-        )
-        self._fs_send_pub = fs_ephemeral.public_bytes()
-        self._ratchet = init_sender(fs_root, self._responder_keypair.public_bytes())
-        # fs_ephemeral (private half) and fs_secret fall out of scope here and are
-        # never retained — that is what makes the opening burst forward-secret.
 
     def _emit(self, kind: str, detail: str = "") -> None:
         """Report a non-secret transport event to the optional hook."""
@@ -343,41 +438,10 @@ class Session:
         the recipient's one-time address.
         """
         async with self._lock:
-            if self._ratchet.sending_chain_key is None:
-                # First to speak in this conversation → become the initiator.
-                self._promote_to_initiator()
-            header, ciphertext = ratchet_encrypt(self._ratchet, plaintext.encode())
-            self._emit("ratchet", f"sending chain step · msg #{self._ratchet.send_count}")
-            # Carry the bootstrap forward-secrecy ephemeral on every message of
-            # the opening chain — i.e. while our ratchet still points at the
-            # deterministic responder key, before the peer's first reply turns it
-            # — so a reordered first message still delivers it (audit H3).
-            fs_pub = (
-                self._fs_send_pub
-                if self._ratchet.their_ratchet_pub
-                == self._responder_keypair.public_bytes()
-                else None
-            )
-            inner = _pack_inner(header.to_bytes(), fs_pub)
-
-        ephemeral = Keypair.generate()
-        # derive_one_time_address also returns the per-message stealth key — the
-        # shared secret the recipient recomputes when scanning. We use it to seal
-        # the ratchet header (it was previously discarded). Both sides derive it
-        # identically, so no extra key material rides the wire.
-        one_time_addr, stealth_key = derive_one_time_address(
-            ephemeral.private_bytes(),
-            self._their_scan_pub,
-            self._their_spend_pub,
-        )
-        sealed_blob = seal_sender(
-            stealth_key,
-            ephemeral.public_bytes(),
-            inner,
-            ciphertext,
-            address=one_time_addr,
-        )
-        self._last_sent_addr = one_time_addr  # tracked for burn_last_message()
+            # The channel promotes to initiator on first send, ratchet-encrypts,
+            # seals and stealth-addresses — all the per-peer crypto in one place.
+            one_time_addr, sealed_blob = self._channel.encrypt(plaintext.encode())
+            self._emit("ratchet", f"sending chain step · msg #{self._channel.send_count}")
         self._emit("send", _addr_digest(one_time_addr))
         await self._client.send(
             Envelope(
@@ -391,17 +455,17 @@ class Session:
 
     async def burn_last_message(self) -> None:
         """Send a burn request for the last message we sent."""
-        if self._last_sent_addr is None:
+        if self._channel.last_sent_addr is None:
             from drift.transport.client import RelayError
             raise RelayError("no message sent in this session")
-        addr_b64 = base64.b64encode(self._last_sent_addr).decode()
-        token = generate_burn_token(self._burn_shared, "message", addr_b64)
+        addr_b64 = base64.b64encode(self._channel.last_sent_addr).decode()
+        token = generate_burn_token(self._channel.burn_shared, "message", addr_b64)
         await self._client.post_burn(token, "message", addr_b64, STEALTH_CHANNEL)
         self._emit("burn", f"message burn requested · {addr_b64[:8]}···")
 
     async def burn_conversation(self) -> None:
         """Send a burn request to erase this conversation from the relay and both clients."""
-        token = generate_burn_token(self._burn_shared, "conversation")
+        token = generate_burn_token(self._channel.burn_shared, "conversation")
         await self._client.post_burn(token, "conversation", None, STEALTH_CHANNEL)
         self._emit("burn", "conversation burn requested")
 
@@ -421,7 +485,7 @@ class Session:
             # Burn tombstone from the relay — verify token, then call hook.
             if isinstance(item, BurnFrame):
                 if item.token and verify_burn_token(
-                    self._burn_shared, item.token, item.scope, item.message_id
+                    self._channel.burn_shared, item.token, item.scope, item.message_id
                 ):
                     logger.debug("messages: verified burn tombstone scope=%s", item.scope)
                     if self._on_burn is not None:
@@ -430,49 +494,314 @@ class Session:
                     logger.debug("messages: ignoring burn tombstone — token invalid or missing")
                 continue
 
-            envelope = item
-            if envelope.one_time_addr is None:
-                continue  # not a stealth envelope
-            try:
-                ephemeral_pub, sealed_header, ratchet_ct = parse_sender(envelope.ciphertext)
-            except ValueError:
-                continue  # malformed blob — not a well-formed stealth message
-            stealth_key = scan_for_message(
-                ephemeral_pub,
-                envelope.one_time_addr,
-                self._my_scan_priv,
-                self._my_spend_pub,
-            )
-            if stealth_key is None:
-                continue  # not addressed to us (someone else's, or our own echo)
-            if envelope.one_time_addr in self._seen_addrs:
+            # Identity-level scan + unseal (shared with GroupSession). A genuine
+            # tamper of a message addressed to us surfaces here as InvalidTag and
+            # is allowed to propagate (iron rule).
+            parsed = _scan_and_unseal(item, self._my_scan_priv, self._my_spend_pub)
+            if parsed is None:
+                continue  # not addressed to us, or malformed
+            assert item.one_time_addr is not None  # guaranteed by _scan_and_unseal
+            if item.one_time_addr in self._seen_addrs:
                 continue  # relay replayed a message we've already accepted
-            self._seen_addrs.add(envelope.one_time_addr)
+            self._seen_addrs.add(item.one_time_addr)
+            self._emit("recv", _addr_digest(item.one_time_addr))
 
-            logger.debug("messages: scan matched — unsealing our envelope")
-            self._emit("recv", _addr_digest(envelope.one_time_addr))
-            # Confirmed ours → unseal the header. Tampering surfaces as InvalidTag.
-            inner_bytes = open_sender_header(
-                stealth_key, sealed_header, address=envelope.one_time_addr
+            fs_pub, header, ratchet_ct = parsed
+            # Bootstrap forward-secrecy secret (audit H3): recovered from the
+            # ephemeral's public half. ratchet_decrypt applies it only before our
+            # first DH ratchet, on a trial state that rolls back on failure.
+            root_mix = (
+                _keypair_from_private(self._my_spend_priv).ecdh(fs_pub)
+                if fs_pub is not None
+                else None
             )
-            try:
-                fs_pub, header_bytes = _unpack_inner(inner_bytes)
-                header = Header.from_bytes(header_bytes)
-            except ValueError:
-                continue  # malformed inner payload — skip (forged or corrupt)
             async with self._lock:
-                # Bootstrap message from the initiator carries a forward-secrecy
-                # ephemeral (audit H3). Before we've turned our first DH ratchet,
-                # recover the matching secret from its public half so our root
-                # lines up with the initiator's. ratchet_decrypt folds it in on
-                # the trial state, so a forged bootstrap message rolls back clean.
-                root_mix = None
-                if self._ratchet.their_ratchet_pub is None and fs_pub is not None:
-                    root_mix = _keypair_from_private(self._my_spend_priv).ecdh(fs_pub)
-                plaintext = ratchet_decrypt(
-                    self._ratchet, header, ratchet_ct, root_mix=root_mix
-                )
-                self._emit("ratchet", f"receiving chain step · msg #{self._ratchet.recv_count}")
+                # 1:1: the peer is unambiguous, so an auth failure here is tamper —
+                # decrypt_ratchet lets InvalidTag propagate.
+                plaintext = self._channel.decrypt_ratchet(header, ratchet_ct, root_mix)
+                self._emit("ratchet", f"receiving chain step · msg #{self._channel.recv_count}")
             self._emit("erase", "message key erased")
             yield plaintext.decode()
         logger.debug("messages: firehose ended — relay connection closed")
+
+
+# ===========================================================================
+# Group messaging (Phase 8) — pairwise composition, ≤10 members
+# ===========================================================================
+
+@dataclass
+class GroupMessage:
+    """One decrypted group message, tagged with its (authenticated) sender."""
+
+    sender_name: str
+    sender_code: str
+    text: str
+
+
+# Callback for an applied membership change, so the UI/CLI can show it as a
+# system event ("→ alice added bob"). Mirrors the BurnHook pattern.
+MembershipHook = Callable[[MembershipChange], None]
+
+
+class GroupSession:
+    """
+    A group conversation as a composition of pairwise channels (Phase 8).
+
+    One firehose subscription; one :class:`PairwiseRatchet` per *other* member.
+    A group message is encrypted once per recipient and sent to that recipient's
+    own stealth address, so the relay sees N-1 unrelated envelopes — never a
+    "group message" (the group id is encrypted *inside* the payload, not the
+    envelope). Bandwidth is therefore O(n) per message (DESIGN.md §11); larger
+    groups want the deferred Phase 8b sender-keys.
+
+    Receiving fans in over the single firehose: each envelope addressed to us is
+    scanned + unsealed once (identity-level), then trial-decrypted against each
+    member's ratchet — the member whose ratchet authenticates the message *is*
+    the sender. Trial decryption is safe because :func:`ratchet_decrypt` rolls
+    back on failure (see :meth:`PairwiseRatchet.attempt_ratchet`).
+
+    Joining a group is out-of-band (the inviter shares the roster, like a contact
+    code); in-band :class:`MembershipChange` messages keep already-participating
+    members' local views convergent (eventual consistency, DESIGN.md §11).
+    """
+
+    def __init__(
+        self,
+        identity: Identity,
+        group: GroupState,
+        relay_url: str,
+        *,
+        ping_interval: float = 30.0,
+        on_event: EventHook | None = None,
+        on_membership: MembershipHook | None = None,
+        tor_client: TorClient | None = None,
+    ) -> None:
+        self._identity = identity
+        self._group = group
+        self._on_event = on_event
+        self._on_membership = on_membership
+        self._tor_client = tor_client
+        # Identity-level keys for scanning the firehose (same for every peer).
+        self._my_scan_priv = identity.scan_keypair.private_bytes()
+        self._my_spend_pub = identity.spend_keypair.public_bytes()
+        self._my_spend_priv = identity.spend_keypair.private_bytes()
+        self._my_code = identity.contact_code()
+        # One pairwise channel per other member, keyed by contact code.
+        self._channels: dict[str, PairwiseRatchet] = {
+            m.code: PairwiseRatchet(identity, m.code) for m in group.members
+        }
+        self._members: dict[str, ContactInfo] = {m.code: m for m in group.members}
+        self._lock = asyncio.Lock()
+        self._seen_addrs: set[bytes] = set()
+        socks_proxy = tor_client.socks_proxy if tor_client is not None else None
+        self._client = RelayClient(
+            relay_url, STEALTH_CHANNEL, ping_interval=ping_interval, socks_proxy=socks_proxy
+        )
+
+    # ------------------------------------------------------------------ lifecycle
+    async def connect(self) -> None:
+        await self._client.connect()
+        if self._tor_client is not None:
+            self._emit("tor", str(self._tor_client.num_hops))
+        self._emit("nodes", str(self._client.node_count))
+        if self._client.is_onion:
+            self._emit("onion", "1")
+
+    async def close(self) -> None:
+        await self._client.close()
+
+    async def __aenter__(self) -> GroupSession:
+        await self.connect()
+        return self
+
+    async def __aexit__(self, *_: object) -> None:
+        await self.close()
+
+    @property
+    def group(self) -> GroupState:
+        return self._group
+
+    @property
+    def members(self) -> list[ContactInfo]:
+        return list(self._members.values())
+
+    def _emit(self, kind: str, detail: str = "") -> None:
+        if self._on_event is not None:
+            self._on_event(kind, detail)
+
+    # ------------------------------------------------------------------ sending
+    async def _fanout(self, framed: bytes, codes: list[str] | None = None) -> int:
+        """Encrypt ``framed`` once per target member and send N envelopes.
+
+        Returns the number of envelopes sent. Each goes to a distinct stealth
+        one-time address with independent ciphertext — unlinkable on the wire.
+        """
+        targets = list(self._channels) if codes is None else codes
+        envelopes: list[Envelope] = []
+        async with self._lock:
+            for code in targets:
+                channel = self._channels.get(code)
+                if channel is None:
+                    continue
+                addr, blob = channel.encrypt(framed)
+                envelopes.append(
+                    Envelope(to=STEALTH_CHANNEL, ciphertext=blob, one_time_addr=addr)
+                )
+        for envelope in envelopes:
+            await self._client.send(envelope)
+        return len(envelopes)
+
+    async def send_to_group(self, text: str) -> None:
+        """Encrypt ``text`` once per member and send N-1 stealth envelopes."""
+        framed = groups.pack_group_payload(
+            self._group.group_id, groups.KIND_TEXT, text.encode()
+        )
+        sent = await self._fanout(framed)
+        self._emit("send", f"group · {sent} sealed envelopes")
+        self._emit("erase", "message key erased")
+
+    async def add_member(self, new_member: ContactInfo) -> MembershipChange:
+        """
+        Add ``new_member`` and announce it pairwise.
+
+        Existing members get one signed ADD(new). The newcomer gets a signed
+        ADD assertion for each existing member, so they can build pairwise
+        channels and learn the roster (eventual-consistency roster sync).
+        """
+        groups.add_member(self._group, new_member)  # validates + enforces ≤10
+        self._channels[new_member.code] = PairwiseRatchet(self._identity, new_member.code)
+        self._members[new_member.code] = new_member
+
+        change = groups.make_membership_change(
+            self._identity, self._group, groups.ACTION_ADD, new_member
+        )
+        framed = groups.pack_group_payload(
+            self._group.group_id, groups.KIND_MEMBERSHIP, change.to_bytes()
+        )
+        existing = [c for c in self._channels if c != new_member.code]
+        await self._fanout(framed, codes=existing)
+
+        # Bootstrap the newcomer's view: assert each existing member to them.
+        for code, info in list(self._members.items()):
+            if code == new_member.code:
+                continue
+            assertion = groups.make_membership_change(
+                self._identity, self._group, groups.ACTION_ADD, info
+            )
+            await self._fanout(
+                groups.pack_group_payload(
+                    self._group.group_id, groups.KIND_MEMBERSHIP, assertion.to_bytes()
+                ),
+                codes=[new_member.code],
+            )
+        self._emit("send", f"membership · added {new_member.name}")
+        return change
+
+    async def remove_member(self, code: str) -> MembershipChange:
+        """
+        Remove the member with contact ``code`` and announce it to the rest.
+
+        Forward secrecy after removal is the existing ratchet property, not a new
+        mechanism (DESIGN.md §11): the member is dropped from every recipient list
+        so they receive no further envelopes, and continued use advances each
+        remaining pair's ratchet beyond any state the removed member held.
+        """
+        target = self._members.get(code)
+        if target is None:
+            raise groups.GroupError("no such member in the group")
+        change = groups.make_membership_change(
+            self._identity, self._group, groups.ACTION_REMOVE, target
+        )
+        framed = groups.pack_group_payload(
+            self._group.group_id, groups.KIND_MEMBERSHIP, change.to_bytes()
+        )
+        remaining = [c for c in self._channels if c != code]
+        await self._fanout(framed, codes=remaining)
+        groups.remove_member(self._group, code)
+        self._channels.pop(code, None)
+        self._members.pop(code, None)
+        self._emit("send", f"membership · removed {target.name}")
+        return change
+
+    def _handle_membership(self, body: bytes, sender_code: str | None) -> None:
+        """Authenticate + apply a received membership change; fire the hook on a
+        real local change (idempotent re-assertions are silent)."""
+        try:
+            change = MembershipChange.from_bytes(body)
+        except groups.GroupError:
+            return
+        # Tamper-evidence (signature) + bind to the delivering pairwise channel.
+        if not groups.verify_membership_change(change):
+            return
+        if change.author_code != sender_code:
+            return  # author must match the ratchet that actually delivered it
+
+        target_code = change.target.code
+        changed = False
+        if change.action == groups.ACTION_ADD:
+            if target_code != self._my_code and target_code not in self._members:
+                try:
+                    groups.apply_membership_change(self._group, change)
+                except groups.GroupError:
+                    return
+                self._channels[target_code] = PairwiseRatchet(self._identity, target_code)
+                self._members[target_code] = change.target
+                changed = True
+        elif change.action == groups.ACTION_REMOVE:
+            if target_code in self._members or self._group.has_member(target_code):
+                groups.apply_membership_change(self._group, change)
+                self._channels.pop(target_code, None)
+                self._members.pop(target_code, None)
+                changed = True
+
+        if changed and self._on_membership is not None:
+            self._on_membership(change)
+
+    # ------------------------------------------------------------------ receiving
+    async def messages(self) -> AsyncGenerator[GroupMessage, None]:
+        """Yield decrypted group :class:`GroupMessage`s; apply membership changes
+        in-band (surfaced via the on_membership hook, not yielded)."""
+        async for item in self._client:
+            if isinstance(item, BurnFrame):
+                continue  # group burn is out of scope for Phase 8
+            parsed = _scan_and_unseal(item, self._my_scan_priv, self._my_spend_pub)
+            if parsed is None:
+                continue
+            assert item.one_time_addr is not None  # guaranteed by _scan_and_unseal
+            if item.one_time_addr in self._seen_addrs:
+                continue
+            self._seen_addrs.add(item.one_time_addr)
+            fs_pub, header, ratchet_ct = parsed
+            root_mix = (
+                _keypair_from_private(self._my_spend_priv).ecdh(fs_pub)
+                if fs_pub is not None
+                else None
+            )
+            # Fan-in: the member whose ratchet authenticates the message is the
+            # sender. Trial decryption is safe (each attempt rolls back on miss).
+            async with self._lock:
+                sender_code: str | None = None
+                plaintext: bytes | None = None
+                for code, channel in list(self._channels.items()):
+                    attempt = channel.attempt_ratchet(header, ratchet_ct, root_mix)
+                    if attempt is not None:
+                        sender_code, plaintext = code, attempt
+                        break
+            if plaintext is None:
+                continue  # not from any current member — drop
+            unpacked = groups.unpack_group_payload(plaintext)
+            if unpacked is None:
+                continue  # an ordinary 1:1 message on this ratchet — not ours
+            gid, kind, body = unpacked
+            if gid.raw != self._group.group_id.raw:
+                continue  # a different group we happen to share with this member
+            self._emit("recv", _addr_digest(item.one_time_addr))
+            if kind == groups.KIND_MEMBERSHIP:
+                self._handle_membership(body, sender_code)
+                continue
+            sender = self._members.get(sender_code) if sender_code else None
+            yield GroupMessage(
+                sender_name=sender.name if sender else (sender_code or "?"),
+                sender_code=sender_code or "",
+                text=body.decode(),
+            )

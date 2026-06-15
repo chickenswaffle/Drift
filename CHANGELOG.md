@@ -11,6 +11,39 @@ DRIFT uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.11.0] — 2026-06-15
+
+Phase 8 — **group messaging** by pairwise composition (≤10 members). A group is
+not a new cryptographic construction: every member keeps an independent pairwise
+Double Ratchet with every other member, a message is encrypted once per recipient
+and sent to that recipient's own stealth address, and the group id is encrypted
+inside the payload. The relay sees N-1 unlinkable envelopes, never a "group".
+Tradeoffs (O(n) bandwidth, eventual-consistency membership, forward-but-not-
+retroactive removal) are documented in DESIGN.md §11. Full suite: 370 passing.
+
+### Added
+- **`drift.crypto.groups`** — `GroupId` (random, member-independent), `GroupState`,
+  `ContactInfo`, capacity-checked `create_group`/`add_member`/`remove_member`,
+  Ed25519-signed `MembershipChange` (reusing the identity signing key, no new
+  primitive), and the group-payload frame that rides inside the ratchet.
+- **`GroupSession`** (transport) — one firehose subscription, one pairwise channel
+  per member, `send_to_group` (N-1 stealth envelopes), and fan-in receive by
+  trial-decryption across members' ratchets (safe: `ratchet_decrypt` rolls back on
+  miss). In-band `add_member`/`remove_member` announce signed membership changes.
+- **CLI** — `drift group create|add|remove|list`; `drift chat <name>` now routes to
+  a group when the name is a group.
+- **UI** — group chats prefix each message with its sender, render membership
+  changes as system lines, and show a `⬡ GROUP · N members` indicator.
+- Group state is sealed into the duress vault like contacts (audit H4): a locked
+  device holds no plaintext group membership.
+
+### Changed
+- Extracted the per-peer crypto (ratchet + sealed-sender bootstrap) into a shared
+  `PairwiseRatchet`, composed by both `Session` (one peer) and `GroupSession`
+  (one per member), so the audited bootstrap logic lives in one place.
+
+---
+
 ## [0.10.0] — 2026-06-12
 
 Security hardening: the four high-severity findings from the June 2026 audit

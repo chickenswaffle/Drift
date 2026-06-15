@@ -835,3 +835,54 @@ async def test_sealed_pill_renders_bright() -> None:
         sealed = next(p for p in pills if p.label == "✉ SEALED")
         assert sealed._active is True
         assert "SEALED" in _render(sealed.render())
+
+
+# ---------------------------------------------------------------------------
+# Phase 8 — group conversation UI
+# ---------------------------------------------------------------------------
+
+from drift.crypto.groups import ContactInfo, GroupId, GroupState  # noqa: E402
+from drift.ui.app import GroupMembershipEvent, IncomingGroupMessage  # noqa: E402
+
+
+def _group_app() -> DriftApp:
+    me = Identity.generate()
+    members = [
+        ContactInfo("alice", Identity.generate().contact_code()),
+        ContactInfo("bob", Identity.generate().contact_code()),
+    ]
+    group = GroupState(group_id=GroupId.generate(), name="ops", members=members)
+    return DriftApp(me, {}, "ws://127.0.0.1:1", group=group)
+
+
+@pytest.mark.asyncio
+async def test_group_chat_shows_group_indicator() -> None:
+    async with _group_app().run_test() as pilot:
+        await pilot.pause()
+        pane = pilot.app.query_one("#pane", MessagePane)
+        assert "ops" in (pane.border_title or "")
+        # The ⬡ GROUP (N members) indicator replaces the single-recipient view.
+        assert "⬡ GROUP" in (pane.border_subtitle or "")
+        assert "3 members" in (pane.border_subtitle or "")
+
+
+@pytest.mark.asyncio
+async def test_group_message_renders_with_sender_prefix() -> None:
+    async with _group_app().run_test() as pilot:
+        app = pilot.app
+        pane = app.query_one("#pane", MessagePane)
+        before = len(pane.children)
+        app.post_message(IncomingGroupMessage("alice", "hello team"))
+        await pilot.pause()
+        assert len(pane.children) > before  # a sender-prefixed line was added
+
+
+@pytest.mark.asyncio
+async def test_group_membership_event_renders_system_line() -> None:
+    async with _group_app().run_test() as pilot:
+        app = pilot.app
+        pane = app.query_one("#pane", MessagePane)
+        before = len(pane.children)
+        app.post_message(GroupMembershipEvent("add", "carol"))
+        await pilot.pause()
+        assert len(pane.children) > before  # "→ carol added the group" system line

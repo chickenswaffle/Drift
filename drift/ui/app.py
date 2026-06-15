@@ -78,6 +78,7 @@ if TYPE_CHECKING:
     from textual.await_remove import AwaitRemove
 
     from drift.crypto import Identity
+    from drift.crypto.groups import GroupState
     from drift.storage import Contacts
 
 __all__ = ["DriftApp"]
@@ -438,6 +439,22 @@ class IncomingMessage(Message):
         super().__init__()
         self.contact = contact
         self.text = text
+
+
+class IncomingGroupMessage(Message):
+    """Worker → UI: a decrypted group message arrived, tagged with its sender."""
+    def __init__(self, sender: str, text: str) -> None:
+        super().__init__()
+        self.sender = sender
+        self.text = text
+
+
+class GroupMembershipEvent(Message):
+    """Worker → UI: an in-band membership change was applied to the group."""
+    def __init__(self, action: str, target: str) -> None:
+        super().__init__()
+        self.action = action
+        self.target = target
 
 
 class CryptoEvent(Message):
@@ -1620,6 +1637,7 @@ class DriftApp(App[None]):
         relay_url: str,
         *,
         active: str | None = None,
+        group: GroupState | None = None,
         use_tor: bool = False,
         tor_required: bool = False,
     ) -> None:
@@ -1627,6 +1645,10 @@ class DriftApp(App[None]):
         self._identity = identity
         self._contacts: Contacts = contacts
         self._relay_url = relay_url
+        # Phase 8: when set, this is a group conversation — the worker drives a
+        # GroupSession instead of a 1:1 Session (everything else is shared).
+        self._group = group
+        self._group_session: Any = None
         # The relay URL may be a comma-separated federation list (Phase 4). The
         # full string is handed to the transport (which fails over across it);
         # the header/health-check only need the primary (first) relay.
@@ -1704,7 +1726,9 @@ class DriftApp(App[None]):
         # (unless --tor-only). aborted == True means we must not connect at all.
         if self._use_tor and await self._bootstrap_tor():
             return
-        if self._active is not None:
+        if self._group is not None:
+            await self._open_group()
+        elif self._active is not None:
             await self._open_conversation(self._active)
         else:
             self._pane.write_system("select a contact (press C) or add one (press A)")
@@ -1864,6 +1888,74 @@ class DriftApp(App[None]):
             except OSError:
                 pass
 
+    # ── Group conversation (Phase 8) ───────────────────────────────────────
+
+    async def _open_group(self) -> None:
+        """Open the group conversation and start its GroupSession worker."""
+        assert self._group is not None
+        self._connected = False
+        self._header.contact_name = self._group.name
+        self._header.connected = False
+        self._set_secure(False)
+        self._sent_count = self._recv_count = self._stealth_count = 0
+        self._stealth_recent = []
+        self._session_start = time.monotonic()
+        self.query_one(UptimePill).start(self._session_start)
+        await self._pane.clear()
+        self._update_group_title()
+        self._pane.write_separator(
+            f"group · {self._group.name} · {self._group.size} members · {_now()}"
+        )
+        self._run_group_session()
+
+    def _update_group_title(self) -> None:
+        """Group equivalent of _update_chat_title: name + ⬡ GROUP (N members)."""
+        if self._group is None:
+            return
+        pane = self._pane
+        pane.border_title = f" {self._group.name} "
+        state = "secure" if self._connected else "offline"
+        pane.border_subtitle = f"⬡ GROUP · {self._group.size} members · {state}"
+
+    @work(exclusive=True, group="session")
+    async def _run_group_session(self) -> None:
+        from cryptography.exceptions import InvalidTag
+
+        from drift.transport.session import GroupSession
+
+        assert self._group is not None
+        name = self._group.name
+
+        def _membership_cb(change: Any) -> None:
+            self.post_message(GroupMembershipEvent(change.action, change.target.name))
+
+        gs = GroupSession(
+            self._identity,
+            self._group,
+            self._relay_url,
+            on_event=self._emit_crypto,
+            on_membership=_membership_cb,
+            tor_client=self._tor_client,
+        )
+        self._group_session = gs
+        try:
+            await gs.connect()
+            self.post_message(SessionUp(name))
+            async for gm in gs.messages():
+                self.post_message(IncomingGroupMessage(gm.sender_name, gm.text))
+            self.post_message(SessionDown(name, "relay closed the connection"))
+        except InvalidTag:
+            self.post_message(
+                SessionDown(name, "authentication failure — tampered message rejected")
+            )
+        except Exception as exc:  # noqa: BLE001 — surface any relay error to the user
+            self.post_message(SessionDown(name, str(exc)))
+        finally:
+            try:
+                await gs.close()
+            except OSError:
+                pass
+
     async def _open_conversation(self, name: str) -> None:
         """Switch the active contact and (re)start its session."""
         self._active = name
@@ -1905,24 +1997,45 @@ class DriftApp(App[None]):
 
     @on(SessionUp)
     def _on_session_up(self, event: SessionUp) -> None:
-        if event.contact != self._active:
+        if event.contact != self._conversation_name():
             return
         self._connected = True
         self._header.connected = True
         # E2E + ratchet active → secured. With a live Tor circuit it's maximum (🔒⁺).
         self._set_secure(True, maximum=self._tor_active)
-        self._update_chat_title()
+        self._refresh_conversation_title()
         self._pane.write_system(f"⣿ secured channel to {self._relay_url}")
 
     @on(SessionDown)
     def _on_session_down(self, event: SessionDown) -> None:
-        if event.contact != self._active:
+        if event.contact != self._conversation_name():
             return
         self._connected = False
         self._header.connected = False
         self._set_secure(False)
-        self._update_chat_title()
+        self._refresh_conversation_title()
         self._pane.write_warning(event.reason)
+
+    def _conversation_name(self) -> str | None:
+        """The active conversation's key — group name in group mode, else contact."""
+        return self._group.name if self._group is not None else self._active
+
+    def _refresh_conversation_title(self) -> None:
+        if self._group is not None:
+            self._update_group_title()
+        else:
+            self._update_chat_title()
+
+    @on(IncomingGroupMessage)
+    def _on_incoming_group(self, event: IncomingGroupMessage) -> None:
+        # Group messages carry the sender's name as a prefix (multiple posters).
+        self._pane.write_incoming(event.sender, event.text, _now())
+
+    @on(GroupMembershipEvent)
+    def _on_group_membership(self, event: GroupMembershipEvent) -> None:
+        verb = "added" if event.action == "add" else "removed"
+        self._pane.write_system(f"→ {event.target} {verb} the group")
+        self._update_group_title()  # member count changed
 
     @on(IncomingMessage)
     def _on_incoming(self, event: IncomingMessage) -> None:
@@ -2099,7 +2212,7 @@ class DriftApp(App[None]):
             if text.startswith("/"):
                 await self._handle_slash(text)
             return
-        if self._active is None:
+        if self._active is None and self._group is None:
             event.input.clear()
             self.query_one("#input", InputBar).reset_counter()
             self._pane.write_system("select a contact first (press C)")
@@ -2123,8 +2236,17 @@ class DriftApp(App[None]):
             await asyncio.sleep(0.05)
 
     async def _send(self, text: str) -> None:
-        assert self._session is not None and self._active is not None
         line = self._pane.write_outgoing(text, _now(), status="sending")
+        # Group mode: fan out to every member via the GroupSession.
+        if self._group_session is not None:
+            try:
+                await self._group_session.send_to_group(text)
+            except Exception:
+                line.status = "failed"
+                raise
+            line.status = "sent"
+            return
+        assert self._session is not None and self._active is not None
         record = MessageRecord("out", "you", text, line._ts)
         self._history.setdefault(self._active, []).append(record)
         try:
