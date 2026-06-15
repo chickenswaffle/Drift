@@ -1,9 +1,10 @@
 """
 DRIFT — terminal-first E2E encrypted messenger with rotating stealth addresses.
 
-Status: pre-alpha. Phases 0–2 complete (transport, stealth addresses, Double
-Ratchet); Phase 3 (Tor + sealed sender) is next.
+Status: pre-alpha. Phases 0–8 complete (transport, stealth addresses, Double
+Ratchet, Tor + sealed sender, panic/decoy + FMD privacy dial, beacons, group
+messaging).
 """
 
-__version__ = "0.11.1"
+__version__ = "0.11.0"
 __author__ = "DRIFT contributors"

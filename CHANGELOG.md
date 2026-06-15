@@ -11,71 +11,60 @@ DRIFT uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-## [0.11.1] — 2026-06-15
-
-Wire up the **FMD (Fuzzy Message Detection) privacy dial** end to end (closes
-audit finding M4: `drift privacy --fmd-rate` previously set a value that touched
-nothing on the wire). FMD stays **off by default** — with it off the wire format,
-contact code, and full client-side scan are byte-for-byte unchanged. Full suite:
-384 passing.
-
-### Added
-- **Detection key in the contact code.** With FMD on, the contact code carries an
-  optional 3rd segment `drift:<scan>.<spend>.<fmd>` holding the FMD detection
-  public sub-keys, **derived deterministically from the spend key** (`derive_fmd_key`
-  / `Identity.fmd_keypair`) — no new stored secret, nothing extra to vault-seal.
-  `Identity.parse_fmd_pubs` reads it; `parse_contact_code` now accepts the optional
-  segment (2-segment codes still valid).
-- **Sender flags.** `PairwiseRatchet.encrypt` attaches an `fmd_flag` bound to the
-  message's one-time stealth address whenever the recipient published an FMD key
-  (Session + GroupSession carry it on the envelope). No key → no flag, no overhead.
-- **Relay pre-filtering (opt-in).** A subscriber may hand the relay its detection
-  sub-keys; the relay runs FMD `Test` per envelope and forwards only matches +
-  the scheme's `2^-k` false positives. Unflagged traffic always passes (fail-open)
-  and non-FMD subscribers still receive the whole firehose (unchanged).
-- **CLI.** `drift privacy --fmd-rate` now actually persists the rate and drives
-  everything; `drift whoami` exports the FMD-augmented code when FMD is on; `drift
-  chat` subscribes to the relay in FMD mode.
-
-### Changed
-- DESIGN.md §5 gains a current-state FMD subsection: states plainly that turning
-  FMD on lets the relay learn a *probabilistic, p-sized* guess at which envelopes
-  might be yours — and that it cannot distinguish a true match from a false
-  positive without your detection key. That probabilistic signal is the cost of
-  the efficiency gain.
-
----
-
 ## [0.11.0] — 2026-06-15
 
-Phase 8 — **group messaging** by pairwise composition (≤10 members). A group is
-not a new cryptographic construction: every member keeps an independent pairwise
-Double Ratchet with every other member, a message is encrypted once per recipient
-and sent to that recipient's own stealth address, and the group id is encrypted
-inside the payload. The relay sees N-1 unlinkable envelopes, never a "group".
-Tradeoffs (O(n) bandwidth, eventual-consistency membership, forward-but-not-
-retroactive removal) are documented in DESIGN.md §11. Full suite: 370 passing.
+A combined release with one headline feature and two riders. **Phase 8 — group
+messaging** lands; the **FMD privacy dial** is wired end to end (closes audit
+M4); and a **TUI polish** pass lifts the terminal UI. Full suite: **384 passing**
+(ruff + mypy clean).
 
-### Added
+### Added — Phase 8: group messaging (pairwise composition, ≤10 members)
+A group is not a new cryptographic construction: every member keeps an
+independent pairwise Double Ratchet with every other member, a message is
+encrypted once per recipient and sent to that recipient's own stealth address,
+and the group id is encrypted *inside* the payload — so the relay sees N-1
+unlinkable envelopes, never a "group". Tradeoffs (O(n) bandwidth → Phase 8b
+sender-keys, eventual-consistency membership, forward-but-not-retroactive
+removal) are documented in DESIGN.md §11.
 - **`drift.crypto.groups`** — `GroupId` (random, member-independent), `GroupState`,
   `ContactInfo`, capacity-checked `create_group`/`add_member`/`remove_member`,
-  Ed25519-signed `MembershipChange` (reusing the identity signing key, no new
+  Ed25519-signed `MembershipChange` (reuses the identity signing key, no new
   primitive), and the group-payload frame that rides inside the ratchet.
-- **`GroupSession`** (transport) — one firehose subscription, one pairwise channel
-  per member, `send_to_group` (N-1 stealth envelopes), and fan-in receive by
-  trial-decryption across members' ratchets (safe: `ratchet_decrypt` rolls back on
-  miss). In-band `add_member`/`remove_member` announce signed membership changes.
-- **CLI** — `drift group create|add|remove|list`; `drift chat <name>` now routes to
-  a group when the name is a group.
-- **UI** — group chats prefix each message with its sender, render membership
-  changes as system lines, and show a `⬡ GROUP · N members` indicator.
-- Group state is sealed into the duress vault like contacts (audit H4): a locked
+- **`GroupSession`** — one firehose subscription, one pairwise channel per member,
+  `send_to_group` (N-1 stealth envelopes), and fan-in receive by trial-decryption
+  across members' ratchets (safe: `ratchet_decrypt` rolls back on miss). In-band
+  `add_member`/`remove_member` announce signed membership changes.
+- **CLI** `drift group create|add|remove|list`; `drift chat <name>` routes to a
+  group when the name is one. **UI** prefixes each group message with its sender,
+  shows membership changes as system lines, and a `⬡ GROUP · N members` indicator.
+- Group state is sealed into the duress vault like contacts (audit H4) — a locked
   device holds no plaintext group membership.
 
+### Added — FMD (Fuzzy Message Detection) privacy dial, wired end to end (closes audit M4)
+`drift privacy --fmd-rate` previously set a value that touched nothing on the
+wire. FMD is now real, **off by default** (wire format + contact code byte-for-byte
+unchanged when off).
+- Detection key rides as an optional 3rd contact-code segment
+  `drift:<scan>.<spend>.<fmd>`, **derived deterministically from the spend key**
+  (`derive_fmd_key` / `Identity.fmd_keypair`) — no new stored secret to vault-seal.
+- Senders attach an `fmd_flag` bound to the one-time stealth address only for FMD
+  recipients; the relay can opt into pre-filtering (forwards matches + the scheme's
+  `2^-k` false positives; unflagged traffic fails open; classic subscribers get the
+  whole firehose). DESIGN.md §5 states the cost plainly: the relay learns a
+  *probabilistic, p-sized* guess it cannot resolve to true matches without the key.
+
+### Added — TUI polish
+- Fuzzy command palette (`Ctrl+P`), live relay-latency sparkline, numeric `1–9`
+  contact jump, rounded titled panels with live status subtitles, an animated Tor
+  bootstrap spinner, and contact accent bars.
+
 ### Changed
-- Extracted the per-peer crypto (ratchet + sealed-sender bootstrap) into a shared
-  `PairwiseRatchet`, composed by both `Session` (one peer) and `GroupSession`
-  (one per member), so the audited bootstrap logic lives in one place.
+- Extracted the per-peer crypto (Double Ratchet + sealed-sender bootstrap) into a
+  shared **`PairwiseRatchet`**, composed by both `Session` (one peer) and
+  `GroupSession` (one per member), so the audited bootstrap logic lives in one
+  place.
+- `parse_contact_code` accepts the optional FMD segment (2-segment codes still
+  valid); DESIGN.md gains the Phase 8 (§11) and current-state FMD (§5) sections.
 
 ---
 
