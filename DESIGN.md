@@ -67,7 +67,7 @@ Only Alice can run this match, because only she has `scan_priv`. The relay is a 
 
 **The tradeoff (be honest about it):** scanning means Alice does a little work per message in the system. At small scale, just scan recent messages — it's nothing. As it grows, three escalating fixes:
 - **Time/shard bucketing** — only scan the windows or shards you could plausibly have mail in.
-- **Fuzzy Message Detection (FMD)** — a real cryptographic scheme that lets the server pre-filter a *subset* of messages for you with a tunable false-positive rate. It's literally an anonymity dial: more noise = more privacy = more scanning.
+- **Fuzzy Message Detection (FMD)** — a real cryptographic scheme that lets the relay pre-filter a *subset* of messages for you at a tunable false-positive rate. It's literally an anonymity dial: more noise = more privacy = more relay-side work. **This is now wired end to end (audit M4) — see the FMD subsection below for what's actually implemented and what it costs.**
 - **Private Information Retrieval (PIR)** — heavyweight, but lets you fetch your mailbox without the server learning which mailbox. Save this for "phase 99."
 
 ---
@@ -160,6 +160,47 @@ A burn lets either party erase messages after the fact — both clients delete t
 - A conversation burn no longer instantly clears the relay's buffer; those opaque, already-encrypted blobs linger for up to `RECENT_TTL` before expiring. The *durable* erasure — your peer's stored copy — still happens immediately via the verified tombstone.
 - Because a one-time address is public on the firehose (it's the routing key), anyone who *observed* a message can name its address and evict that one blob from the replay buffer. This is bounded: it only affects the ≤30 s late-join window, never a message already delivered to a connected peer, and it is per-message rather than a one-shot channel wipe. Eliminating even this residue needs authenticated, per-recipient storage (Phase 4).
 - Burn remains **best-effort against a non-compliant client**: a peer that chooses to ignore the tombstone keeps its copy. Burn defends against honest clients and an honest-but-curious relay, not against an endpoint that has already decided to retain your message.
+
+### Fuzzy Message Detection (FMD) — the privacy dial, wired (audit M4)
+
+FMD is **off by default** and, when off, changes nothing on the wire — the same
+two-segment contact code, the same envelopes, the same full client-side scan.
+Turning it on trades a sliver of metadata privacy for scanning efficiency, and
+the dial is the false-positive rate `p` (`drift privacy --fmd-rate`).
+
+**What's actually implemented now** (previously `--fmd-rate` set a value that
+touched nothing — that was the audit-M4 gap):
+
+- **Detection key in the contact code.** With FMD on, your contact code gains an
+  optional 3rd segment `drift:<scan>.<spend>.<fmd>` carrying your FMD detection
+  *public* key (the `n = round(-log2 p)` sub-keys). The key is **derived
+  deterministically from your spend key** (like the Ed25519 beacon key), so
+  there's no extra secret to store or seal — only the rate is persisted. A
+  classic 2-segment code is still valid and means "FMD off, scan everything."
+- **Senders flag.** When the recipient's stored code carries an FMD key, the
+  sender computes an FMD flag bound to that message's one-time stealth address
+  and includes it in the envelope. No FMD key on the recipient → no flag, no
+  overhead.
+- **Relay pre-filters, opt-in.** A client may hand the relay its detection
+  sub-keys on subscribe; the relay then runs FMD `Test` against each envelope's
+  flag and forwards only matches — plus the scheme's built-in `2^-k` false
+  positives. Clients that don't opt in keep receiving the whole firehose and
+  scanning locally (unchanged). Unflagged envelopes always pass the filter
+  (fail-open): FMD is an efficiency filter on flagged traffic, never a gate that
+  could drop a real message.
+
+**Be explicit about the cost.** With FMD on, the relay learns something it did
+not before: a *probabilistic, `p`-sized* guess at which envelopes might be
+yours. That is the whole point of the dial and the price of the efficiency gain
+— lower `p` = the relay's guess is sharper (it learns more); higher `p` = more
+noise, a larger anonymity set, but more traffic forwarded to you and more
+relay-side work for everyone. Crucially, the signal is **only probabilistic**:
+holding your coarse relay key, the relay sees an *identical* "match" for a
+genuine message and for a false positive and **cannot tell them apart** — only
+you, scanning with your full key (and ultimately the stealth scan + ratchet
+decrypt), distinguish your real mail from relay-visible noise. FMD never reveals
+message content, never authenticates anything, and sits strictly *alongside* the
+stealth addressing it accelerates.
 
 ---
 

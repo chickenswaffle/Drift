@@ -58,6 +58,7 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
 from drift.crypto import Identity, Keypair, derive_message_key, groups
 from drift.crypto.burn import generate_burn_token, verify_burn_token
+from drift.crypto.fmd import FMDKeypair, fmd_flag
 from drift.crypto.groups import ContactInfo, GroupState, MembershipChange
 from drift.crypto.ratchet import (
     FS_BOOTSTRAP_INFO,
@@ -163,6 +164,10 @@ class PairwiseRatchet:
         self._their_scan_pub, self._their_spend_pub = Identity.parse_contact_code(
             contact_code
         )
+        # Recipient's FMD detection public sub-keys, if they published any (the
+        # optional 3rd contact-code segment). None → we never attach a flag, so
+        # FMD-off behaviour is byte-for-byte unchanged (audit M4).
+        self._fmd_pub = Identity.parse_fmd_pubs(contact_code)
         static_ecdh = identity.spend_keypair.ecdh(self._their_spend_pub)
         # Both peers reconstruct identical bootstrap material from the static
         # keys, so whoever speaks first can promote itself to initiator on demand.
@@ -210,10 +215,12 @@ class PairwiseRatchet:
         self._ratchet = init_sender(fs_root, self._responder_keypair.public_bytes())
         # fs_ephemeral (private) and fs_secret fall out of scope and are never kept.
 
-    def encrypt(self, plaintext: bytes) -> tuple[bytes, bytes]:
+    def encrypt(self, plaintext: bytes) -> tuple[bytes, bytes, bytes | None]:
         """Ratchet-encrypt + seal + stealth-address ``plaintext`` for this peer.
 
-        Returns ``(one_time_addr, sealed_blob)`` ready to drop into an Envelope.
+        Returns ``(one_time_addr, sealed_blob, fmd_flag)`` ready to drop into an
+        Envelope. ``fmd_flag`` is a detection flag bound to ``one_time_addr`` when
+        the recipient published an FMD key, else ``None`` (no overhead).
         """
         if self._ratchet.sending_chain_key is None:
             self._promote_to_initiator()
@@ -234,7 +241,11 @@ class PairwiseRatchet:
             stealth_key, ephemeral.public_bytes(), inner, ciphertext, address=one_time_addr
         )
         self._last_sent_addr = one_time_addr
-        return one_time_addr, sealed_blob
+        # FMD (audit M4): bind the detection flag to the (public) one-time address
+        # so the relay can test it with the same message. Only when the recipient
+        # advertised a detection key.
+        flag = fmd_flag(one_time_addr, self._fmd_pub) if self._fmd_pub else None
+        return one_time_addr, sealed_blob, flag
 
     def decrypt_ratchet(
         self, header: Header, ratchet_ct: bytes, root_mix: bytes | None
@@ -326,6 +337,7 @@ class Session:
         on_event: EventHook | None = None,
         on_burn: BurnHook | None = None,
         tor_client: TorClient | None = None,
+        fmd_key: FMDKeypair | None = None,
     ) -> None:
         # Optional sink for observable (non-secret) transport events; the UI
         # passes a callback that re-emits them as typed messages. Never carries
@@ -368,11 +380,15 @@ class Session:
         # When Tor is active, hand the transport the SOCKS5 endpoint so every
         # byte is proxied through the circuit.
         socks_proxy = tor_client.socks_proxy if tor_client is not None else None
+        # FMD opt-in (audit M4): hand the relay our detection sub-keys so it
+        # pre-filters the firehose to us. None → scan everything (unchanged).
+        fmd_secret_keys = fmd_key.secret_keys if fmd_key and fmd_key.secret_keys else None
         self._client = RelayClient(
             relay_url,
             STEALTH_CHANNEL,
             ping_interval=ping_interval,
             socks_proxy=socks_proxy,
+            fmd_secret_keys=fmd_secret_keys,
         )
 
     def _emit(self, kind: str, detail: str = "") -> None:
@@ -440,7 +456,7 @@ class Session:
         async with self._lock:
             # The channel promotes to initiator on first send, ratchet-encrypts,
             # seals and stealth-addresses — all the per-peer crypto in one place.
-            one_time_addr, sealed_blob = self._channel.encrypt(plaintext.encode())
+            one_time_addr, sealed_blob, fmd = self._channel.encrypt(plaintext.encode())
             self._emit("ratchet", f"sending chain step · msg #{self._channel.send_count}")
         self._emit("send", _addr_digest(one_time_addr))
         await self._client.send(
@@ -448,6 +464,7 @@ class Session:
                 to=STEALTH_CHANNEL,
                 ciphertext=sealed_blob,
                 one_time_addr=one_time_addr,
+                fmd_flag=fmd,
             )
         )
         self._emit("sealed", "sender identity sealed")
@@ -575,6 +592,7 @@ class GroupSession:
         on_event: EventHook | None = None,
         on_membership: MembershipHook | None = None,
         tor_client: TorClient | None = None,
+        fmd_key: FMDKeypair | None = None,
     ) -> None:
         self._identity = identity
         self._group = group
@@ -594,8 +612,10 @@ class GroupSession:
         self._lock = asyncio.Lock()
         self._seen_addrs: set[bytes] = set()
         socks_proxy = tor_client.socks_proxy if tor_client is not None else None
+        fmd_secret_keys = fmd_key.secret_keys if fmd_key and fmd_key.secret_keys else None
         self._client = RelayClient(
-            relay_url, STEALTH_CHANNEL, ping_interval=ping_interval, socks_proxy=socks_proxy
+            relay_url, STEALTH_CHANNEL, ping_interval=ping_interval,
+            socks_proxy=socks_proxy, fmd_secret_keys=fmd_secret_keys,
         )
 
     # ------------------------------------------------------------------ lifecycle
@@ -643,9 +663,12 @@ class GroupSession:
                 channel = self._channels.get(code)
                 if channel is None:
                     continue
-                addr, blob = channel.encrypt(framed)
+                addr, blob, fmd = channel.encrypt(framed)
                 envelopes.append(
-                    Envelope(to=STEALTH_CHANNEL, ciphertext=blob, one_time_addr=addr)
+                    Envelope(
+                        to=STEALTH_CHANNEL, ciphertext=blob,
+                        one_time_addr=addr, fmd_flag=fmd,
+                    )
                 )
         for envelope in envelopes:
             await self._client.send(envelope)

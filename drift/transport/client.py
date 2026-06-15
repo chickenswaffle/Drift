@@ -82,6 +82,10 @@ class Envelope:
     ciphertext: bytes  # opaque sealed blob — R || sealed_header || content (Phase 3b)
     timestamp: int = field(default_factory=lambda: int(time.time()))
     one_time_addr: bytes | None = None    # A_once — recipient one-time stealth address
+    # Optional FMD detection flag (audit M4). Present only when the recipient has
+    # published an FMD detection key; bound to ``one_time_addr``. Lets an
+    # FMD-subscribed relay pre-filter the firehose. Absent → unchanged behaviour.
+    fmd_flag: bytes | None = None
 
 
 class RelayClient:
@@ -114,6 +118,7 @@ class RelayClient:
         *,
         ping_interval: float = 30.0,
         socks_proxy: tuple[str, int] | None = None,
+        fmd_secret_keys: list[bytes] | None = None,
     ) -> None:
         # A relay list (Phase 4). A single URL is just a one-element list, so the
         # non-federated path is unchanged. Trailing slashes are trimmed so the
@@ -129,6 +134,10 @@ class RelayClient:
         # Optional SOCKS5 proxy (host, port) — when set, every WS/HTTP byte is
         # routed through it (Phase 3: a Tor circuit). None → direct connect.
         self._socks_proxy = socks_proxy
+        # Optional FMD detection secret sub-keys (audit M4). When set, we ask the
+        # relay to pre-filter the firehose to flags that match this key (+ its
+        # 2^-k false positives). None → we scan everything ourselves (unchanged).
+        self._fmd_secret_keys = fmd_secret_keys
 
         self._ws: Any = None
         self._http: httpx.AsyncClient | None = None
@@ -228,6 +237,11 @@ class RelayClient:
         self._ws = ws
         self._active_idx = idx
         self._connected = True
+        # FMD opt-in (audit M4): hand the relay our detection sub-keys so it
+        # pre-filters the firehose. Re-sent on every (re)connect/failover.
+        if self._fmd_secret_keys:
+            key_b64 = base64.b64encode(b"".join(self._fmd_secret_keys)).decode()
+            await ws.send(json.dumps({"type": "fmd", "key": key_b64}))
         self._listener = asyncio.create_task(self._listen(), name="relay-listener")
         self._pinger = asyncio.create_task(self._keepalive(), name="relay-pinger")
 
@@ -324,6 +338,10 @@ class RelayClient:
         # and ratchet header are sealed inside ``ct`` by the session layer.
         if envelope.one_time_addr is not None:
             payload["addr"] = base64.b64encode(envelope.one_time_addr).decode()
+        # FMD detection flag (audit M4): only present when the recipient has an
+        # FMD key; lets an FMD-subscribed relay pre-filter. Absent → no overhead.
+        if envelope.fmd_flag is not None:
+            payload["fmd"] = base64.b64encode(envelope.fmd_flag).decode()
         try:
             resp = await self._http.post(f"{self._http_base}/send", json=payload)
             resp.raise_for_status()
@@ -426,6 +444,7 @@ class RelayClient:
                     # Sealed sender: the one-time address is the only clear
                     # metadata; everything else is inside the opaque ciphertext.
                     one_time_addr = base64.b64decode(msg["addr"]) if "addr" in msg else None
+                    fmd_flag = base64.b64decode(msg["fmd"]) if "fmd" in msg else None
                 except ValueError:
                     continue
                 await self._queue.put(
@@ -434,6 +453,7 @@ class RelayClient:
                         ciphertext=ciphertext,
                         timestamp=int(msg.get("ts", 0)),
                         one_time_addr=one_time_addr,
+                        fmd_flag=fmd_flag,
                     )
                 )
         except (ConnectionClosed, asyncio.CancelledError):

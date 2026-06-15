@@ -21,6 +21,7 @@ Run locally:
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
@@ -35,6 +36,7 @@ from uuid import uuid4
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 
+from drift.crypto.fmd import FMDKeypair, fmd_test
 from relay.federation import ANNOUNCE_TTL, DEFAULT_DEDUP_SIZE, Federation
 
 logger = logging.getLogger("drift.relay")
@@ -66,6 +68,54 @@ app = FastAPI(
 
 # channel → set of live WebSocket connections subscribed to that channel
 _subscribers: dict[str, set[WebSocket]] = defaultdict(set)
+
+# Per-connection FMD detection key (audit M4). A subscriber that opts into FMD
+# pre-filtering sends its (downgraded) detection sub-keys; we then forward only
+# envelopes whose flag matches — plus the scheme's 2^-k false positives. A
+# subscriber NOT in this map is in classic mode: it receives the whole firehose
+# and scans locally (unchanged behaviour). The relay never sees message content;
+# FMD only lets it learn a probabilistic, p-sized guess at which envelopes might
+# be for this subscriber — that probabilistic signal is the documented cost of
+# the efficiency gain (see DESIGN.md "Fuzzy Message Detection").
+_fmd_filters: dict[WebSocket, FMDKeypair] = {}
+
+
+def _set_fmd_filter(ws: WebSocket, key_b64: str | None) -> int:
+    """Register (or clear) a subscriber's FMD detection key. Returns sub-key count."""
+    if not key_b64:
+        _fmd_filters.pop(ws, None)
+        return 0
+    try:
+        raw = base64.b64decode(key_b64)
+    except (ValueError, TypeError):
+        return 0
+    if not raw or len(raw) % 32 != 0:
+        return 0
+    subkeys = [raw[i:i + 32] for i in range(0, len(raw), 32)]
+    _fmd_filters[ws] = FMDKeypair(secret_keys=subkeys, public_keys=[])
+    return len(subkeys)
+
+
+def _passes_fmd(ws: WebSocket, envelope: dict[str, Any]) -> bool:
+    """Whether ``envelope`` should be forwarded to subscriber ``ws``.
+
+    Classic subscribers (no FMD key) always pass. For an FMD subscriber, a
+    flagged envelope is forwarded only if it tests positive against their key;
+    an **unflagged** envelope always passes (fail-open) — the sender may simply
+    not have the recipient's FMD key, and FMD must never cause a real message to
+    be dropped. It is an efficiency filter on flagged traffic, not a gate.
+    """
+    key = _fmd_filters.get(ws)
+    if key is None:
+        return True
+    flag_b64 = envelope.get("fmd")
+    addr_b64 = envelope.get("addr")
+    if not flag_b64 or not addr_b64:
+        return True  # nothing to test → fail open (never drop a possible message)
+    try:
+        return fmd_test(base64.b64decode(flag_b64), key, base64.b64decode(addr_b64))
+    except Exception:  # noqa: BLE001 — a malformed flag must not drop a real message
+        return True
 
 # channel → recent envelopes, replayed to every NEW subscriber.
 #
@@ -137,6 +187,10 @@ async def _deliver_local(envelope: dict[str, Any]) -> int:
     subscribers = _subscribers.get(to_addr, set())
     delivered = 0
     for ws in list(subscribers):
+        # FMD pre-filter (audit M4): an FMD subscriber only gets flag-matching
+        # envelopes (+ false positives); classic subscribers get everything.
+        if not _passes_fmd(ws, envelope):
+            continue
         try:
             await ws.send_text(json.dumps(envelope))
             delivered += 1
@@ -252,9 +306,16 @@ async def websocket_endpoint(websocket: WebSocket, listen_addr: str) -> None:
 
             if msg.get("type") == "ping":
                 await websocket.send_text(json.dumps({"type": "pong"}))
+            elif msg.get("type") == "fmd":
+                # Opt into FMD pre-filtering (audit M4). The ack lets the client
+                # (or a test) know filtering is active before it relies on it.
+                n = _set_fmd_filter(websocket, msg.get("key"))
+                await websocket.send_text(json.dumps({"type": "fmd_ack", "subkeys": n}))
+                logger.info("FMD pre-filter enabled addr=%.12s… (%d sub-keys)", listen_addr, n)
 
     except WebSocketDisconnect:
         _subscribers[listen_addr].discard(websocket)
+        _fmd_filters.pop(websocket, None)
         logger.info("Client disconnected addr=%.12s…", listen_addr)
 
 
@@ -298,6 +359,10 @@ async def send_message(envelope: dict[str, Any]) -> JSONResponse:
     # Carry the recipient's one-time address through untouched (routing/detection).
     if "addr" in envelope:
         record["addr"] = envelope["addr"]
+    # Carry the optional FMD detection flag (audit M4) so FMD subscribers can be
+    # pre-filtered. The relay only ever runs fmd_test on it — never reads content.
+    if "fmd" in envelope:
+        record["fmd"] = envelope["fmd"]
 
     envelope = record
 

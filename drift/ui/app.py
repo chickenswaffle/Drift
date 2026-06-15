@@ -1640,6 +1640,7 @@ class DriftApp(App[None]):
         group: GroupState | None = None,
         use_tor: bool = False,
         tor_required: bool = False,
+        fmd_key: Any = None,
     ) -> None:
         super().__init__()
         self._identity = identity
@@ -1649,6 +1650,9 @@ class DriftApp(App[None]):
         # GroupSession instead of a 1:1 Session (everything else is shared).
         self._group = group
         self._group_session: Any = None
+        # FMD detection key (audit M4): when set, sessions subscribe to the relay
+        # in FMD pre-filter mode. None → classic full firehose scanning.
+        self._fmd_key = fmd_key
         # The relay URL may be a comma-separated federation list (Phase 4). The
         # full string is handed to the transport (which fails over across it);
         # the header/health-check only need the primary (first) relay.
@@ -1868,6 +1872,7 @@ class DriftApp(App[None]):
             on_event=self._emit_crypto,
             on_burn=_burn_cb,
             tor_client=self._tor_client,
+            fmd_key=self._fmd_key,
         )
         self._session = session
         try:
@@ -1936,6 +1941,7 @@ class DriftApp(App[None]):
             on_event=self._emit_crypto,
             on_membership=_membership_cb,
             tor_client=self._tor_client,
+            fmd_key=self._fmd_key,
         )
         self._group_session = gs
         try:
@@ -2142,13 +2148,19 @@ class DriftApp(App[None]):
     def _on_command(self, event: CommandSelected) -> None:
         self._dispatch(event.command)
 
+    def _my_code(self) -> str:
+        """My contact code, carrying the FMD detection key when FMD is on so the
+        code I share lets senders flag messages for me (audit M4)."""
+        pubs = getattr(self._fmd_key, "public_keys", None)
+        return self._identity.contact_code(fmd_pubs=pubs if pubs else None)
+
     def action_command(self, command: str) -> None:
         self._dispatch(command)
 
     def _dispatch(self, command: str) -> None:
         match command:
             case "init":
-                self.push_screen(IdentityModal(self._identity.contact_code()))
+                self.push_screen(IdentityModal(self._my_code()))
             case "add":
                 self.push_screen(AddContactModal(), self._on_add_result)
             case "verify":
@@ -2536,7 +2548,7 @@ class DriftApp(App[None]):
             self._infopanel.clear_data()
             return
         self._infopanel.show_data(
-            code=self._identity.contact_code(),
+            code=self._my_code(),
             contact=self._active,
             safety=storage.safety_number(
                 self._identity, self._contacts[self._active]["code"]

@@ -26,6 +26,7 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.asymmetric.x25519 import (
@@ -46,6 +47,9 @@ from nacl.bindings import (
 )
 from nacl.exceptions import CryptoError
 from nacl.signing import SigningKey
+
+if TYPE_CHECKING:
+    from drift.crypto.fmd import FMDKeypair
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -202,10 +206,37 @@ class Identity:
             spend_keypair=Keypair.generate(),
         )
 
-    def contact_code(self) -> str:
+    def contact_code(self, fmd_pubs: list[bytes] | None = None) -> str:
+        """Your contact code: ``drift:<scan>.<spend>`` (FMD off, the default).
+
+        When ``fmd_pubs`` is given (the recipient has an FMD detection key
+        published), it is appended as an optional 3rd segment
+        ``.<b58(concat sub-keys)>`` so senders can flag messages for you. Omitting
+        it yields the exact 2-segment code as before — zero overhead, fully
+        backward-compatible.
+        """
         scan_pub = self.scan_keypair.public_b58()
         spend_pub = self.spend_keypair.public_b58()
-        return f"drift:{scan_pub}.{spend_pub}"
+        code = f"drift:{scan_pub}.{spend_pub}"
+        if fmd_pubs:
+            code += "." + b58encode(b"".join(fmd_pubs))
+        return code
+
+    def fmd_keypair(self, n: int) -> FMDKeypair:
+        """Deterministic FMD detection keypair with ``n`` sub-keys.
+
+        Derived from the spend key (like :meth:`signing_key`), so the FMD key is
+        a stable function of the identity with no extra secret to store or seal.
+        ``n = 0`` (FMD off) → an empty keypair.
+        """
+        from drift.crypto.fmd import FMDKeypair, derive_fmd_key
+
+        if n <= 0:
+            return FMDKeypair(secret_keys=[], public_keys=[])
+        seed = derive_message_key(
+            self.spend_keypair.private_bytes(), info=b"drift-fmd-seed-v1"
+        )
+        return derive_fmd_key(seed, n)
 
     def signing_key(self) -> SigningKey:
         """
@@ -256,10 +287,30 @@ class Identity:
         if not code.startswith("drift:"):
             raise ValueError("Not a DRIFT contact code (must start with 'drift:')")
         parts = code[len("drift:"):].split(".")
-        if len(parts) != 2:
-            raise ValueError("Malformed contact code — expected drift:<scan>.<spend>")
+        # 2 segments = classic code; an optional 3rd carries the FMD detection
+        # public key (see parse_fmd_pubs). Extra segments beyond that are rejected.
+        if len(parts) not in (2, 3):
+            raise ValueError("Malformed contact code — expected drift:<scan>.<spend>[.<fmd>]")
         scan_pub = b58decode(parts[0])
         spend_pub = b58decode(parts[1])
         if len(scan_pub) != 32 or len(spend_pub) != 32:
             raise ValueError("Invalid key length in contact code")
         return scan_pub, spend_pub
+
+    @staticmethod
+    def parse_fmd_pubs(code: str) -> list[bytes] | None:
+        """The recipient's FMD detection public sub-keys, or ``None`` if absent.
+
+        Encoded as the optional 3rd contact-code segment — ``b58`` of the ``n``
+        public sub-keys concatenated (32 bytes each). A 2-segment code (FMD off)
+        returns ``None``; a sender uses these to flag messages for the recipient.
+        """
+        if not code.startswith("drift:"):
+            raise ValueError("Not a DRIFT contact code (must start with 'drift:')")
+        parts = code[len("drift:"):].split(".")
+        if len(parts) < 3 or not parts[2]:
+            return None
+        blob = b58decode(parts[2])
+        if not blob or len(blob) % 32 != 0:
+            raise ValueError("Invalid FMD key segment in contact code")
+        return [blob[i:i + 32] for i in range(0, len(blob), 32)]

@@ -11,6 +11,41 @@ DRIFT uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.11.1] — 2026-06-15
+
+Wire up the **FMD (Fuzzy Message Detection) privacy dial** end to end (closes
+audit finding M4: `drift privacy --fmd-rate` previously set a value that touched
+nothing on the wire). FMD stays **off by default** — with it off the wire format,
+contact code, and full client-side scan are byte-for-byte unchanged. Full suite:
+384 passing.
+
+### Added
+- **Detection key in the contact code.** With FMD on, the contact code carries an
+  optional 3rd segment `drift:<scan>.<spend>.<fmd>` holding the FMD detection
+  public sub-keys, **derived deterministically from the spend key** (`derive_fmd_key`
+  / `Identity.fmd_keypair`) — no new stored secret, nothing extra to vault-seal.
+  `Identity.parse_fmd_pubs` reads it; `parse_contact_code` now accepts the optional
+  segment (2-segment codes still valid).
+- **Sender flags.** `PairwiseRatchet.encrypt` attaches an `fmd_flag` bound to the
+  message's one-time stealth address whenever the recipient published an FMD key
+  (Session + GroupSession carry it on the envelope). No key → no flag, no overhead.
+- **Relay pre-filtering (opt-in).** A subscriber may hand the relay its detection
+  sub-keys; the relay runs FMD `Test` per envelope and forwards only matches +
+  the scheme's `2^-k` false positives. Unflagged traffic always passes (fail-open)
+  and non-FMD subscribers still receive the whole firehose (unchanged).
+- **CLI.** `drift privacy --fmd-rate` now actually persists the rate and drives
+  everything; `drift whoami` exports the FMD-augmented code when FMD is on; `drift
+  chat` subscribes to the relay in FMD mode.
+
+### Changed
+- DESIGN.md §5 gains a current-state FMD subsection: states plainly that turning
+  FMD on lets the relay learn a *probabilistic, p-sized* guess at which envelopes
+  might be yours — and that it cannot distinguish a true match from a false
+  positive without your detection key. That probabilistic signal is the cost of
+  the efficiency gain.
+
+---
+
 ## [0.11.0] — 2026-06-15
 
 Phase 8 — **group messaging** by pairwise composition (≤10 members). A group is

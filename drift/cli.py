@@ -241,10 +241,15 @@ def privacy(
         effective = 2.0 ** -n if n else 0.0
         if n == 0:
             console.print("[green]✓[/green] FMD disabled — pure client-side stealth scanning.")
+            console.print("[dim]Your contact code is back to the plain 2-segment form.[/dim]")
         else:
             console.print(
                 f"[green]✓[/green] FMD rate set to {effective:.4f} "
                 f"({n} sub-keys; relay may pre-filter ~{effective * 100:.1f}% of traffic to you)."
+            )
+            console.print(
+                "[dim]Re-share your contact code ([bold]drift whoami[/bold]) — it now carries "
+                "your FMD key so senders can flag messages for you.[/dim]"
             )
         return
 
@@ -264,14 +269,33 @@ def privacy(
     console.print()
 
 
+def _local_fmd_key(identity: Identity) -> Any:
+    """The local FMD detection key for the configured rate, or None if FMD off.
+
+    Derived deterministically from the identity (no stored secret); the number of
+    sub-keys comes from the persisted privacy rate (audit M4).
+    """
+    from drift.crypto.fmd import subkeys_for_rate
+
+    n = subkeys_for_rate(storage.get_fmd_rate())
+    return identity.fmd_keypair(n) if n > 0 else None
+
+
+def _my_contact_code(identity: Identity) -> str:
+    """My contact code, carrying the FMD detection key as a 3rd segment when FMD
+    is on so senders can flag messages for me (audit M4)."""
+    fmd = _local_fmd_key(identity)
+    return identity.contact_code(fmd_pubs=fmd.public_keys if fmd else None)
+
+
 @app.command()
 def whoami() -> None:
-    """Print your contact code."""
+    """Print your contact code (includes your FMD detection key when FMD is on)."""
     identity = _require_identity()
     # Plain print, not console.print: Rich hard-wraps at the terminal width
     # (80 when piped), and a ~95-char contact code would gain a newline mid-token
     # — corrupting it for copy-paste / capture. The code must come out as one line.
-    print(identity.contact_code())
+    print(_my_contact_code(identity))
 
 
 @app.command()
@@ -613,6 +637,9 @@ def chat(
         raise typer.Exit(1)
 
     use_tor = not no_tor
+    # FMD (audit M4): if the privacy dial is on, subscribe to the relay with our
+    # detection key so it pre-filters our mail. None → classic full scanning.
+    fmd_key = _local_fmd_key(identity)
 
     if no_tui:
         if name is None:
@@ -621,14 +648,15 @@ def chat(
         if group is not None:
             ok = asyncio.run(
                 _group_chat_async(
-                    identity, group, relay, use_tor=use_tor, tor_only=tor_only
+                    identity, group, relay,
+                    use_tor=use_tor, tor_only=tor_only, fmd_key=fmd_key,
                 )
             )
         else:
             ok = asyncio.run(
                 _chat_async(
                     name, identity, saved[name]["code"], relay,
-                    use_tor=use_tor, tor_only=tor_only,
+                    use_tor=use_tor, tor_only=tor_only, fmd_key=fmd_key,
                 )
             )
         if not ok:
@@ -640,7 +668,7 @@ def chat(
         identity, dict(saved), relay,
         active=name if group is None else None,
         group=group,
-        use_tor=use_tor, tor_required=tor_only,
+        use_tor=use_tor, tor_required=tor_only, fmd_key=fmd_key,
     ).run()
 
 
@@ -662,6 +690,7 @@ async def _chat_async(
     *,
     use_tor: bool = True,
     tor_only: bool = False,
+    fmd_key: Any = None,
 ) -> bool:
     """
     Headless chat loop. Returns True on a clean run, False if it could not start
@@ -678,7 +707,7 @@ async def _chat_async(
     console.print(f"[dim]Connecting to {relay_url} …[/dim]")
     try:
         async with Session(
-            identity, contact_code, relay_url, tor_client=tor_client
+            identity, contact_code, relay_url, tor_client=tor_client, fmd_key=fmd_key
         ) as session:
             console.print(
                 f"[green]Connected.[/green] Chatting with [bold]{name}[/bold]. "
@@ -722,6 +751,7 @@ async def _group_chat_async(
     *,
     use_tor: bool = True,
     tor_only: bool = False,
+    fmd_key: Any = None,
 ) -> bool:
     """Headless group chat loop (--no-tui). Each message is prefixed with its
     sender's name; membership changes print as system lines."""
@@ -741,7 +771,7 @@ async def _group_chat_async(
     try:
         async with GroupSession(
             identity, group, relay_url,
-            tor_client=tor_client, on_membership=_on_membership,
+            tor_client=tor_client, on_membership=_on_membership, fmd_key=fmd_key,
         ) as gs:
             console.print(
                 f"[green]Connected.[/green] Group [bold]{group.name}[/bold] "

@@ -186,6 +186,34 @@ def generate_fmd_key(false_positive_rate: float) -> FMDKeypair:
     return FMDKeypair(secret_keys=secret_keys, public_keys=public_keys)
 
 
+# Domain-separation tag for deterministic sub-key derivation (versioned).
+_SUBKEY_DERIVE_TAG = b"drift-fmd-subkey-v1"
+
+
+def derive_fmd_key(seed: bytes, n: int) -> FMDKeypair:
+    """
+    Deterministically derive an FMD detection keypair with ``n`` sub-keys from
+    ``seed``.
+
+    Used so an identity's FMD key is a stable function of its long-term key (the
+    same trick :meth:`Identity.signing_key` uses for the Ed25519 anchor) — there
+    is then no extra secret to store or seal in the vault, and the public key is
+    reproducible for the contact code. Sub-key ``i`` is ``H_s(tag ‖ seed ‖ i)``
+    reduced into ``Z_L``; the public half is ``x_i·B``. ``n = 0`` → empty (off).
+
+    Because sub-keys are indexed, a coarser key (the relay's) is just a prefix of
+    a finer one: changing the rate keeps every lower-index sub-key stable.
+    """
+    secret_keys = [
+        _sodium.crypto_core_ed25519_scalar_reduce(
+            hashlib.sha512(_SUBKEY_DERIVE_TAG + seed + i.to_bytes(4, "big")).digest()
+        )
+        for i in range(n)
+    ]
+    public_keys = [_base_mul(x) for x in secret_keys]
+    return FMDKeypair(secret_keys=secret_keys, public_keys=public_keys)
+
+
 # ---------------------------------------------------------------------------
 # Flag / Test
 # ---------------------------------------------------------------------------
