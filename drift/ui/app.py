@@ -47,6 +47,8 @@ import importlib.util
 import os
 import random
 import time
+from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
@@ -59,6 +61,7 @@ from rich.text import Text
 from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
+from textual.command import DiscoveryHit, Hit, Hits, Provider
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.events import Key
 from textual.message import Message
@@ -157,6 +160,28 @@ _LOCK_WATERMARK: dict[str, tuple[str, ...]] = {
 
 def _now() -> str:
     return datetime.now().strftime("%H:%M:%S")
+
+
+# Inline block-glyph sparkline (Oxker-style live monitoring of relay RTT).
+_SPARK_BLOCKS = "▁▂▃▄▅▆▇█"
+
+# Braille spinner frames (Superfile-style in-progress indicator).
+_SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+
+def _sparkline(samples: list[int], width: int = 0) -> str:
+    """Render recent numeric samples as a compact block-glyph sparkline.
+
+    ``width`` (if set) keeps only the most recent N samples. The series is
+    scaled to its own min/max so even small fluctuations stay legible.
+    """
+    vals = list(samples[-width:]) if width else list(samples)
+    if not vals:
+        return ""
+    lo, hi = min(vals), max(vals)
+    span = (hi - lo) or 1
+    last = len(_SPARK_BLOCKS) - 1
+    return "".join(_SPARK_BLOCKS[int((v - lo) / span * last)] for v in vals)
 
 
 # ===========================================================================
@@ -307,9 +332,9 @@ def _build_css(t: dict[str, str]) -> str:
     #body {{ height: 1fr; }}
 
     #sidebar {{
-        width: 22; background: {db}; border-right: solid {bd}; padding: 0 1;
+        width: 24; background: {db}; border: round {bd}; padding: 0 1;
+        border-title-color: {p}; border-title-align: left;
     }}
-    #sidebar-title {{ height: 1; padding: 0 1; }}
     #contact-list {{ height: 1fr; }}
     ContactItem {{ width: 100%; height: 1; padding: 0 1; background: {db}; }}
     ContactItem:hover {{ background: {hb}; }}
@@ -325,23 +350,28 @@ def _build_css(t: dict[str, str]) -> str:
         color: {p} 8%;
     }}
     #pane {{
-        layer: messages; height: 100%; background: transparent; border: solid {bd};
+        layer: messages; height: 100%; background: transparent; border: round {bd};
+        border-title-color: {p}; border-title-align: left;
+        border-subtitle-color: {dm}; border-subtitle-align: right;
         scrollbar-color: {p}; scrollbar-background: {bg};
         scrollbar-gutter: stable; scrollbar-size-vertical: 1; padding: 0 1;
     }}
     #pane > Static {{ width: 100%; height: auto; }}
-    #pane.flash {{ border: solid {p}; background: {hb}; }}
+    #pane.flash {{ border: round {p}; background: {hb}; }}
     #netpane {{
         display: none; height: 1fr;
-        background: {bg}; border: solid {bd};
+        background: {bg}; border: round {bd};
+        border-title-color: {p}; border-title-align: left;
+        border-subtitle-color: {dm}; border-subtitle-align: right;
         padding: 1 2; overflow-y: auto;
         scrollbar-color: {p}; scrollbar-size-vertical: 1;
     }}
 
     /* ── Session info panel (slide-in, right) ───────────────── */
     #infopanel {{
-        dock: right; width: 48; height: 1fr; display: none; overflow-y: auto;
-        background: {db}; border-left: solid {bd}; padding: 1 2;
+        dock: right; width: 50; height: 1fr; display: none; overflow-y: auto;
+        background: {db}; border: round {bd}; padding: 1 2;
+        border-title-color: {p}; border-title-align: left;
         scrollbar-color: {p}; scrollbar-size-vertical: 1;
     }}
 
@@ -656,9 +686,24 @@ class LatencyPill(Static):
     def __init__(self, health_url: str, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._health_url = health_url
+        # Rolling RTT history feeds the inline sparkline + the network pane.
+        self._samples: deque[int] = deque(maxlen=60)
+        self._spin = 0
 
     def on_mount(self) -> None:
         self.set_interval(15.0, self._ping)
+        # Drives both the ratchet-free spinner animation during Tor bootstrap.
+        self.set_interval(0.08, self._spin_tick)
+
+    def _spin_tick(self) -> None:
+        if self.bootstrap_pct is not None:
+            self._spin = (self._spin + 1) % len(_SPINNER_FRAMES)
+            self.refresh()
+
+    @property
+    def samples(self) -> list[int]:
+        """A copy of the recent RTT samples (for the network-pane graph)."""
+        return list(self._samples)
 
     async def _ping(self) -> None:
         try:
@@ -666,6 +711,7 @@ class LatencyPill(Static):
             async with httpx.AsyncClient() as c:
                 await c.get(self._health_url, timeout=3.0)
             self.latency_ms = int((time.monotonic() - t0) * 1000)
+            self._samples.append(self.latency_ms)
         except Exception:  # noqa: BLE001
             self.latency_ms = None
 
@@ -679,12 +725,17 @@ class LatencyPill(Static):
 
     def render(self) -> RenderableType:
         if self.bootstrap_pct is not None:
-            return f"[{_S}]⚛ Bootstrapping Tor... {self.bootstrap_pct}%[/]"
+            frame = _SPINNER_FRAMES[self._spin]
+            filled = self.bootstrap_pct // 10
+            bar = "█" * filled + "░" * (10 - filled)
+            return f"[{_S}]{frame} tor [{bar}] {self.bootstrap_pct}%[/]"
         if self.latency_ms is None:
             return "[#444444]⚡ —[/]"
         ms = self.latency_ms
         colour = _P if ms < 100 else ("#cccc00" if ms < 300 else _WN)
-        return f"[{colour}]⚡ {ms}ms[/]"
+        spark = _sparkline(list(self._samples), 12)
+        spark_part = f" [{colour}]{spark}[/]" if spark else ""
+        return f"[{colour}]⚡ {ms}ms[/]{spark_part}"
 
 
 class RatchetPill(Static):
@@ -827,19 +878,23 @@ class ContactItem(Static):
 
     can_focus = True
 
-    def __init__(self, name: str, *, active: bool, unread: int) -> None:
+    def __init__(self, name: str, *, active: bool, unread: int, index: int = 0) -> None:
         super().__init__()
         self.contact_name = name
         self.active = active
         self.unread = unread
+        self.index = index
         if active:
             self.add_class("active")
 
     def render(self) -> RenderableType:
-        prefix = "▶" if self.active else " "
+        # Left accent bar marks the active row as a selected "card"; the leading
+        # digit (1–9) is the quick-jump shortcut for that contact.
+        accent = f"[{_P}]▎[/]" if self.active else " "
+        num = f"[#555555]{self.index}[/] " if self.index else ""
         colour = _P if self.active else _DM
-        badge = f"  [{_S}]{self.unread}[/]" if self.unread else ""
-        return f"[{colour}]{prefix} {self.contact_name}[/]{badge}"
+        badge = f"  [{_S}]●{self.unread}[/]" if self.unread else ""
+        return f"{accent}{num}[{colour}]{self.contact_name}[/]{badge}"
 
     def on_click(self) -> None:
         self.post_message(ContactSelected(self.contact_name))
@@ -854,14 +909,17 @@ class Sidebar(Vertical):
     """Contact list with a header and an ``[+] Add`` action at the bottom."""
 
     def compose(self) -> ComposeResult:
-        yield Static(f"[bold {_P}]CONTACTS[/]", id="sidebar-title")
         yield VerticalScroll(id="contact-list")
         yield PillButton("+", "Add Contact", "add")
+
+    def on_mount(self) -> None:
+        self.border_title = "CONTACTS"
 
     async def populate(
         self, contacts: Contacts, active: str | None, unread: dict[str, int]
     ) -> None:
         """Rebuild the contact rows from the current model state."""
+        self.border_title = f"CONTACTS · {len(contacts)}" if contacts else "CONTACTS"
         listing = self.query_one("#contact-list", VerticalScroll)
         await listing.remove_children()
         if not contacts:
@@ -869,8 +927,13 @@ class Sidebar(Vertical):
             return
         await listing.mount(
             *(
-                ContactItem(name, active=(name == active), unread=unread.get(name, 0))
-                for name in contacts
+                ContactItem(
+                    name,
+                    active=(name == active),
+                    unread=unread.get(name, 0),
+                    index=(i + 1 if i < 9 else 0),
+                )
+                for i, name in enumerate(contacts)
             )
         )
 
@@ -955,8 +1018,8 @@ class InputBar(Vertical):
     """Bottom composer: rule · (prompt + input + counter) · keyboard help bar."""
 
     HINT = (
-        "[#888888]\\[Q]uit  ·  ^G info  ·  ^L log  ·  \\[V]erify  ·  \\[A]dd  ·  "
-        "\\[/]command  ·  \\[↑↓]scroll[/]"
+        "[#888888]^P palette  ·  \\[1-9]jump  ·  ^G info  ·  ^N net  ·  ^L log  ·  "
+        "\\[V]erify  ·  \\[A]dd  ·  \\[/]command  ·  \\[Q]uit[/]"
     )
 
     def compose(self) -> ComposeResult:
@@ -988,6 +1051,7 @@ class NetworkState:
     relay_url: str = ""
     relay_connected: bool = False
     relay_latency_ms: int | None = None
+    relay_rtt_samples: list[int] = field(default_factory=list)  # for the RTT sparkline
     peer_name: str | None = None
     peer_connected: bool = False
     ratchet_steps: int = 0
@@ -1016,6 +1080,8 @@ class NetworkPane(Static):
         self._state = NetworkState()
 
     def on_mount(self) -> None:
+        self.border_title = "NETWORK TOPOLOGY"
+        self.border_subtitle = "^N return to chat"
         self._redraw()
 
     def update_graph(self, state: NetworkState) -> None:
@@ -1116,6 +1182,16 @@ class NetworkPane(Static):
             f"  ·  ⬡ {s.stealth_addrs} stealth addrs[/]"
         )
 
+        # Live relay round-trip-time graph (Oxker-style sparkline).
+        spark = _sparkline(s.relay_rtt_samples, 48)
+        if spark:
+            lo = min(s.relay_rtt_samples)
+            hi = max(s.relay_rtt_samples)
+            stats += (
+                f"\n  [{_DM}]relay rtt[/]  [{rc}]{spark}[/]"
+                f"  [{_DM}]{lo}–{hi}ms[/]"
+            )
+
         body = (
             "\n"
             "  ┌──────────┐\n"
@@ -1137,11 +1213,9 @@ class NetworkPane(Static):
             f"{fed_line}"
         )
 
+        # The panel title now lives in the rounded border (set in on_mount); the
+        # body just carries the diagram and the live stats.
         return Group(
-            Text.from_markup(
-                f"\n  [bold {_DM}]▶ NETWORK TOPOLOGY[/]  [#333333](^N to return to chat)[/]"
-            ),
-            RichRule(style=_BD, characters="─"),
             Text.from_markup(body),
             RichRule(style=_BD, characters="─"),
             Text.from_markup(f"{stats}\n"),
@@ -1163,6 +1237,9 @@ class InfoPanel(Static):
         self._recent: list[str] = []
         self._relay = ""
         self._uptime = "—"
+
+    def on_mount(self) -> None:
+        self.border_title = "SESSION"
 
     def clear_data(self) -> None:
         self._active = False
@@ -1209,8 +1286,6 @@ class InfoPanel(Static):
         caption = ("scan to add this contact" if _HAS_SEGNO
                    else "decorative · not scannable — share the code below")
         return Group(
-            Text("⬡  SESSION", style=f"bold {_P}"),
-            Text(""),
             _qr_renderable(self._code),
             Text(caption, style="italic #555555"),
             Text(""),
@@ -1425,9 +1500,12 @@ class HelpModal(_FadeModal[None]):
         f"  [{_P}]V[/]  Verify the active contact (safety number)\n"
         f"  [{_P}]C[/]  Focus the contact list\n"
         f"  [{_P}]/[/]  Command mode (type a /slash command)\n"
+        f"  [{_P}]1-9[/]  Jump to the Nth contact (numbered in the sidebar)\n"
         f"  [{_P}]Q[/]  Quit\n\n"
         f"[bold {_P}]Toggles[/]\n"
+        f"  [{_S}]Ctrl+P[/]  command palette — fuzzy-search every action\n"
         f"  [{_S}]Ctrl+G[/]  session info panel (your code, safety number, counters)\n"
+        f"  [{_S}]Ctrl+N[/]  network topology + live relay-RTT graph\n"
         f"  [{_S}]Ctrl+L[/]  crypto-event ticker on/off\n\n"
         f"[bold {_P}]Slash commands[/]\n"
         f"  [{_S}]/add[/]         add a contact\n"
@@ -1465,6 +1543,48 @@ class HelpModal(_FadeModal[None]):
 # Root application
 # ===========================================================================
 
+class DriftCommandProvider(Provider):
+    """Fuzzy command palette (Ctrl+P) — Posting-style quick actions.
+
+    Surfaces every top-level DRIFT action in the native Textual command palette
+    so the whole app is reachable by typing a few characters, no menu-diving.
+    """
+
+    def _commands(self) -> tuple[tuple[str, str, Callable[[], Any]], ...]:
+        app = self.app
+        assert isinstance(app, DriftApp)
+        return (
+            ("Add Contact", "Add a contact by their drift: code",
+             lambda: app.action_command("add")),
+            ("Verify Contact", "Compare safety numbers with the active contact",
+             app._open_verify),
+            ("Contacts", "Focus the contact list",
+             lambda: app.action_command("contacts")),
+            ("Show Identity", "Show your own contact code and QR",
+             lambda: app.action_command("init")),
+            ("Toggle Network Topology", "Show or hide the network graph",
+             app.action_toggle_network),
+            ("Toggle Session Info", "Show or hide the session info panel",
+             app.action_toggle_info),
+            ("Toggle Crypto Log", "Show or hide the live crypto-event ticker",
+             app.action_toggle_log),
+            ("Keyboard Help", "List every keyboard shortcut",
+             lambda: app.action_command("help")),
+            ("Quit DRIFT", "Close the client", app.action_do_quit),
+        )
+
+    async def discover(self) -> Hits:
+        for name, help_text, runnable in self._commands():
+            yield DiscoveryHit(name, runnable, help=help_text)
+
+    async def search(self, query: str) -> Hits:
+        matcher = self.matcher(query)
+        for name, help_text, runnable in self._commands():
+            score = matcher.match(name)
+            if score > 0:
+                yield Hit(score, matcher.highlight(name), runnable, help=help_text)
+
+
 class DriftApp(App[None]):
     """The DRIFT client. Owns all state; children render from it."""
 
@@ -1481,8 +1601,15 @@ class DriftApp(App[None]):
         Binding("ctrl+g", "toggle_info", "Info", show=False),
         Binding("ctrl+l", "toggle_log", "Log", show=False),
         Binding("ctrl+n", "toggle_network", "Network", show=False),
+        Binding("ctrl+p", "command_palette", "Palette", show=False),
         Binding("escape", "blur_input", "Unfocus", show=False),
+        # Numeric quick-jump to the Nth contact (Oxker-style), active when the
+        # message input is unfocused (press Esc first), like the letter shortcuts.
+        *(Binding(str(n), f"jump_contact({n})", show=False) for n in range(1, 10)),
     ]
+
+    # Posting-style fuzzy command palette: keep Textual's built-ins, add ours.
+    COMMANDS = App.COMMANDS | {DriftCommandProvider}
 
     CSS = _build_css(_ACTIVE_THEME)
 
@@ -1568,6 +1695,7 @@ class DriftApp(App[None]):
     async def on_mount(self) -> None:
         self._header.relay_url = self._primary_relay
         await self._sidebar.populate(self._contacts, self._active, self._unread)
+        self._update_chat_title()
         self.set_interval(0.8, self._tick_pulse)
         self._input.focus()
         # Phase 3: bring up Tor before any session connects, so the very first
@@ -1685,6 +1813,19 @@ class DriftApp(App[None]):
             "max" if (secure and maximum) else "secured" if secure else "unsecured"
         )
 
+    def _update_chat_title(self) -> None:
+        """Reflect the active contact + channel state in the chat pane's border."""
+        pane = self._pane
+        if self._active is None:
+            pane.border_title = "DRIFT"
+            pane.border_subtitle = "no contact"
+            return
+        pane.border_title = f" {self._active} "
+        if self._connected:
+            pane.border_subtitle = "tor · secure" if self._tor_active else "secure"
+        else:
+            pane.border_subtitle = "offline"
+
     # ── Background session worker (UI never touches crypto) ────────────────
 
     @work(exclusive=True, group="session")
@@ -1743,6 +1884,7 @@ class DriftApp(App[None]):
 
         # Replay this contact's history into a fresh pane.
         await self._pane.clear()
+        self._update_chat_title()
         self._pane.write_separator(f"session opened · {name} · {_now()}")
         for record in self._history.get(name, []):
             self._replay(record)
@@ -1769,6 +1911,7 @@ class DriftApp(App[None]):
         self._header.connected = True
         # E2E + ratchet active → secured. With a live Tor circuit it's maximum (🔒⁺).
         self._set_secure(True, maximum=self._tor_active)
+        self._update_chat_title()
         self._pane.write_system(f"⣿ secured channel to {self._relay_url}")
 
     @on(SessionDown)
@@ -1778,6 +1921,7 @@ class DriftApp(App[None]):
         self._connected = False
         self._header.connected = False
         self._set_secure(False)
+        self._update_chat_title()
         self._pane.write_warning(event.reason)
 
     @on(IncomingMessage)
@@ -2213,6 +2357,12 @@ class DriftApp(App[None]):
         """Drop focus from the input so single-key shortcuts become active."""
         self.set_focus(None)
 
+    def action_jump_contact(self, n: int) -> None:
+        """Open the Nth contact (1-based) — the digit shown in the sidebar."""
+        names = list(self._contacts)
+        if 1 <= n <= len(names):
+            self.post_message(ContactSelected(names[n - 1]))
+
     def action_do_quit(self) -> None:
         self.exit()
 
@@ -2235,6 +2385,7 @@ class DriftApp(App[None]):
             relay_url=self._primary_relay,
             relay_connected=self._connected,
             relay_latency_ms=self.query_one(LatencyPill).latency_ms,
+            relay_rtt_samples=self.query_one(LatencyPill).samples,
             peer_name=self._active,
             peer_connected=self._connected,
             ratchet_steps=self.query_one(RatchetPill).count,

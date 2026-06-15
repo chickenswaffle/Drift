@@ -652,13 +652,19 @@ def _fake_tor_client(hops: int = 3):
 def test_latency_pill_bootstrap_mode() -> None:
     pill = LatencyPill("http://localhost:8765/health")
     pill.set_bootstrap(42)
-    assert "Bootstrapping Tor... 42%" in _render(pill.render())
+    # Bootstrap shows an animated spinner, a progress bar and the percentage.
+    rendered = _render(pill.render())
+    assert "42%" in rendered
+    assert "tor" in rendered
+    assert "█" in rendered and "░" in rendered  # partial progress bar
     # Out-of-range values clamp to 0..100.
     pill.set_bootstrap(150)
-    assert "100%" in _render(pill.render())
+    bar = _render(pill.render())
+    assert "100%" in bar
+    assert "░" not in bar  # full bar at 100%
     pill.clear_bootstrap()
     # Back to the latency readout (no live ping yet → em dash).
-    assert "Bootstrapping" not in _render(pill.render())
+    assert "%" not in _render(pill.render())
 
 
 @pytest.mark.asyncio
