@@ -1,7 +1,7 @@
 {
   "name": "DRIFT",
   "image": "mcr.microsoft.com/devcontainers/python:3.11",
-  "postCreateCommand": "pip install -e '.[relay,dev]'",
+  "postCreateCommand": "pip install -e '.[relay,dev]' && echo 'bash /workspaces/Drift/.devcontainer/welcome.sh' >> ~/.bashrc",
   "postStartCommand": "python -m relay.server &",
   "forwardPorts": [8765],
   "customizations": {

@@ -10,13 +10,20 @@ The project is **pre-alpha**. The phased roadmap matters: each phase is a discre
 
 ### Phase status
 
-- **Phase 0 — transport** ✅ complete (tagged `v0.1.0`): X25519 ECDH → HKDF → XChaCha20-Poly1305, wired to the relay transport.
-- **Phase 1 — stealth addresses + TUI** ✅ complete (tagged `v0.2.0`, `v0.3.0`): rotating one-time addressing and the Textual TUI.
-- **Phase 2 — Double Ratchet** ✅ complete (tagged `v0.4.0`): forward-secret message encryption.
-- **Phase 3 — Tor + sealed sender** ⏳ next: route over Tor automatically and hide the sender from the relay.
-- **Phase 4 — relay federation** — planned: Redis-backed mailbox + federated relays.
+Current release: **`v0.11.1`**. No phase is in progress right now.
 
-The TUI/storage refactor (component-tree UI over a `drift.storage` model seam) ships as `v0.4.1`.
+- **Phase 0 — transport** ✅ complete: X25519 ECDH → HKDF → XChaCha20-Poly1305, wired to the relay transport.
+- **Phase 1 — stealth addresses + TUI** ✅ complete: rotating one-time addressing and the Textual TUI.
+- **Phase 2 — Double Ratchet** ✅ complete: forward-secret message encryption.
+- **Phase 3 — Tor + sealed sender** ✅ complete: route over Tor automatically and hide the sender from the relay.
+- **Phase 4 — relay federation** ✅ complete: Redis-backed mailbox + federated relays.
+- **Phase 5 — panic / duress vault** ✅ complete: panic key + duress decoy vault (`crypto/panic.py`).
+- **Phase 6 — fuzzy message detection** ✅ complete: FMD privacy dial (`crypto/fmd.py`).
+- **Phase 7 — multi-device** ⏭️ skipped for now.
+- **Phase 8 — group messaging** ✅ complete: pairwise ratchets, ≤10 members (`crypto/groups.py`).
+- **Phase 9 — one-click Codespaces launch** ✅ complete: `.devcontainer/` + README badge.
+
+**Backlog (none currently active):** X3DH asynchronous key agreement; M1–M5 audit findings; Phase 10 (Raspberry Pi image); Phase 11 (public rooms).
 
 ## Development setup
 
@@ -89,3 +96,4 @@ Intentionally dumb: routes opaque ciphertext, never reads content. Phase 0 uses 
 - **Never implement crypto primitives from scratch.** Use `PyNaCl` / `cryptography` (libsodium bindings). PRs that roll their own curve math will be closed.
 - Always let `InvalidTag` propagate on decrypt failure — a tampered message must be rejected, not silently dropped.
 - Identity files are saved `chmod 0o600` — never relax this.
+- **The panic/duress vault and FMD are live security systems — don't touch them blind.** The panic key + duress decoy vault (`crypto/panic.py`) and the fuzzy message detection privacy dial (`crypto/fmd.py`) are deliberately subtle: a careless change can silently leak real contacts from a decoy unlock or widen the FMD false-positive rate in ways that deanonymize users. Read `crypto/panic.py` and `crypto/fmd.py` in full before modifying either, or anything that calls into them.
