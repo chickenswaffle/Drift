@@ -1,3 +1,13 @@
+```
+██████╗ ██████╗ ██╗███████╗████████╗
+██╔══██╗██╔══██╗██║██╔════╝╚══██╔══╝
+██║  ██║██████╔╝██║█████╗     ██║   
+██║  ██║██╔══██╗██║██╔══╝     ██║   
+██████╔╝██║  ██║██║██║        ██║   
+╚═════╝ ╚═╝  ╚═╝╚═╝╚═╝        ╚═╝
+```
+*No accounts. No phone numbers. No server that can read your messages.*
+
 # DRIFT
 
 [![CI](https://github.com/chickenswaffle/Drift/actions/workflows/ci.yml/badge.svg)](https://github.com/chickenswaffle/Drift/actions/workflows/ci.yml)
