@@ -1,0 +1,12 @@
+{
+  "name": "DRIFT",
+  "image": "mcr.microsoft.com/devcontainers/python:3.11",
+  "postCreateCommand": "pip install -e '.[relay,dev]'",
+  "postStartCommand": "python -m relay.server &",
+  "forwardPorts": [8765],
+  "customizations": {
+    "vscode": {
+      "extensions": ["ms-python.python"]
+    }
+  }
+}

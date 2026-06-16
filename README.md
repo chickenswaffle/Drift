@@ -8,6 +8,12 @@
 
 No phone numbers. No accounts. No central authority that can read or hand over your messages.
 
+## Try it in your browser
+
+[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/chickenswaffle/Drift)
+
+Click to launch a fully configured DRIFT environment in your browser — no installation required.
+
 ```
 $ drift init
   ✓ keys generated locally — they never leave this machine
