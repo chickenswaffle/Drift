@@ -7,7 +7,7 @@ contact list, both under ``~/.config/drift/``. The CLI and the TUI are two
 
 Architecture note
 -----------------
-Per CLAUDE.md, ``ui/`` knows nothing about crypto. This module is the seam:
+Per AGENTS.md, ``ui/`` knows nothing about crypto. This module is the seam:
 it may import ``drift.crypto`` (it loads key material and derives the public
 safety number), and the UI talks to *this* module instead of to crypto. A
 future web backend can reuse this same model unchanged.

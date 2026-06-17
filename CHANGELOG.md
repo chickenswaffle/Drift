@@ -295,7 +295,7 @@ Storage refactor and UI foundation — the `drift.storage` model seam.
 ### Changed
 - `drift/cli.py` refactored to delegate all persistence to `drift.storage`;
   no longer carries its own `CONFIG_DIR`.
-- CLAUDE.md updated to reflect Phase 2 completion and Phase 3 as next.
+- AGENTS.md updated to reflect Phase 2 completion and Phase 3 as next.
 - Version aligned to `0.4.x` across `pyproject.toml`, `drift/__init__.py`,
   and the TUI.
 
