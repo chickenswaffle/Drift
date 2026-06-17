@@ -288,6 +288,54 @@ async def _store_beacon(beacon: dict[str, Any]) -> None:
     _beacons[lookup] = {"payload": payload, "expires_at": int(expires_at)}
 
 
+# ---------------------------------------------------------------------------
+# Prekeys (X3DH, audit H3) — published bundles for asynchronous key agreement
+#
+# The relay stores a contact's *public* prekey bundle indexed by their base58
+# scan key. It is self-authenticating (the signed prekey carries an Ed25519
+# signature the fetcher verifies), so no auth is needed to publish. A GET hands
+# out exactly one one-time prekey and atomically removes it — a one-time prekey
+# must never be served twice. When the store is exhausted the bundle is returned
+# without an OTPK (weaker but valid X3DH per spec). Bundles expire after 30 days
+# if not replenished. The relay never sees a private key and learns nothing about
+# message content — only that some contact has prekeys available.
+# ---------------------------------------------------------------------------
+
+PREKEY_MAX_TTL = 30 * 24 * 3600  # 30 days, server-side expiry
+
+# addr(base58 scan) → {bundle fields, "one_time": [{"id","pub"},…], "stored_at"}
+_prekeys: dict[str, dict[str, Any]] = {}
+
+# Required public-bundle fields (everything except the one-time prekey list).
+_PREKEY_BUNDLE_FIELDS = (
+    "identity_key", "identity_dh_key", "signed_prekey",
+    "signed_prekey_sig", "signed_prekey_id",
+)
+
+
+def _prune_prekeys() -> None:
+    """Drop prekey bundles past their 30-day TTL."""
+    now = time.time()
+    for addr in [a for a, b in _prekeys.items() if b["stored_at"] + PREKEY_MAX_TTL <= now]:
+        del _prekeys[addr]
+
+
+def _clean_one_time_list(raw: Any) -> list[dict[str, Any]]:
+    """Validate a client-supplied one-time prekey list into ``[{id,pub},…]``."""
+    out: list[dict[str, Any]] = []
+    if not isinstance(raw, list):
+        return out
+    for item in raw:
+        if (
+            isinstance(item, dict)
+            and isinstance(item.get("id"), int)
+            and isinstance(item.get("pub"), str)
+            and item["pub"]
+        ):
+            out.append({"id": item["id"], "pub": item["pub"]})
+    return out
+
+
 # This node's externally-reachable base URL (so peers can re-announce it and we
 # never gossip a blob back to ourselves). Set via DRIFT_SELF_URL.
 SELF_URL = os.environ.get("DRIFT_SELF_URL") or None
@@ -555,6 +603,85 @@ async def extinguish_beacon(lookup_hash: str) -> JSONResponse:
     """Delete a beacon early (the holder extinguishing it). Idempotent."""
     _beacons.pop(lookup_hash, None)
     return JSONResponse({"ok": True})
+
+
+# ---------------------------------------------------------------------------
+# Prekey endpoints (X3DH, audit H3)
+# ---------------------------------------------------------------------------
+
+@app.post("/prekeys/{contact_addr}")
+async def publish_prekeys(contact_addr: str, body: dict[str, Any]) -> JSONResponse:
+    """
+    Publish a public prekey bundle, indexed by the publisher's base58 scan key.
+
+    Body: the bundle's public fields plus ``one_time_prekeys: [{id, pub}, …]``.
+    No authentication — the bundle is self-authenticating (the signed prekey
+    carries an Ed25519 signature the fetcher verifies). Replaces any existing
+    bundle for this address.
+    """
+    if not contact_addr:
+        return JSONResponse({"error": "missing contact_addr"}, status_code=400)
+    missing = [f for f in _PREKEY_BUNDLE_FIELDS if not body.get(f)]
+    if missing:
+        return JSONResponse(
+            {"error": f"missing bundle field(s): {', '.join(missing)}"}, status_code=400
+        )
+    record = {f: body[f] for f in _PREKEY_BUNDLE_FIELDS}
+    record["one_time"] = _clean_one_time_list(body.get("one_time_prekeys"))
+    record["stored_at"] = time.time()
+    _prekeys[contact_addr] = record
+    return JSONResponse({"ok": True, "one_time_count": len(record["one_time"])})
+
+
+@app.get("/prekeys/{contact_addr}")
+async def fetch_prekeys(contact_addr: str) -> JSONResponse:
+    """
+    Fetch a contact's bundle, consuming one one-time prekey atomically.
+
+    Returns the signed prekey + identity keys plus exactly one OTPK, which is
+    removed from the store so it can never be served twice. If none remain,
+    ``one_time_prekey`` is ``null`` (a weaker but valid X3DH per spec). 404 if no
+    bundle is published (or it has expired).
+    """
+    _prune_prekeys()
+    record = _prekeys.get(contact_addr)
+    if record is None:
+        return JSONResponse({"error": "no prekey bundle for this contact"}, status_code=404)
+    otpk = record["one_time"].pop(0) if record["one_time"] else None  # atomic remove
+    response = {f: record[f] for f in _PREKEY_BUNDLE_FIELDS}
+    response["one_time_prekey"] = otpk["pub"] if otpk else None
+    response["one_time_prekey_id"] = otpk["id"] if otpk else None
+    return JSONResponse(response)
+
+
+@app.post("/prekeys/{contact_addr}/replenish")
+async def replenish_prekeys(contact_addr: str, body: dict[str, Any]) -> JSONResponse:
+    """
+    Append more one-time prekeys to an existing bundle. Body:
+    ``{one_time_prekeys: [{id, pub}, …]}``. 404 if no bundle is published yet
+    (publish the full bundle first).
+    """
+    _prune_prekeys()
+    record = _prekeys.get(contact_addr)
+    if record is None:
+        return JSONResponse({"error": "no prekey bundle to replenish"}, status_code=404)
+    record["one_time"].extend(_clean_one_time_list(body.get("one_time_prekeys")))
+    record["stored_at"] = time.time()  # replenishing refreshes the 30-day TTL
+    return JSONResponse({"ok": True, "one_time_count": len(record["one_time"])})
+
+
+@app.get("/prekeys/{contact_addr}/status")
+async def prekeys_status(contact_addr: str) -> JSONResponse:
+    """Non-consuming counts for ``drift prekeys`` (does not remove an OTPK)."""
+    _prune_prekeys()
+    record = _prekeys.get(contact_addr)
+    if record is None:
+        return JSONResponse({"error": "no prekey bundle for this contact"}, status_code=404)
+    return JSONResponse({
+        "signed_prekey_id": record["signed_prekey_id"],
+        "one_time_count": len(record["one_time"]),
+        "stored_at": record["stored_at"],
+    })
 
 
 # HMAC-SHA256 token is 32 bytes = 64 lowercase hex characters.

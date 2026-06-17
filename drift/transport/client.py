@@ -400,6 +400,71 @@ class RelayClient:
             raise RelayError(f"burn failed: {exc}") from exc
 
     # ------------------------------------------------------------------
+    # Prekeys (X3DH, audit H3)
+    #
+    # These move opaque public-key JSON to/from the relay's /prekeys endpoints.
+    # The transport layer never interprets the key material; the X3DH math lives
+    # in drift.crypto.x3dh and the session layer.
+    # ------------------------------------------------------------------
+
+    async def publish_prekey_bundle(self, addr: str, payload: dict[str, Any]) -> None:
+        """POST our public prekey bundle, indexed by ``addr`` (our base58 scan key)."""
+        if self._http is None:
+            raise RelayError("not connected — call connect() first")
+        try:
+            resp = await self._http.post(f"{self._http_base}/prekeys/{addr}", json=payload)
+            resp.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise RelayError(f"prekey publish failed: {exc}") from exc
+
+    async def fetch_prekey_bundle(self, addr: str) -> dict[str, Any] | None:
+        """GET a contact's bundle (consuming one OTPK). ``None`` if none published."""
+        if self._http is None:
+            raise RelayError("not connected — call connect() first")
+        try:
+            resp = await self._http.get(f"{self._http_base}/prekeys/{addr}")
+        except httpx.HTTPError as exc:
+            raise RelayError(f"prekey fetch failed: {exc}") from exc
+        if resp.status_code == 404:
+            return None
+        try:
+            resp.raise_for_status()
+            data: dict[str, Any] = resp.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            raise RelayError(f"prekey fetch failed: {exc}") from exc
+        return data
+
+    async def replenish_prekeys(self, addr: str, one_time_prekeys: list[dict[str, Any]]) -> None:
+        """POST additional one-time prekeys to top up our relay-side store."""
+        if self._http is None:
+            raise RelayError("not connected — call connect() first")
+        try:
+            resp = await self._http.post(
+                f"{self._http_base}/prekeys/{addr}/replenish",
+                json={"one_time_prekeys": one_time_prekeys},
+            )
+            resp.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise RelayError(f"prekey replenish failed: {exc}") from exc
+
+    async def prekey_status(self, addr: str) -> dict[str, Any] | None:
+        """GET non-consuming prekey counts for ``addr``. ``None`` if none published."""
+        if self._http is None:
+            raise RelayError("not connected — call connect() first")
+        try:
+            resp = await self._http.get(f"{self._http_base}/prekeys/{addr}/status")
+        except httpx.HTTPError as exc:
+            raise RelayError(f"prekey status failed: {exc}") from exc
+        if resp.status_code == 404:
+            return None
+        try:
+            resp.raise_for_status()
+            data: dict[str, Any] = resp.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            raise RelayError(f"prekey status failed: {exc}") from exc
+        return data
+
+    # ------------------------------------------------------------------
     # Async context manager
     # ------------------------------------------------------------------
 

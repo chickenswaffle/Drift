@@ -10,7 +10,7 @@ The project is **pre-alpha**. The phased roadmap matters: each phase is a discre
 
 ### Phase status
 
-Current release: **`v0.13.0`**. No phase is in progress right now.
+Current release: **`v0.14.0`**. No phase is in progress right now.
 
 - **Phase 0 — transport** ✅ complete: X25519 ECDH → HKDF → XChaCha20-Poly1305, wired to the relay transport.
 - **Phase 1 — stealth addresses + TUI** ✅ complete: rotating one-time addressing and the Textual TUI.
@@ -24,8 +24,9 @@ Current release: **`v0.13.0`**. No phase is in progress right now.
 - **Phase 9 — one-click Codespaces launch** ✅ complete: `.devcontainer/` + README badge.
 - **Phase 10 — WITNESS** ✅ complete: live, signed, hash-chained proof of relay blindness (`relay/witness.py`, `/witness/*` + `/cannot-see`, `drift witness verify|subscribe`). See `docs/witness.md`.
 - **Phase 11 — sovereign rooms** ✅ complete: cryptographic chatrooms with no server-side representation — a room is a shared secret derived from its name, posted to rotating stealth addresses. Three tiers (open/invite/dark), optional federation shards (`crypto/rooms.py`, `transport/room_session.py`, `drift room …`). Encrypted but **not** forward-secret — see DESIGN.md §12.
+- **X3DH asynchronous key agreement** ✅ complete (`v0.14.0`): the Signal X3DH handshake replaces the deterministic ratchet bootstrap, closing the last H3 audit residual. Users publish a signed prekey + one-time prekeys to the relay (`/prekeys/*`, sealed at rest); the initiator fetches the bundle, runs `DH1..DH4 → HKDF`, and the recipient's signed prekey seeds the Double Ratchet. One-time prekeys are consumed once and deleted, so a later full key compromise can't decrypt past opening bursts. The old deterministic bootstrap remains only as a visibly-warned fallback (`crypto/x3dh.py`, `transport/session.py`, `drift prekeys`).
 
-**Backlog (none currently active):** X3DH asynchronous key agreement; M1–M5 audit findings; Raspberry Pi image.
+**Backlog (none currently active):** M1–M3 / M5 audit findings; L1–L4; Raspberry Pi image.
 
 ## Development setup
 

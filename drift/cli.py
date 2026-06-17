@@ -28,7 +28,7 @@ from rich.panel import Panel
 from rich.text import Text
 
 from drift import __version__, storage
-from drift.crypto import Identity, b58decode, b58encode, groups
+from drift.crypto import Identity, b58decode, b58encode, groups, x3dh
 from drift.crypto import rooms as rooms_crypto
 from drift.crypto.groups import ContactInfo, GroupError, create_group
 from drift.crypto.rooms import Room, RoomError
@@ -69,6 +69,10 @@ def init(
         "wipe", "--duress-mode",
         help="What the duress passphrase does: 'wipe' (destroy) or 'decoy' (innocuous identity)",
     ),
+    relay: str = typer.Option(
+        "ws://localhost:8765", "--relay",
+        help="Relay to publish your X3DH prekey bundle to (best-effort)",
+    ),
 ) -> None:
     """
     Generate a new DRIFT identity (keypairs stored locally).
@@ -86,6 +90,10 @@ def init(
         raise typer.Exit(1) from None
 
     identity = Identity.generate()
+    # X3DH (audit H3): generate a prekey bundle up front so peers can open a
+    # forward-secret session with us asynchronously. Sealed in the vault when one
+    # is configured, else stored alongside identity.json; published below.
+    _, prekeys = x3dh.generate_prekey_bundle(identity)
 
     # Resolve the unlock passphrase (flag, else interactive prompt, else none).
     interactive = sys.stdin.isatty()
@@ -98,6 +106,7 @@ def init(
     if not passphrase:
         # Legacy path: plain identity.json, no vault, no unlock step.
         storage.save_identity(identity, overwrite=force)
+        storage.save_prekey_privates(identity, prekeys)
     else:
         # Vault path: optionally set up a duress passphrase.
         if duress_passphrase is None and interactive and typer.confirm(
@@ -122,6 +131,7 @@ def init(
             identity, passphrase,
             duress_passphrase=duress_passphrase,
             duress_mode=duress_mode,
+            real_prekeys=prekeys.to_dict(),
         )
 
     code = identity.contact_code()
@@ -140,6 +150,39 @@ def init(
         console.print("[dim]Keys are stored in:[/dim]", str(storage.IDENTITY_FILE))
     console.print("[dim]They never leave this machine.[/dim]")
     console.print()
+
+    # Publish our prekey bundle (X3DH, audit H3) so peers can open a
+    # forward-secret session asynchronously. Best-effort — a failure just means
+    # peers fall back to the legacy bootstrap until the bundle is published.
+    asyncio.run(_publish_prekeys_async(identity, prekeys, _relay_http(relay)))
+
+
+async def _publish_prekeys_async(
+    identity: Identity, prekeys: Any, http_base: str
+) -> None:
+    import httpx
+
+    addr = identity.scan_keypair.public_b58()
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                f"{http_base}/prekeys/{addr}",
+                json=prekeys.publish_payload(identity),
+                timeout=10.0,
+            )
+            resp.raise_for_status()
+    except httpx.HTTPError as exc:
+        console.print(
+            f"[yellow]⚠ Could not publish prekey bundle:[/yellow] {exc}\n"
+            "[dim]Peers will fall back to the legacy bootstrap until you publish. "
+            "Re-run [bold]drift prekeys --publish[/bold] against a reachable relay.[/dim]"
+        )
+        return
+    console.print(
+        f"[green]✓[/green] [dim]Published your X3DH prekey bundle "
+        f"({prekeys.one_time_count()} one-time prekeys) — contacts get full forward "
+        "secrecy from the very first message.[/dim]"
+    )
 
 
 @app.command()
@@ -300,6 +343,73 @@ def whoami() -> None:
     # (80 when piped), and a ~95-char contact code would gain a newline mid-token
     # — corrupting it for copy-paste / capture. The code must come out as one line.
     print(_my_contact_code(identity))
+
+
+@app.command()
+def prekeys(
+    relay: str = typer.Option("ws://localhost:8765", "--relay", help="Relay URL"),
+    publish: bool = typer.Option(
+        False, "--publish", help="Re-publish your bundle (and replenish if low)"
+    ),
+) -> None:
+    """
+    Show your X3DH prekey status, or re-publish your bundle with ``--publish``.
+
+    Prekeys let contacts open a forward-secret session with you asynchronously
+    (audit H3). The signed prekey rotates weekly; one-time prekeys are consumed
+    one per new session and replenished as they run low.
+    """
+    import time as _time
+
+    identity = _require_identity()
+    # Lazily provision/maintain (generate on first use, rotate, replenish).
+    privates = storage.ensure_prekeys(identity)
+
+    if publish:
+        asyncio.run(_publish_prekeys_async(identity, privates, _relay_http(relay)))
+        return
+
+    now = _time.time()
+    remaining = privates.signed_prekey_created + x3dh.SIGNED_PREKEY_LIFETIME - now
+    if remaining > 0:
+        days, rem = divmod(int(remaining), 86400)
+        hours = rem // 3600
+        spk = f"valid (rotates in {days}d {hours}h)"
+    else:
+        spk = "due for rotation — run [bold]drift prekeys --publish[/bold]"
+
+    status = asyncio.run(_prekey_status_async(identity, _relay_http(relay)))
+    if status is None:
+        otpk = "[yellow]not published[/yellow] (run [bold]drift prekeys --publish[/bold])"
+    else:
+        otpk = f"{status.get('one_time_count', 0)} remaining on relay"
+    last = _time.strftime("%Y-%m-%d %H:%M UTC", _time.gmtime(privates.last_replenished))
+
+    console.print()
+    console.print("[bold]X3DH prekeys[/bold]")
+    console.print(f"  Signed prekey:     {spk}")
+    console.print(f"  One-time prekeys:  {otpk}")
+    console.print(f"  Last replenished:  {last}")
+    console.print(f"  Local unconsumed:  {privates.one_time_count()}")
+    console.print()
+
+
+async def _prekey_status_async(identity: Identity, http_base: str) -> dict[str, Any] | None:
+    import httpx
+
+    addr = identity.scan_keypair.public_b58()
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(f"{http_base}/prekeys/{addr}/status", timeout=10.0)
+    except httpx.HTTPError:
+        return None
+    if resp.status_code != 200:
+        return None
+    try:
+        data: dict[str, Any] = resp.json()
+    except ValueError:
+        return None
+    return data
 
 
 @app.command()
@@ -1172,6 +1282,10 @@ def chat(
     # FMD (audit M4): if the privacy dial is on, subscribe to the relay with our
     # detection key so it pre-filters our mail. None → classic full scanning.
     fmd_key = _local_fmd_key(identity)
+    # X3DH (audit H3): load (and maintain) our persisted prekey privates so 1:1
+    # sessions can complete an incoming handshake. Groups/rooms stay on the
+    # legacy bootstrap, so they don't need them.
+    prekeys = storage.ensure_prekeys(identity)
 
     if no_tui:
         if name is None:
@@ -1195,6 +1309,7 @@ def chat(
                 _chat_async(
                     name, identity, saved[name]["code"], relay,
                     use_tor=use_tor, tor_only=tor_only, fmd_key=fmd_key,
+                    prekeys=prekeys,
                 )
             )
         if not ok:
@@ -1208,7 +1323,7 @@ def chat(
         group=group,
         rooms=dict(saved_rooms),
         room=room,
-        use_tor=use_tor, tor_required=tor_only, fmd_key=fmd_key,
+        use_tor=use_tor, tor_required=tor_only, fmd_key=fmd_key, prekeys=prekeys,
     ).run()
 
 
@@ -1231,6 +1346,7 @@ async def _chat_async(
     use_tor: bool = True,
     tor_only: bool = False,
     fmd_key: Any = None,
+    prekeys: Any = None,
 ) -> bool:
     """
     Headless chat loop. Returns True on a clean run, False if it could not start
@@ -1247,7 +1363,8 @@ async def _chat_async(
     console.print(f"[dim]Connecting to {relay_url} …[/dim]")
     try:
         async with Session(
-            identity, contact_code, relay_url, tor_client=tor_client, fmd_key=fmd_key
+            identity, contact_code, relay_url,
+            tor_client=tor_client, fmd_key=fmd_key, prekeys=prekeys,
         ) as session:
             console.print(
                 f"[green]Connected.[/green] Chatting with [bold]{name}[/bold]. "

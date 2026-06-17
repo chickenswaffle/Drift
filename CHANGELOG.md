@@ -11,6 +11,59 @@ DRIFT uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.14.0] — 2026-06-17
+
+**X3DH asynchronous key agreement — closes the H3 audit residual, retires the
+deterministic ratchet bootstrap.** The opening burst of every conversation is now
+forward-secret against a *full* later key compromise (previously only the sender's
+key was protected): the recipient publishes one-time prekeys it deletes after a
+single use, so the very first message's keys can't be reconstructed once that
+prekey is gone.
+
+### Added — crypto (`drift/crypto/x3dh.py`)
+- **`PreKeyBundle` / `PreKeyPrivates`** — the publishable bundle (Ed25519 identity
+  key, X25519 spend pub, signed prekey + signature, one-time prekeys) and its
+  vault-sealed private halves, with rotation (weekly signed prekey, 24h previous
+  grace) and replenishment (top up when fewer than 3 one-time prekeys remain).
+- **`x3dh_send` / `x3dh_receive` / `verify_prekey_bundle`** — the Signal X3DH
+  handshake to spec: `DH1..DH4`, `master = HKDF(F ‖ DH…)`, the sender's ephemeral
+  discarded immediately, the recipient's one-time prekey consumed once. Ed25519,
+  X25519 and HKDF all from `cryptography` (the Ed25519 key loaded from the
+  identity's existing signing seed, so there is still one identity key).
+
+### Added — relay (`relay/server.py`)
+- **`POST/GET /prekeys/{addr}`, `/replenish`, `/status`** — publish a bundle, fetch
+  it while **atomically consuming one one-time prekey** (null when exhausted —
+  weaker but valid X3DH), top up, and a non-consuming status. Bundles expire after
+  30 days. The relay stores only public keys and learns nothing about content.
+
+### Added — CLI (`drift/cli.py`)
+- **`drift init`** now generates and publishes a prekey bundle (best-effort, with
+  `--relay`); **`drift prekeys`** shows signed-prekey validity, one-time prekeys
+  remaining on the relay, and last-replenished time (`--publish` to re-upload).
+
+### Changed — session bootstrap (`drift/transport/session.py`)
+- The 1:1 bootstrap runs X3DH when the peer has published a bundle: the initiator
+  fetches and verifies it, runs the handshake, and seeds the Double Ratchet on the
+  recipient's signed prekey; the X3DH header rides sealed inside opening-chain
+  envelopes. The X3DH-receive path is **transactional** — a one-time prekey is
+  burned and the ratchet swapped only after the bootstrap message authenticates,
+  preserving the H1 anti-corruption guarantee.
+- **Graceful degradation:** with no bundle on the relay (old client / expired) the
+  sender falls back to the legacy deterministic bootstrap and the UI shows a
+  one-time amber `⚠ legacy bootstrap` warning in the crypto ticker. Group and room
+  sessions stay on the legacy bootstrap.
+
+### Storage
+- Prekey privates are sealed in the duress vault alongside the identity/contacts
+  and shredded on lock/decoy/wipe (the H4 pattern).
+
+### Docs
+- `DESIGN.md` §4 rewritten around X3DH; `docs/audit-2026-06.md` records the H3
+  residual as closed; `AGENTS.md` moves X3DH from backlog to complete.
+
+---
+
 ## [0.12.0] — 2026-06-16
 
 **Phase 10 — WITNESS: live cryptographic proof of relay blindness.** DRIFT's

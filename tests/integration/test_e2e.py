@@ -67,6 +67,7 @@ async def relay_url() -> str:  # type: ignore[misc]
     """
     relay_module._recent.clear()
     relay_module._subscribers.clear()
+    relay_module._prekeys.clear()
 
     port = _free_port()
     config = uvicorn.Config(relay_app, host="127.0.0.1", port=port, log_level="error")
@@ -241,6 +242,56 @@ async def test_replayed_envelope_is_deduped_not_double_delivered(relay_url: str)
         # The duplicate must NOT yield a second message or raise.
         with pytest.raises(asyncio.TimeoutError):
             await asyncio.wait_for(bob_msgs.__anext__(), timeout=1.5)
+
+
+# ---------------------------------------------------------------------------
+# X3DH bootstrap (audit H3) — prekeys + one-time-prekey consumption
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_x3dh_bootstrap_consumes_one_time_prekey(relay_url: str) -> None:
+    """Bob publishes a prekey bundle on connect; when Alice opens the chat she
+    fetches it, runs X3DH, and the relay atomically consumes one OTPK."""
+    alice, bob = _alice_and_bob()
+    addr = bob.scan_keypair.public_b58()
+
+    async with Session(bob, alice.contact_code(), relay_url) as bob_session:
+        # Bob's bundle is published with the full batch of one-time prekeys.
+        assert len(relay_module._prekeys[addr]["one_time"]) == 10
+
+        async with Session(alice, bob.contact_code(), relay_url) as alice_session:
+            await alice_session.send("x3dh hello")
+            got = await asyncio.wait_for(
+                bob_session.messages().__anext__(), timeout=5.0
+            )
+            assert got == "x3dh hello"
+
+        # Alice's first send fetched the bundle, consuming exactly one OTPK.
+        assert len(relay_module._prekeys[addr]["one_time"]) == 9
+
+
+@pytest.mark.asyncio
+async def test_legacy_fallback_when_peer_has_no_bundle(relay_url: str) -> None:
+    """If the relay has no prekey bundle for the contact (old client / not yet
+    published), the sender falls back to the legacy deterministic bootstrap with a
+    one-time amber warning — and the message still decrypts end to end."""
+    alice, bob = _alice_and_bob()
+    events: list[tuple[str, str]] = []
+
+    async with Session(
+        alice, bob.contact_code(), relay_url,
+        on_event=lambda k, d: events.append((k, d)),
+    ) as alice_session:
+        # Bob never connected, so no bundle for him exists on the relay.
+        await alice_session.send("legacy hello")
+        assert any(kind == "legacy" for kind, _ in events)
+
+        async with Session(bob, alice.contact_code(), relay_url) as bob_session:
+            got = await asyncio.wait_for(
+                bob_session.messages().__anext__(), timeout=5.0
+            )
+            assert got == "legacy hello"
 
 
 # ---------------------------------------------------------------------------

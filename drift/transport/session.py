@@ -14,35 +14,36 @@ So a sent message now carries three things in its envelope:
   - a Double Ratchet header                            (key schedule — Phase 2)
   - the ratchet-encrypted ciphertext                   (the content)
 
-Ratchet bootstrap
------------------
+Ratchet bootstrap — X3DH (audit H3)
+-----------------------------------
 The ratchet needs a shared root secret and an initial responder ratchet key.
-We derive both deterministically so no extra handshake round-trip is needed:
+Both peers publish a **prekey bundle** to the relay ahead of time (a signed
+prekey + a batch of one-time prekeys — see ``drift.crypto.x3dh``). Whoever sends
+first fetches the peer's bundle, runs X3DH, and promotes itself to initiator with
+``init_sender`` keyed on the peer's *signed prekey*; the X3DH header rides sealed
+inside the opening-chain envelopes so the responder derives the same master
+secret and bootstraps with ``init_receiver``. The one-time prekey is consumed and
+deleted after a single use, so a later compromise of the recipient's long-term
+spend key cannot decrypt a past opening burst — closing the H3 residual.
 
-  - root secret      = HKDF(ECDH(my_spend, their_spend))
-  - responder's key  = HKDF(same ECDH) → a deterministic X25519 keypair both
-                       sides can reconstruct
+Every key after the first DH ratchet step is freshly random regardless of how the
+session was bootstrapped (see ratchet.py).
 
-Who sends first is the initiator
---------------------------------
-Both peers bootstrap as *receivers* holding that shared deterministic responder
-keypair. Whoever sends the first message lazily promotes itself to initiator at
-that moment (``init_sender`` against the deterministic responder key); the peer
-turns its DH ratchet on receipt, exactly as in the normal flow. This is the only
-deterministic key material; every key after the first DH ratchet step is freshly
-random (see ratchet.py).
-
-We previously fixed the initiator role by comparing static spend keys (lower =
-initiator). That decoupled "who may speak first" from "who actually opens the
-chat", so ~half of real conversations could not start — the first sender, if it
-was the key-order responder, hit ``RatchetError: no sending chain yet``. Lazy
-promotion ties the role to who actually speaks first instead.
+Legacy fallback
+---------------
+If the peer published no bundle (an old client, or it expired), the sender falls
+back to the previous **deterministic** bootstrap — ``root = HKDF(ECDH(my_spend,
+their_spend))`` with a deterministic responder keypair, plus a fresh discarded
+forward-secrecy ephemeral folded in (the earlier, sender-side-only H3 fix). The
+UI surfaces a one-time amber warning when this happens. Whoever speaks first is
+still the initiator either way; lazy promotion ties the ratchet role to who
+actually opens the chat.
 
 Known limitation: if both peers send their very first message before either has
-received the other's, they each promote independently and the two ratchets do
-not line up — the mismatched message surfaces as ``InvalidTag`` (a clean reject,
-never silent corruption). A production build resolves this with an X3DH prekey
-exchange (Phase 3); for now the common one-sided open works correctly.
+fetched the other's bundle (and the bundles aren't yet published), they may each
+promote independently and the two ratchets not line up — the mismatched message
+surfaces as ``InvalidTag`` (a clean reject, never silent corruption). The common
+one-sided open works correctly.
 """
 
 from __future__ import annotations
@@ -56,7 +57,7 @@ from dataclasses import dataclass
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
-from drift.crypto import Identity, Keypair, derive_message_key, groups
+from drift.crypto import Identity, Keypair, b58encode, derive_message_key, groups
 from drift.crypto.burn import generate_burn_token, verify_burn_token
 from drift.crypto.fmd import FMDKeypair, fmd_flag
 from drift.crypto.groups import ContactInfo, GroupState, MembershipChange
@@ -73,7 +74,16 @@ from drift.crypto.sealed import open_header as open_sender_header
 from drift.crypto.sealed import parse as parse_sender
 from drift.crypto.sealed import seal as seal_sender
 from drift.crypto.stealth import derive_one_time_address, scan_for_message
-from drift.transport.client import BurnFrame, Envelope, RelayClient
+from drift.crypto.x3dh import (
+    PreKeyBundle,
+    PreKeyPrivates,
+    X3DHError,
+    X3DHHeader,
+    derive_master_secret_recv,
+    verify_prekey_bundle,
+    x3dh_send,
+)
+from drift.transport.client import BurnFrame, Envelope, RelayClient, RelayError
 from drift.transport.tor import TorClient
 
 logger = logging.getLogger("drift.transport.session")
@@ -94,41 +104,64 @@ def _keypair_from_private(private_bytes: bytes) -> Keypair:
     return Keypair(private_key=priv, public_key=priv.public_key())
 
 
-# Inner sealed-payload framing (audit H3). The bytes sealed under the per-message
-# stealth key are normally just the 40-byte ratchet header. On the initiator's
-# *bootstrap* sending chain — every message it sends before the peer's first
-# reply — they are prefixed with a fresh forward-secrecy ephemeral public key
-# (32 bytes). A one-byte flag distinguishes the two layouts, so even a reordered
-# bootstrap message still carries the ephemeral the responder needs.
+# Inner sealed-payload framing. The bytes sealed under the per-message stealth
+# key are normally just the 40-byte ratchet header. On the initiator's *bootstrap*
+# sending chain — every message it sends before the peer's first reply — they are
+# prefixed with handshake material so a reordered bootstrap message still carries
+# what the responder needs. A one-byte flag distinguishes three layouts:
+#
+#   0  header only                         (post-bootstrap, the steady state)
+#   1  FS ephemeral pub (32) || header     (legacy deterministic bootstrap, H3)
+#   2  X3DH header (73) || header          (X3DH bootstrap — the new default)
+#
+# Flag 1 is the legacy fallback kept for peers that published no prekey bundle;
+# flag 2 carries the X3DH handshake header (drift.crypto.x3dh.X3DHHeader) so the
+# responder can derive the same master secret without an extra round trip.
 _FS_FLAG_ABSENT = 0
 _FS_FLAG_PRESENT = 1
+_FS_FLAG_X3DH = 2
 _FS_PUB_LEN = 32
+# len(X3DHHeader.to_bytes()) = ik_a(32) + ek_a(32) + spk_id(4) + flag(1) + otpk_id(4)
+_X3DH_HEADER_LEN = 2 * 32 + 4 + 1 + 4
 
 
-def _pack_inner(header_bytes: bytes, fs_pub: bytes | None) -> bytes:
-    """Frame the ratchet header (+ optional bootstrap FS ephemeral) for sealing."""
-    if fs_pub is None:
-        return bytes([_FS_FLAG_ABSENT]) + header_bytes
-    return bytes([_FS_FLAG_PRESENT]) + fs_pub + header_bytes
+def _pack_inner(
+    header_bytes: bytes,
+    *,
+    fs_pub: bytes | None = None,
+    x3dh_header: bytes | None = None,
+) -> bytes:
+    """Frame the ratchet header (+ optional bootstrap handshake material)."""
+    if x3dh_header is not None:
+        return bytes([_FS_FLAG_X3DH]) + x3dh_header + header_bytes
+    if fs_pub is not None:
+        return bytes([_FS_FLAG_PRESENT]) + fs_pub + header_bytes
+    return bytes([_FS_FLAG_ABSENT]) + header_bytes
 
 
-def _unpack_inner(blob: bytes) -> tuple[bytes | None, bytes]:
-    """Split a sealed inner payload into ``(fs_pub_or_None, ratchet_header)``.
+def _unpack_inner(blob: bytes) -> tuple[bytes | None, bytes | None, bytes]:
+    """Split a sealed inner payload into ``(x3dh_header, fs_pub, ratchet_header)``.
 
-    Raises ``ValueError`` on a malformed frame — the caller (which has already
-    unsealed under the stealth key) treats that as a non-well-formed message and
-    skips it, so a forged but correctly-sealed blob can't crash the receive loop.
+    Exactly one of ``x3dh_header`` / ``fs_pub`` is non-None on a bootstrap-chain
+    message; both are None in the steady state. Raises ``ValueError`` on a
+    malformed frame — the caller (which has already unsealed under the stealth
+    key) treats that as a non-well-formed message and skips it, so a forged but
+    correctly-sealed blob can't crash the receive loop.
     """
     if not blob:
         raise ValueError("empty sealed inner payload")
     flag = blob[0]
+    if flag == _FS_FLAG_X3DH:
+        if len(blob) < 1 + _X3DH_HEADER_LEN:
+            raise ValueError("sealed inner payload too short for X3DH header")
+        return blob[1:1 + _X3DH_HEADER_LEN], None, blob[1 + _X3DH_HEADER_LEN:]
     if flag == _FS_FLAG_PRESENT:
         if len(blob) < 1 + _FS_PUB_LEN:
             raise ValueError("sealed inner payload too short for FS ephemeral")
-        return blob[1:1 + _FS_PUB_LEN], blob[1 + _FS_PUB_LEN:]
+        return None, blob[1:1 + _FS_PUB_LEN], blob[1 + _FS_PUB_LEN:]
     if flag != _FS_FLAG_ABSENT:
         raise ValueError(f"unknown sealed inner-payload flag {flag}")
-    return None, blob[1:]
+    return None, None, blob[1:]
 
 
 def _addr_digest(addr: bytes) -> str:
@@ -160,7 +193,17 @@ class PairwiseRatchet:
     :func:`_scan_and_unseal`.
     """
 
-    def __init__(self, identity: Identity, contact_code: str) -> None:
+    def __init__(
+        self,
+        identity: Identity,
+        contact_code: str,
+        prekey_privates: PreKeyPrivates | None = None,
+    ) -> None:
+        self._identity = identity
+        # Our own prekey privates (X3DH, audit H3) — used on the *responder* side
+        # to complete an incoming handshake. None for group channels, which never
+        # take the X3DH path (group senders publish no bundle).
+        self._prekey_privates = prekey_privates
         self._their_scan_pub, self._their_spend_pub = Identity.parse_contact_code(
             contact_code
         )
@@ -169,8 +212,10 @@ class PairwiseRatchet:
         # FMD-off behaviour is byte-for-byte unchanged (audit M4).
         self._fmd_pub = Identity.parse_fmd_pubs(contact_code)
         static_ecdh = identity.spend_keypair.ecdh(self._their_spend_pub)
-        # Both peers reconstruct identical bootstrap material from the static
-        # keys, so whoever speaks first can promote itself to initiator on demand.
+        # Legacy deterministic bootstrap material, kept as the *fallback* for a
+        # peer who has published no prekey bundle (old client / bundle expired).
+        # Both peers reconstruct identical material from the static keys, so
+        # whoever speaks first can promote itself to initiator on demand.
         self._root_secret = derive_message_key(static_ecdh, info=b"drift-ratchet-v1-root")
         self._responder_keypair = _keypair_from_private(
             derive_message_key(static_ecdh, info=b"drift-ratchet-v1-responder")
@@ -178,10 +223,21 @@ class PairwiseRatchet:
         # Raw ECDH output, base material for burn tokens (domain-separated by the
         # burn module's own HKDF). Kept so the owner can issue burns.
         self._burn_shared = static_ecdh
-        # Public half of the bootstrap forward-secrecy ephemeral (audit H3); set
-        # on promotion, carried on every opening-chain message. Private half is
-        # generated and discarded inside _promote_to_initiator.
+        # --- X3DH initiator state ----------------------------------------
+        # The peer's fetched prekey bundle (set by the session before first send);
+        # ``_peer_bundle_fetched`` records that the one-shot fetch has happened, so
+        # a 404 (→ legacy fallback) isn't retried every message.
+        self._peer_bundle: PreKeyBundle | None = None
+        self._peer_bundle_fetched = False
+        # The X3DH handshake header to attach to every bootstrap-chain message
+        # (set on X3DH promotion); the analogue of ``_fs_send_pub`` for the legacy
+        # path. Exactly one of the two is set, depending on which bootstrap ran.
+        self._x3dh_send_header: X3DHHeader | None = None
         self._fs_send_pub: bytes | None = None
+        # The peer ratchet key our bootstrap chain points at — the responder's
+        # signed prekey under X3DH, or the deterministic responder key under
+        # legacy. Used to tell whether we're still on the bootstrap chain.
+        self._bootstrap_their_pub: bytes | None = None
         self._ratchet = init_receiver(self._root_secret, self._responder_keypair)
         self._last_sent_addr: bytes | None = None
 
@@ -201,18 +257,54 @@ class PairwiseRatchet:
     def recv_count(self) -> int:
         return self._ratchet.recv_count
 
+    @property
+    def their_scan_b58(self) -> str:
+        """The peer's base58 scan key — the relay's prekey index for this peer."""
+        return b58encode(self._their_scan_pub)
+
+    def is_bootstrapped(self) -> bool:
+        """True once we have a sending chain (we promoted) — used to gate the
+        one-shot peer-bundle fetch."""
+        return self._ratchet.sending_chain_key is not None
+
+    def needs_peer_bundle(self) -> bool:
+        """True before our first send and before the one-shot bundle fetch — the
+        session should fetch the peer's bundle and call :meth:`set_peer_bundle`."""
+        return not self._peer_bundle_fetched and not self.is_bootstrapped()
+
+    def set_peer_bundle(self, bundle: PreKeyBundle | None) -> None:
+        """Record the peer's prekey bundle (or ``None`` → legacy fallback). The
+        session fetches it once before the first send."""
+        self._peer_bundle = bundle
+        self._peer_bundle_fetched = True
+
+    def used_legacy_bootstrap(self) -> bool:
+        """True when we promoted via the legacy deterministic bootstrap (the peer
+        had no prekey bundle) — the session surfaces a one-time warning."""
+        return self.is_bootstrapped() and self._x3dh_send_header is None
+
     def _promote_to_initiator(self) -> None:
-        """Promote receiver → initiator on first send (see Session's docstring,
-        audit H3). Folds a fresh, immediately-discarded forward-secrecy ephemeral
-        into the bootstrap root so the opening burst is forward-secret against our
-        own later key theft."""
+        """Promote receiver → initiator on first send. Prefers X3DH when the peer
+        published a (verified) prekey bundle, closing the H3 recipient-side
+        residual; otherwise falls back to the legacy deterministic bootstrap with a
+        fresh, immediately-discarded forward-secrecy ephemeral (H3 sender side)."""
+        if self._peer_bundle is not None and verify_prekey_bundle(self._peer_bundle):
+            result, header = x3dh_send(self._identity, self._peer_bundle)
+            # The responder's signed prekey is its initial DH ratchet key.
+            self._bootstrap_their_pub = self._peer_bundle.signed_prekey
+            self._x3dh_send_header = header
+            self._ratchet = init_sender(result.master_secret, self._bootstrap_their_pub)
+            # result/EK_A private already discarded inside x3dh_send.
+            return
+        # Legacy fallback: deterministic root + a discarded FS ephemeral (H3).
         fs_ephemeral = Keypair.generate()
         fs_secret = fs_ephemeral.ecdh(self._their_spend_pub)
         fs_root = derive_message_key(
             fs_secret, salt=self._root_secret, info=FS_BOOTSTRAP_INFO
         )
         self._fs_send_pub = fs_ephemeral.public_bytes()
-        self._ratchet = init_sender(fs_root, self._responder_keypair.public_bytes())
+        self._bootstrap_their_pub = self._responder_keypair.public_bytes()
+        self._ratchet = init_sender(fs_root, self._bootstrap_their_pub)
         # fs_ephemeral (private) and fs_secret fall out of scope and are never kept.
 
     def encrypt(self, plaintext: bytes) -> tuple[bytes, bytes, bytes | None]:
@@ -225,14 +317,21 @@ class PairwiseRatchet:
         if self._ratchet.sending_chain_key is None:
             self._promote_to_initiator()
         header, ciphertext = ratchet_encrypt(self._ratchet, plaintext)
-        # Carry the bootstrap FS ephemeral on every opening-chain message — i.e.
-        # while our ratchet still points at the deterministic responder key.
-        fs_pub = (
-            self._fs_send_pub
-            if self._ratchet.their_ratchet_pub == self._responder_keypair.public_bytes()
+        # While our ratchet still points at the bootstrap peer key, carry the
+        # handshake material so a reordered opening message still bootstraps the
+        # responder: the X3DH header (preferred) or the legacy FS ephemeral.
+        on_bootstrap_chain = self._ratchet.their_ratchet_pub == self._bootstrap_their_pub
+        x3dh_bytes = (
+            self._x3dh_send_header.to_bytes()
+            if on_bootstrap_chain and self._x3dh_send_header is not None
             else None
         )
-        inner = _pack_inner(header.to_bytes(), fs_pub)
+        fs_pub = (
+            self._fs_send_pub
+            if on_bootstrap_chain and self._x3dh_send_header is None
+            else None
+        )
+        inner = _pack_inner(header.to_bytes(), fs_pub=fs_pub, x3dh_header=x3dh_bytes)
         ephemeral = Keypair.generate()
         one_time_addr, stealth_key = derive_one_time_address(
             ephemeral.private_bytes(), self._their_scan_pub, self._their_spend_pub
@@ -246,6 +345,40 @@ class PairwiseRatchet:
         # advertised a detection key.
         flag = fmd_flag(one_time_addr, self._fmd_pub) if self._fmd_pub else None
         return one_time_addr, sealed_blob, flag
+
+    def x3dh_bootstrap_decrypt(
+        self, x3dh_header: X3DHHeader, header: Header, ratchet_ct: bytes
+    ) -> bytes:
+        """Responder side of the X3DH handshake (audit H3).
+
+        If we are already bootstrapped (a later bootstrap-chain message, or one
+        reordered after another already established the session), the X3DH header
+        is redundant — decrypt normally.
+
+        Otherwise complete the handshake **transactionally**: derive the master
+        secret, build a *trial* receiver keyed on our signed prekey, and only on a
+        successful (authenticated) decrypt commit it and consume the one-time
+        prekey. A forged bootstrap therefore can neither burn an OTPK nor disturb
+        our state — the same H1 guarantee ``ratchet_decrypt`` already provides.
+        ``InvalidTag`` (genuine tamper of a message addressed to us) propagates.
+        """
+        if self._prekey_privates is None:
+            raise RatchetError("no prekey privates — cannot complete X3DH handshake")
+        if self._ratchet.their_ratchet_pub is not None:
+            return ratchet_decrypt(self._ratchet, header, ratchet_ct)
+        master = derive_master_secret_recv(
+            self._identity, self._prekey_privates, x3dh_header
+        )
+        signed_prekey = self._prekey_privates.signed_prekey_private(
+            x3dh_header.signed_prekey_id
+        )
+        trial = init_receiver(master, signed_prekey)
+        plaintext = ratchet_decrypt(trial, header, ratchet_ct)  # raises on forgery
+        # Authenticated → commit the bootstrapped ratchet and burn the OTPK.
+        self._ratchet = trial
+        if x3dh_header.one_time_prekey_id is not None:
+            self._prekey_privates.consume(x3dh_header.one_time_prekey_id)
+        return plaintext
 
     def decrypt_ratchet(
         self, header: Header, ratchet_ct: bytes, root_mix: bytes | None
@@ -275,12 +408,14 @@ class PairwiseRatchet:
 
 def _scan_and_unseal(
     envelope: Envelope, my_scan_priv: bytes, my_spend_pub: bytes
-) -> tuple[bytes | None, Header, bytes] | None:
+) -> tuple[X3DHHeader | None, bytes | None, Header, bytes] | None:
     """
     Identity-level receive parsing shared by Session and GroupSession.
 
-    Returns ``(fs_pub, header, ratchet_ct)`` when ``envelope`` is a well-formed
-    stealth message addressed to *us*, else ``None`` (not ours / malformed).
+    Returns ``(x3dh_header, fs_pub, header, ratchet_ct)`` when ``envelope`` is a
+    well-formed stealth message addressed to *us*, else ``None`` (not ours /
+    malformed). At most one of ``x3dh_header`` / ``fs_pub`` is set, on a
+    bootstrap-chain message (X3DH vs legacy); both are None in the steady state.
 
     A scan match means the message really is addressed to us (the stealth address
     is bound to our scan + spend keys), so unsealing its header authenticates it:
@@ -304,11 +439,12 @@ def _scan_and_unseal(
         stealth_key, sealed_header, address=envelope.one_time_addr
     )
     try:
-        fs_pub, header_bytes = _unpack_inner(inner_bytes)
+        x3dh_bytes, fs_pub, header_bytes = _unpack_inner(inner_bytes)
+        x3dh_header = X3DHHeader.from_bytes(x3dh_bytes) if x3dh_bytes is not None else None
         header = Header.from_bytes(header_bytes)
-    except ValueError:
+    except (ValueError, X3DHError):
         return None  # malformed inner payload — skip (forged or corrupt)
-    return fs_pub, header, ratchet_ct
+    return x3dh_header, fs_pub, header, ratchet_ct
 
 
 class Session:
@@ -338,6 +474,7 @@ class Session:
         on_burn: BurnHook | None = None,
         tor_client: TorClient | None = None,
         fmd_key: FMDKeypair | None = None,
+        prekeys: PreKeyPrivates | None = None,
     ) -> None:
         # Optional sink for observable (non-secret) transport events; the UI
         # passes a callback that re-emits them as typed messages. Never carries
@@ -345,6 +482,7 @@ class Session:
         self._on_event = on_event
         # Optional callback for verified burn tombstones from the relay.
         self._on_burn = on_burn
+        self._identity = identity
         # Phase 3: when a Tor circuit is supplied the session stays oblivious to
         # it — it only forwards the SOCKS5 endpoint to the transport, which dials
         # through it. The E2E crypto above is unchanged: Tor carries ciphertext
@@ -359,10 +497,24 @@ class Session:
         # forward-secrecy ephemeral secret on receipt (audit H3).
         self._my_spend_priv = identity.spend_keypair.private_bytes()
 
-        # All per-peer crypto — the Double Ratchet, its deterministic bootstrap
-        # material, the peer's public keys and the sealed-sender framing — lives
-        # in one PairwiseRatchet (shared, identical code, with GroupSession).
-        self._channel = PairwiseRatchet(identity, contact_code)
+        # X3DH prekeys (audit H3): the private halves of our published bundle,
+        # used to complete an incoming handshake on the *responder* side. The CLI
+        # passes a persisted (vault-sealed) store via ``storage.ensure_prekeys``;
+        # if none is supplied we generate a fresh session-scoped bundle and publish
+        # it on connect. ``_prekey_bundle_published`` gates the one-shot publish.
+        if prekeys is None:
+            from drift.crypto.x3dh import generate_prekey_bundle
+            _, prekeys = generate_prekey_bundle(identity)
+        self._prekeys = prekeys
+        self._prekey_bundle_published = False
+
+        # All per-peer crypto — the Double Ratchet, its bootstrap material (X3DH
+        # plus the legacy deterministic fallback), the peer's public keys and the
+        # sealed-sender framing — lives in one PairwiseRatchet (shared, identical
+        # code, with GroupSession).
+        self._channel = PairwiseRatchet(identity, contact_code, prekeys)
+        # Fires once if we fall back to the legacy bootstrap (peer had no bundle).
+        self._legacy_warned = False
 
         # The ratchet state is mutated on every send and receive; serialize
         # access so concurrent send/receive tasks can't interleave a mutation.
@@ -413,6 +565,50 @@ class Session:
         self._emit("nodes", str(self._client.node_count))
         if self._client.is_onion:
             self._emit("onion", "1")
+        # X3DH (audit H3): publish our prekey bundle so peers can open a
+        # forward-secret session with us asynchronously. Best-effort — a relay
+        # that rejects it just means peers fall back to the legacy bootstrap.
+        await self._publish_prekeys()
+
+    async def _publish_prekeys(self) -> None:
+        """Publish our public prekey bundle to the relay (best-effort, once)."""
+        if self._prekey_bundle_published:
+            return
+        try:
+            await self._client.publish_prekey_bundle(
+                self._identity.scan_keypair.public_b58(),
+                self._prekeys.publish_payload(self._identity),
+            )
+            self._prekey_bundle_published = True
+            self._emit("prekeys", f"bundle published · {self._prekeys.one_time_count()} OTPKs")
+        except RelayError as exc:
+            logger.debug("prekey publish failed (non-fatal): %s", exc)
+
+    async def _ensure_peer_bundle(self) -> None:
+        """Fetch the peer's prekey bundle once before our first send. On a 404 /
+        verification failure we fall back to the legacy deterministic bootstrap
+        and surface a one-time amber warning."""
+        bundle: PreKeyBundle | None = None
+        try:
+            data = await self._client.fetch_prekey_bundle(self._channel.their_scan_b58)
+        except RelayError as exc:
+            logger.debug("prekey fetch failed (legacy fallback): %s", exc)
+            data = None
+        if data is not None:
+            try:
+                candidate = PreKeyBundle.from_dict(data)
+                if verify_prekey_bundle(candidate):
+                    bundle = candidate
+            except X3DHError as exc:
+                logger.debug("peer prekey bundle malformed (legacy fallback): %s", exc)
+        self._channel.set_peer_bundle(bundle)
+        if bundle is None and not self._legacy_warned:
+            self._legacy_warned = True
+            self._emit(
+                "legacy",
+                "⚠ Contact has no prekey bundle — using legacy bootstrap "
+                "(reduced forward secrecy for opening messages)",
+            )
 
     @property
     def node_count(self) -> int:
@@ -453,6 +649,12 @@ class Session:
         are sealed into one opaque blob, so the only metadata the relay sees is
         the recipient's one-time address.
         """
+        # Before our first send, fetch the peer's prekey bundle so the channel can
+        # promote via X3DH (or fall back to the legacy bootstrap on a 404). Done
+        # outside the ratchet lock — it is network I/O that touches no ratchet
+        # state; the channel only consults the cached bundle inside encrypt().
+        if self._channel.needs_peer_bundle():
+            await self._ensure_peer_bundle()
         async with self._lock:
             # The channel promotes to initiator on first send, ratchet-encrypts,
             # seals and stealth-addresses — all the per-peer crypto in one place.
@@ -523,19 +725,27 @@ class Session:
             self._seen_addrs.add(item.one_time_addr)
             self._emit("recv", _addr_digest(item.one_time_addr))
 
-            fs_pub, header, ratchet_ct = parsed
-            # Bootstrap forward-secrecy secret (audit H3): recovered from the
-            # ephemeral's public half. ratchet_decrypt applies it only before our
-            # first DH ratchet, on a trial state that rolls back on failure.
-            root_mix = (
-                _keypair_from_private(self._my_spend_priv).ecdh(fs_pub)
-                if fs_pub is not None
-                else None
-            )
+            x3dh_header, fs_pub, header, ratchet_ct = parsed
             async with self._lock:
                 # 1:1: the peer is unambiguous, so an auth failure here is tamper —
-                # decrypt_ratchet lets InvalidTag propagate.
-                plaintext = self._channel.decrypt_ratchet(header, ratchet_ct, root_mix)
+                # both decrypt paths let InvalidTag propagate.
+                if x3dh_header is not None:
+                    # X3DH bootstrap (audit H3): complete the handshake on receipt;
+                    # transactional, so a forged bootstrap can't burn an OTPK.
+                    plaintext = self._channel.x3dh_bootstrap_decrypt(
+                        x3dh_header, header, ratchet_ct
+                    )
+                else:
+                    # Legacy bootstrap forward-secrecy secret (audit H3): recovered
+                    # from the ephemeral's public half. ratchet_decrypt applies it
+                    # only before our first DH ratchet, on a trial state that rolls
+                    # back on failure. None for steady-state messages.
+                    root_mix = (
+                        _keypair_from_private(self._my_spend_priv).ecdh(fs_pub)
+                        if fs_pub is not None
+                        else None
+                    )
+                    plaintext = self._channel.decrypt_ratchet(header, ratchet_ct, root_mix)
                 self._emit("ratchet", f"receiving chain step · msg #{self._channel.recv_count}")
             self._emit("erase", "message key erased")
             yield plaintext.decode()
@@ -794,7 +1004,11 @@ class GroupSession:
             if item.one_time_addr in self._seen_addrs:
                 continue
             self._seen_addrs.add(item.one_time_addr)
-            fs_pub, header, ratchet_ct = parsed
+            # Groups stay on the legacy deterministic bootstrap — members publish
+            # no prekey bundle — so group traffic never carries an X3DH header
+            # (``x3dh_header`` is always None here). Only the legacy FS-ephemeral
+            # ``root_mix`` path applies.
+            _x3dh_header, fs_pub, header, ratchet_ct = parsed
             root_mix = (
                 _keypair_from_private(self._my_spend_priv).ecdh(fs_pub)
                 if fs_pub is not None

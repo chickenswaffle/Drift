@@ -858,6 +858,8 @@ class CryptoTicker(Static):
         "burn": ("🔥", _WN),
         "tor": ("⬡", _S),
         "sealed": ("✉", _S),
+        "prekeys": ("🔑", _S),
+        "legacy": ("⚠", "#ffaa00"),  # amber: X3DH unavailable, legacy bootstrap
     }
 
     def on_mount(self) -> None:
@@ -877,6 +879,10 @@ class CryptoTicker(Static):
             body = f"tor {detail}"
         elif kind == "sealed":
             body = detail
+        elif kind == "prekeys":
+            body = detail
+        elif kind == "legacy":
+            body = "legacy bootstrap — contact has no prekey bundle"
         else:  # ratchet
             body = detail
         self.update(f"[#555555]\\[{ts}][/]  [{colour}]{icon} {body}[/]")
@@ -1696,9 +1702,14 @@ class DriftApp(App[None]):
         use_tor: bool = False,
         tor_required: bool = False,
         fmd_key: Any = None,
+        prekeys: Any = None,
     ) -> None:
         super().__init__()
         self._identity = identity
+        # X3DH prekey privates (audit H3): the persisted, vault-sealed store, used
+        # to complete an incoming handshake. None → the Session generates a fresh
+        # session-scoped bundle (used by tests that don't go through storage).
+        self._prekeys = prekeys
         self._contacts: Contacts = contacts
         self._relay_url = relay_url
         # Phase 8: when set, this is a group conversation — the worker drives a
@@ -1936,6 +1947,7 @@ class DriftApp(App[None]):
             on_burn=_burn_cb,
             tor_client=self._tor_client,
             fmd_key=self._fmd_key,
+            prekeys=self._prekeys,
         )
         self._session = session
         try:

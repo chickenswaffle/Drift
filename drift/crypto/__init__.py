@@ -238,6 +238,19 @@ class Identity:
         )
         return derive_fmd_key(seed, n)
 
+    def signing_seed(self) -> bytes:
+        """
+        The 32-byte Ed25519 seed for this identity, derived deterministically
+        from the spend key via a domain-separated HKDF. Both :meth:`signing_key`
+        (PyNaCl, for beacons) and X3DH's signed-prekey signature (``cryptography``
+        Ed25519, loaded from this same seed) reconstruct the *same* RFC 8032
+        keypair from it — so there is exactly one identity signing key regardless
+        of which library consumes the seed.
+        """
+        return derive_message_key(
+            self.spend_keypair.private_bytes(), info=b"drift-identity-sign-v1"
+        )
+
     def signing_key(self) -> SigningKey:
         """
         The identity's Ed25519 signing key (the design doc's "identity_key"
@@ -246,10 +259,7 @@ class Identity:
         on-disk format and the contact code are unchanged, yet every identity
         has a stable signing key for Phase 6 beacons. Same identity → same key.
         """
-        seed = derive_message_key(
-            self.spend_keypair.private_bytes(), info=b"drift-identity-sign-v1"
-        )
-        return SigningKey(seed)
+        return SigningKey(self.signing_seed())
 
     def verify_key_bytes(self) -> bytes:
         """Public half of :meth:`signing_key`, for signature verification."""

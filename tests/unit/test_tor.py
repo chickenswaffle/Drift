@@ -268,6 +268,7 @@ class TestSessionThroughTor:
 
         with patch("drift.transport.session.RelayClient") as relay_cls:
             relay_cls.return_value.connect = AsyncMock()
+            relay_cls.return_value.publish_prekey_bundle = AsyncMock()
             session = Session(
                 me,
                 peer.contact_code(),
@@ -289,6 +290,7 @@ class TestSessionThroughTor:
 
         with patch("drift.transport.session.RelayClient") as relay_cls:
             relay_cls.return_value.connect = AsyncMock()
+            relay_cls.return_value.publish_prekey_bundle = AsyncMock()
             session = Session(
                 me,
                 peer.contact_code(),
