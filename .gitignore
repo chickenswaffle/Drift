@@ -24,8 +24,13 @@ htmlcov/
 # DRIFT — never commit key material
 ~/.config/drift/
 identity.json
+relay_identity.json
 *.key
 *.priv
+
+# DRIFT — relay runtime artifacts
+peers.json
+node_address.txt
 
 # IDE
 .vscode/

@@ -11,8 +11,8 @@
 # DRIFT
 
 [![CI](https://github.com/chickenswaffle/Drift/actions/workflows/ci.yml/badge.svg)](https://github.com/chickenswaffle/Drift/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-v0.11.0-blue)](https://github.com/chickenswaffle/Drift/releases/tag/v0.11.0)
-[![Phase](https://img.shields.io/badge/phase-8%20%E2%80%94%20Group%20messaging-brightgreen)](#project-status)
+[![Version](https://img.shields.io/badge/version-v0.12.0-blue)](https://github.com/chickenswaffle/Drift/releases/tag/v0.12.0)
+[![Phase](https://img.shields.io/badge/phase-10%20%E2%80%94%20WITNESS-brightgreen)](#project-status)
 
 > A terminal-first, end-to-end encrypted messenger with rotating, unlinkable receiving addresses.
 
@@ -48,6 +48,28 @@ Full protocol design: [`DESIGN.md`](DESIGN.md)
 
 ---
 
+## Verifiable privacy
+
+Most messengers ask you to *trust* that the server doesn't log. DRIFT's relays
+let you **verify** it. Every 60 seconds a relay generates and signs a
+hash-chained *blindness certificate* recording what it provably cannot know
+about the traffic it just routed — zero sender identities, zero recipient
+identities, zero readable contents, zero linked conversations. The certificates
+form a tamper-evident transparency log: a relay can't rewrite its past without
+its private key, and it can't silently start logging without breaking a chain
+anyone can watch.
+
+```bash
+drift witness verify ws://localhost:8765      # check a relay's full 24-hour chain
+drift witness subscribe ws://localhost:8765   # live canary — alerts the instant the chain breaks
+```
+
+There's also a plain-English `/cannot-see` page rendering the current
+certificate — the page a surveillance request lands on. Full spec, threat model,
+and how to verify with just `openssl`/`hashlib`: [`docs/witness.md`](docs/witness.md).
+
+---
+
 ## What DRIFT defends against
 
 - Passive network surveillance (ISP, nation-state wire-tapping)
@@ -68,7 +90,7 @@ Being precise here is what separates a serious tool from snake oil.
 
 ## Project status
 
-🧪 **Alpha — Phases 0–6 and 8 complete.** Usable end-to-end, but not yet independently audited; not ready for high-stakes production use.
+🧪 **Alpha — Phases 0–6, 8, and the WITNESS proof layer complete.** Usable end-to-end, but not yet independently audited; not ready for high-stakes production use.
 
 | Phase | Goal | Status |
 |-------|------|--------|
@@ -80,6 +102,7 @@ Being precise here is what separates a serious tool from snake oil.
 | 5 | Panic key (duress passphrase) + FMD privacy dial | ✅ Complete (`v0.8.0`; FMD dial wired end-to-end in `v0.11.0`) |
 | 6 | Beacon — ephemeral discoverable handles | ✅ Complete (`v0.9.0`) |
 | 8 | Group messaging (pairwise ratchets, ≤10 members) | ✅ Complete (`v0.11.0`) |
+| 10 | WITNESS — verifiable proof of relay blindness | ✅ Complete (`v0.12.0`) |
 
 ---
 

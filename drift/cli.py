@@ -8,6 +8,8 @@ Commands:
   drift contacts           list saved contacts
   drift verify <name>      display safety number for out-of-band verification
   drift chat [name]        open the TUI client (optionally focused on a contact)
+  drift witness verify <relay_url>     verify a relay's proof of blindness
+  drift witness subscribe <relay_url>  watch a relay's witness chain live
   drift version            print the DRIFT version
 
 The CLI is a thin "view" over drift.storage (the model). It owns no on-disk
@@ -601,6 +603,199 @@ def group_list() -> None:
     for name, g in saved.items():
         names = ", ".join(m.name for m in g.members) or "(just you)"
         console.print(f"  [bold]{name}[/bold]  [dim]{g.size} members:[/dim] {names}")
+
+
+# ---------------------------------------------------------------------------
+# Witness — verify a relay's cryptographic proof of blindness (Phase 10)
+# ---------------------------------------------------------------------------
+
+witness_app = typer.Typer(
+    name="witness",
+    help="Verify a relay's live, signed, hash-chained proof of blindness.",
+    no_args_is_help=True,
+)
+app.add_typer(witness_app, name="witness")
+
+
+def _short_hash(hex_str: str) -> str:
+    """``8f3a2b…2b9c`` — first/last 4 bytes of a hex digest for display."""
+    return f"{hex_str[:8]}…{hex_str[-4:]}" if len(hex_str) > 12 else hex_str
+
+
+def _fmt_utc(ts: int) -> str:
+    import time as _time
+    return _time.strftime("%Y-%m-%d %H:%M:%S", _time.gmtime(ts))
+
+
+@witness_app.command("verify")
+def witness_verify(
+    relay_url: str = typer.Argument(..., help="Relay URL, e.g. ws://localhost:8765"),
+) -> None:
+    """
+    Fetch a relay's full 24-hour certificate chain and verify it end to end.
+
+    Checks every Ed25519 signature, the hash-chain continuity (no resets), the
+    period coverage (no missing 60-second windows), and that every certificate
+    reports zero knowledge. Exits non-zero if anything fails to verify.
+    """
+    ok = asyncio.run(_witness_verify_async(relay_url))
+    if not ok:
+        raise typer.Exit(1)
+
+
+async def _witness_verify_async(relay_url: str) -> bool:
+    import httpx
+
+    from drift.crypto import b58decode
+    from relay.witness import (
+        PERIOD_SECONDS,
+        WitnessCertificate,
+        verify_chain_report,
+    )
+
+    http_base = _relay_http(relay_url)
+    console.print(f"Verifying DRIFT relay: [bold]{relay_url}[/bold]")
+    try:
+        async with httpx.AsyncClient() as client:
+            pub_resp = await client.get(f"{http_base}/witness/pubkey", timeout=10.0)
+            pub_resp.raise_for_status()
+            chain_resp = await client.get(
+                f"{http_base}/witness/chain", params={"limit": 1440}, timeout=30.0
+            )
+            chain_resp.raise_for_status()
+    except httpx.HTTPError as exc:
+        console.print(f"  [red]✗ Could not reach the relay:[/red] {exc}")
+        return False
+
+    expected_id = b58decode(pub_resp.json()["pubkey_b58"])
+    raw_certs = chain_resp.json().get("certificates", [])
+    try:
+        certs = [WitnessCertificate.from_dict(c) for c in raw_certs]
+    except (KeyError, ValueError) as exc:
+        console.print(f"  [red]✗ Malformed certificate in chain:[/red] {exc}")
+        return False
+
+    report = verify_chain_report(certs, expected_relay_id=expected_id)
+    n = int(report["count"])  # type: ignore[call-overload]
+    hours = (n * PERIOD_SECONDS) / 3600.0
+    console.print(f"  [green]✓[/green] Fetched {n} certificates ({hours:.1f} hours)")
+
+    if report["signatures_valid"]:
+        console.print(f"  [green]✓[/green] All {n} signatures valid")
+    else:
+        console.print("  [red]✗ Signature verification failed[/red]")
+
+    if report["chain_intact"]:
+        console.print("  [green]✓[/green] Hash chain intact — no gaps or resets")
+    else:
+        i = report["first_break"]
+        nxt = i + 1 if isinstance(i, int) else "?"
+        console.print(f"  [red]✗ Hash chain break between certificate {i} and {nxt}[/red]")
+        console.print("    The chain was reset or forged — treat this relay as compromised.")
+
+    if report["coverage_complete"]:
+        console.print("  [green]✓[/green] Period coverage complete — no missing windows")
+    else:
+        gap = report["gap"]
+        if isinstance(gap, dict):
+            console.print(
+                f"  [red]✗ Gap detected between certificate {gap['after_index']} "
+                f"and {gap['before_index']}[/red]"
+            )
+            console.print(
+                f"    Missing window: {_fmt_utc(int(gap['missing_from']))} — "
+                f"{_fmt_utc(int(gap['missing_until']))} UTC"
+            )
+            console.print("    This may indicate the relay was compelled to modify its behavior.")
+            console.print("    Treat this relay as potentially compromised.")
+
+    if report["blindness_held"]:
+        console.print("  [green]✓[/green] Relay has provably never held sender identities")
+        console.print("  [green]✓[/green] Relay has provably never held recipient identities")
+    else:
+        console.print("  [red]✗ A certificate reported nonzero knowledge[/red]")
+
+    root = report["current_merkle_root"]
+    if isinstance(root, str):
+        console.print(f"  [green]✓[/green] Current Merkle root: {_short_hash(root)}")
+    console.print(f"  [green]✓[/green] Relay identity fingerprint: {report['fingerprint']}")
+
+    console.print()
+    if report["ok"]:
+        console.print(
+            "[bold green]This relay's blindness is cryptographically verified.[/bold green]"
+        )
+    else:
+        console.print(
+            "[bold red]Verification FAILED — do not trust this relay's blindness.[/bold red]"
+        )
+    return bool(report["ok"])
+
+
+@witness_app.command("subscribe")
+def witness_subscribe(
+    relay_url: str = typer.Argument(..., help="Relay URL, e.g. ws://localhost:8765"),
+) -> None:
+    """
+    Watch a relay's witness chain live (the canary watcher).
+
+    Polls for each new certificate, verifies its signature and that it chains
+    cleanly onto the previous one, and prints a dot per good period. The instant
+    the chain breaks — a reset, a bad signature, or the relay going dark — it
+    alerts loudly. Run this in a terminal alongside your chat. Ctrl+C to stop.
+    """
+    try:
+        asyncio.run(_witness_subscribe_async(relay_url))
+    except KeyboardInterrupt:
+        console.print("\n[dim]Stopped watching.[/dim]")
+
+
+async def _witness_subscribe_async(relay_url: str) -> None:
+    import httpx
+
+    from drift.crypto import b58decode
+    from relay.witness import PERIOD_SECONDS, WitnessCertificate
+
+    http_base = _relay_http(relay_url)
+    console.print(
+        f"[dim]Watching {relay_url} — verifying every new certificate. Ctrl+C to stop.[/dim]"
+    )
+
+    expected_id: bytes | None = None
+    last: WitnessCertificate | None = None
+    while True:
+        try:
+            async with httpx.AsyncClient() as client:
+                if expected_id is None:
+                    pk = await client.get(f"{http_base}/witness/pubkey", timeout=10.0)
+                    pk.raise_for_status()
+                    expected_id = b58decode(pk.json()["pubkey_b58"])
+                resp = await client.get(f"{http_base}/witness/current", timeout=10.0)
+                resp.raise_for_status()
+            cert = WitnessCertificate.from_dict(resp.json())
+        except (httpx.HTTPError, KeyError, ValueError) as exc:
+            console.print(f"\n[red]⚠ Could not fetch a certificate:[/red] {exc}")
+            await asyncio.sleep(PERIOD_SECONDS)
+            continue
+
+        if last is None or cert.timestamp != last.timestamp:
+            if not cert.verify_signature() or cert.relay_id != expected_id:
+                console.print("\n[bold red]⚠ CHAIN BREAK DETECTED — invalid signature. "
+                              "Relay may be compromised.[/bold red]")
+                return
+            if last is not None and cert.previous_cert_hash != last.cert_hash():
+                console.print(
+                    "\n[bold red]⚠ CHAIN BREAK DETECTED — relay may be compromised.[/bold red]"
+                )
+                console.print(
+                    f"[red]  certificate at {_fmt_utc(cert.timestamp)} UTC does not chain "
+                    "onto the previous one.[/red]"
+                )
+                return
+            console.print("·", end="")
+            last = cert
+
+        await asyncio.sleep(PERIOD_SECONDS)
 
 
 @app.command()

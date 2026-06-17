@@ -214,6 +214,39 @@ A single server is a single subpoena, a single seizure, a single off-switch. DRI
 
 "Unstoppable" comes from the *combination*: open protocol + many independent relays + Tor transport + a serverless mode. There's nothing central to compel or kill.
 
+### WITNESS — verifiable blindness (Phase 10)
+
+Everything above makes the relay *structurally* blind. WITNESS makes that
+blindness **checkable** rather than something you take on faith. Every 60
+seconds the relay generates and signs a **blindness certificate**: a small
+structured document stating what it provably cannot know about the traffic it
+just routed (zero sender identities — sealed sender; zero recipient identities —
+stealth addresses; zero readable contents — E2E; zero linked conversations —
+unlinkable envelopes), plus a Merkle root committing to the *set* of envelopes
+it routed that period. Each certificate embeds the SHA256 of the previous one,
+so the certificates form a hash-chained, tamper-evident transparency log; the
+relay signs every certificate with a long-term Ed25519 key generated on first
+start (`relay_identity.json`, `chmod 600`) and published at `/witness/pubkey`.
+
+The guarantee is **continuity**. A relay cannot rewrite its past without its
+private key (every certificate is signed), and it cannot *silently* start
+logging: the structural zeros mean there is no sender/recipient identity in the
+envelope to record, so to claim otherwise it would have to sign a false
+statement under its own key — or stop publishing certificates, which opens a
+detectable gap in the chain. Clients verify a relay's whole 24-hour chain with
+`drift witness verify <relay>` and watch it live (a dot per good minute, a loud
+alert on any break) with `drift witness subscribe <relay>`. The relay also
+serves a plain-English `/cannot-see` page — the current certificate rendered for
+a human, including a surveillance state that walks up to it.
+
+What WITNESS proves: the relay has not deviated from blind routing over the
+window you can fetch. What it does **not** prove: that the relay won't log in the
+*future* — only ongoing chain continuity gives that, moment to moment. The
+certificate format is deliberately plain SHA256-over-canonical-JSON + Ed25519, so
+it can be verified with `openssl`/`hashlib` and no DRIFT code. Full spec, threat
+model, and a "what this means for legal demands" section:
+[`docs/witness.md`](docs/witness.md).
+
 ---
 
 ## 7. What the regular person actually experiences

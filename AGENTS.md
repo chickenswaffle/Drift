@@ -10,7 +10,7 @@ The project is **pre-alpha**. The phased roadmap matters: each phase is a discre
 
 ### Phase status
 
-Current release: **`v0.11.1`**. No phase is in progress right now.
+Current release: **`v0.12.0`**. No phase is in progress right now.
 
 - **Phase 0 — transport** ✅ complete: X25519 ECDH → HKDF → XChaCha20-Poly1305, wired to the relay transport.
 - **Phase 1 — stealth addresses + TUI** ✅ complete: rotating one-time addressing and the Textual TUI.
@@ -22,8 +22,9 @@ Current release: **`v0.11.1`**. No phase is in progress right now.
 - **Phase 7 — multi-device** ⏭️ skipped for now.
 - **Phase 8 — group messaging** ✅ complete: pairwise ratchets, ≤10 members (`crypto/groups.py`).
 - **Phase 9 — one-click Codespaces launch** ✅ complete: `.devcontainer/` + README badge.
+- **Phase 10 — WITNESS** ✅ complete: live, signed, hash-chained proof of relay blindness (`relay/witness.py`, `/witness/*` + `/cannot-see`, `drift witness verify|subscribe`). See `docs/witness.md`.
 
-**Backlog (none currently active):** X3DH asynchronous key agreement; M1–M5 audit findings; Phase 10 (Raspberry Pi image); Phase 11 (public rooms).
+**Backlog (none currently active):** X3DH asynchronous key agreement; M1–M5 audit findings; Phase 11 (public rooms); Raspberry Pi image.
 
 ## Development setup
 

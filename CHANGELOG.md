@@ -11,6 +11,56 @@ DRIFT uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.12.0] — 2026-06-16
+
+**Phase 10 — WITNESS: live cryptographic proof of relay blindness.** DRIFT's
+privacy claims become mathematically verifiable rather than policy-based. Every
+60 seconds a relay generates and signs a hash-chained *blindness certificate*
+attesting what it provably cannot know about the traffic it just routed; if a
+relay is ever compelled to start logging, the chain breaks and clients detect it.
+
+### Added — relay (`relay/witness.py`, `relay/server.py`)
+- **`WitnessCertificate`** — a signed (`drift-witness-v1`) document carrying the
+  routed-message count, four structural zero-knowledge counters (sender /
+  recipient identities, contents, linked conversations), a Merkle root over the
+  period's routed envelopes, and the SHA256 of the previous certificate. Signed
+  over canonical JSON; the chain hash covers the signature too.
+- **`WitnessChain`** — seals one certificate per 60-second period into a bounded
+  24-hour deque (1440 certs), rooted at a fixed genesis hash. Relay mints a
+  long-term **Ed25519** identity on first start (`relay_identity.json`,
+  `chmod 600`) that signs every certificate; corrupt/empty files fail loud rather
+  than silently resetting the chain.
+- **Merkle tree** — a direct ~20-line binary SHA256 construction (no library);
+  empty periods commit to `SHA256("empty-period")`.
+- **`verify_chain` / `verify_chain_report`** — independent checks for signature
+  validity, hash-chain continuity, period coverage (missing-window detection),
+  and the structural zero claim.
+- **Endpoints** — `GET /witness/current`, `/witness/chain?limit=N`,
+  `/witness/verify`, `/witness/pubkey` (base58 key + human fingerprint), and
+  **`/cannot-see`** — a striking, terminal-styled HTML page rendering the current
+  certificate in plain English (the page a surveillance request lands on).
+
+### Added — client (`drift/cli.py`)
+- **`drift witness verify <relay>`** — fetches and verifies a relay's full
+  24-hour chain (every signature, chain continuity, period coverage), pinning the
+  relay's published key; prints a clear pass/fail report that pinpoints a gap or
+  reset.
+- **`drift witness subscribe <relay>`** — the canary watcher: a dot per good
+  period, a loud `⚠ CHAIN BREAK DETECTED` the instant the chain breaks.
+
+### Docs
+- **`docs/witness.md`** — what WITNESS proves and doesn't, the compelled-relay
+  threat model, the Merkle construction, how to verify with just `openssl`/
+  `hashlib`, and a precise "what this means for legal demands" section.
+- **DESIGN.md** §6 gains a WITNESS subsection; README gains a "Verifiable privacy"
+  section.
+
+### Crypto note
+Ed25519 (`cryptography`) for relay signing, SHA256 (`hashlib`) for the Merkle
+tree and chain hashes. No new primitives.
+
+---
+
 ## [0.11.0] — 2026-06-15
 
 A combined release with one headline feature and two riders. **Phase 8 — group

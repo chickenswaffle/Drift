@@ -21,6 +21,7 @@ Run locally:
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import logging
@@ -34,10 +35,18 @@ from typing import Any
 from uuid import uuid4
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 
 from drift.crypto.fmd import FMDKeypair, fmd_test
 from relay.federation import ANNOUNCE_TTL, DEFAULT_DEDUP_SIZE, Federation
+from relay.witness import (
+    MAX_CERTS,
+    WitnessChain,
+    fingerprint,
+    load_or_create_relay_identity,
+    relay_pubkey_b58,
+    verify_chain_report,
+)
 
 logger = logging.getLogger("drift.relay")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -45,13 +54,34 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 
 @asynccontextmanager
 async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
-    """On startup: load known peers (peers.json + DRIFT_PEERS) and announce."""
+    """On startup: load peers + announce, and start the WITNESS heartbeat."""
     federation.load_peers()
     if federation.peers:
         logger.info("federation: %d known peer(s): %s", len(federation.peers),
                     ", ".join(federation.peers))
         await federation.announce_self()
-    yield
+    # WITNESS: seal a fresh, signed blindness certificate every period. A gap in
+    # this heartbeat is the canary — it means the relay went dark (see witness.py).
+    witness_task = asyncio.create_task(_witness_loop())
+    try:
+        yield
+    finally:
+        witness_task.cancel()
+        try:
+            await witness_task
+        except asyncio.CancelledError:
+            pass
+
+
+async def _witness_loop() -> None:
+    """Seal one blindness certificate per period, chaining onto the last."""
+    while True:
+        await asyncio.sleep(witness_chain.period_seconds)
+        cert = witness_chain.generate()
+        logger.info(
+            "witness: sealed certificate ts=%d routed=%d chain_len=%d",
+            cert.timestamp, cert.messages_routed, len(witness_chain),
+        )
 
 
 app = FastAPI(
@@ -184,6 +214,9 @@ async def _deliver_local(envelope: dict[str, Any]) -> int:
     # how the blob arrived. A gossiped blob carries the origin relay's _relay_ts
     # (or none at all); each node times its own buffer from when it saw the blob.
     envelope.setdefault("_relay_ts", time.time())
+    # WITNESS: count this routed envelope into the current period's certificate
+    # (a Merkle leaf over a public field id — reveals nothing the firehose didn't).
+    witness_chain.record_envelope(envelope)
     subscribers = _subscribers.get(to_addr, set())
     delivered = 0
     for ws in list(subscribers):
@@ -250,6 +283,18 @@ federation = Federation(
     deliver=_deliver_local,
     deliver_beacon=_store_beacon,
 )
+
+# ---------------------------------------------------------------------------
+# WITNESS (Phase 10) — live, signed, hash-chained proof of relay blindness.
+#
+# The relay's long-term Ed25519 identity (generated on first start, saved
+# chmod 600) signs a fresh blindness certificate every period. The genesis
+# certificate is created at construction, so /witness/* works immediately; the
+# periodic heartbeat is driven by _witness_loop in the lifespan.
+# ---------------------------------------------------------------------------
+
+RELAY_IDENTITY_FILE = os.environ.get("DRIFT_RELAY_IDENTITY", "relay_identity.json")
+witness_chain = WitnessChain(load_or_create_relay_identity(RELAY_IDENTITY_FILE))
 
 
 # ---------------------------------------------------------------------------
@@ -583,7 +628,125 @@ async def root() -> JSONResponse:
         "name": "DRIFT relay",
         "version": "0.1.0",
         "notice": "This relay routes opaque ciphertext. It cannot read message content.",
+        "witness": "/cannot-see",
     })
+
+
+# ---------------------------------------------------------------------------
+# WITNESS endpoints (Phase 10)
+# ---------------------------------------------------------------------------
+
+@app.get("/witness/current")
+async def witness_current() -> JSONResponse:
+    """The most recent blindness certificate, as JSON."""
+    return JSONResponse(witness_chain.current().to_dict())
+
+
+@app.get("/witness/chain")
+async def witness_chain_endpoint(limit: int = MAX_CERTS) -> JSONResponse:
+    """The last ``limit`` certificates (oldest → newest; capped at 24 hours)."""
+    limit = max(1, min(limit, MAX_CERTS))
+    certs = witness_chain.chain(limit)
+    return JSONResponse({
+        "count": len(certs),
+        "certificates": [c.to_dict() for c in certs],
+    })
+
+
+@app.get("/witness/verify")
+async def witness_verify() -> JSONResponse:
+    """A machine-readable verification report over this relay's whole chain."""
+    report = verify_chain_report(
+        witness_chain.chain(), expected_relay_id=witness_chain.relay_id
+    )
+    return JSONResponse(report)
+
+
+@app.get("/witness/pubkey")
+async def witness_pubkey() -> JSONResponse:
+    """The relay's Ed25519 public key (base58) + a human-readable fingerprint."""
+    rid = witness_chain.relay_id
+    return JSONResponse({
+        "algorithm": "ed25519",
+        "pubkey_b58": relay_pubkey_b58(rid),
+        "fingerprint": fingerprint(rid),
+    })
+
+
+@app.get("/cannot-see")
+async def cannot_see() -> HTMLResponse:
+    """A plain-English, terminal-styled rendering of the current certificate."""
+    return HTMLResponse(_render_cannot_see())
+
+
+def _render_cannot_see() -> str:
+    """Render the current blindness certificate as a striking HTML page.
+
+    Pure inline styles, no frameworks — matrix green on near-black, the zero
+    counts in bright white, the legal-demand answer in dim red. This is the page
+    a surveillance request lands on when it walks up to the relay.
+    """
+    cert = witness_chain.current()
+    rid = witness_chain.relay_id
+    generated = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(cert.timestamp))
+    merkle = cert.envelope_merkle_root.hex()
+    prev = cert.previous_cert_hash.hex()
+    chain_len = len(witness_chain)
+    fp = fingerprint(rid)
+    pub = relay_pubkey_b58(rid)
+    routed = f"{cert.messages_routed:,}"
+
+    zero = '<span style="color:#ffffff;font-weight:bold">ZERO</span>'
+    nothing = '<span style="color:#7a1f1f;font-weight:bold">[NOTHING]</span>'
+
+    body = (
+        "DRIFT RELAY WITNESS STATEMENT\n"
+        f"Generated: {generated} UTC\n"
+        "\n"
+        f"In the last {cert.period_seconds} seconds, this relay routed {routed} messages.\n"
+        "\n"
+        "Here is what I know about those messages:\n"
+        "\n"
+        f"  Sender identities:          {zero}\n"
+        f"  Recipient identities:       {zero}\n"
+        f"  Message contents:           {zero}\n"
+        f"  Linked conversations:       {zero}\n"
+        "\n"
+        "Here is what I can produce in response to a legal demand\n"
+        'for "all messages sent by Alice":\n'
+        "\n"
+        f"  {nothing}\n"
+        "\n"
+        "Not because I am refusing.\n"
+        "Because I structurally cannot.\n"
+        "The protocol makes it impossible.\n"
+        "\n"
+        f"Merkle root of routed envelopes: {merkle[:12]}…\n"
+        "This statement is signed. Verify at /witness/verify.\n"
+        f"Previous statement: {prev[:12]}… "
+        f"({chain_len} statements in unbroken chain)\n"
+        "\n"
+        f"Signed by relay Ed25519 key: {fp}\n"
+        f'<span style="color:#1f6f2f">  full key: {pub}</span>'
+    )
+
+    return (
+        "<!DOCTYPE html>\n"
+        '<html lang="en">\n'
+        "<head>\n"
+        '<meta charset="utf-8">\n'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
+        "<title>DRIFT RELAY — what I cannot see</title>\n"
+        "</head>\n"
+        '<body style="margin:0;background:#0a0a0a;color:#00ff41;'
+        "font-family:'SF Mono',Menlo,Consolas,monospace;font-size:15px;"
+        'line-height:1.55;text-shadow:0 0 6px rgba(0,255,65,0.4);">\n'
+        '<div style="max-width:780px;margin:0 auto;padding:48px 24px;">\n'
+        f'<pre style="margin:0;white-space:pre-wrap;word-break:break-word;">{body}</pre>\n'
+        "</div>\n"
+        "</body>\n"
+        "</html>\n"
+    )
 
 
 # ---------------------------------------------------------------------------
