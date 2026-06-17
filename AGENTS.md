@@ -10,7 +10,7 @@ The project is **pre-alpha**. The phased roadmap matters: each phase is a discre
 
 ### Phase status
 
-Current release: **`v0.12.0`**. No phase is in progress right now.
+Current release: **`v0.13.0`**. No phase is in progress right now.
 
 - **Phase 0 — transport** ✅ complete: X25519 ECDH → HKDF → XChaCha20-Poly1305, wired to the relay transport.
 - **Phase 1 — stealth addresses + TUI** ✅ complete: rotating one-time addressing and the Textual TUI.
@@ -23,8 +23,9 @@ Current release: **`v0.12.0`**. No phase is in progress right now.
 - **Phase 8 — group messaging** ✅ complete: pairwise ratchets, ≤10 members (`crypto/groups.py`).
 - **Phase 9 — one-click Codespaces launch** ✅ complete: `.devcontainer/` + README badge.
 - **Phase 10 — WITNESS** ✅ complete: live, signed, hash-chained proof of relay blindness (`relay/witness.py`, `/witness/*` + `/cannot-see`, `drift witness verify|subscribe`). See `docs/witness.md`.
+- **Phase 11 — sovereign rooms** ✅ complete: cryptographic chatrooms with no server-side representation — a room is a shared secret derived from its name, posted to rotating stealth addresses. Three tiers (open/invite/dark), optional federation shards (`crypto/rooms.py`, `transport/room_session.py`, `drift room …`). Encrypted but **not** forward-secret — see DESIGN.md §12.
 
-**Backlog (none currently active):** X3DH asynchronous key agreement; M1–M5 audit findings; Phase 11 (public rooms); Raspberry Pi image.
+**Backlog (none currently active):** X3DH asynchronous key agreement; M1–M5 audit findings; Raspberry Pi image.
 
 ## Development setup
 

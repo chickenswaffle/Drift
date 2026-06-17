@@ -86,6 +86,12 @@ class Envelope:
     # published an FMD detection key; bound to ``one_time_addr``. Lets an
     # FMD-subscribed relay pre-filter the firehose. Absent → unchanged behaviour.
     fmd_flag: bytes | None = None
+    # Optional longer replay retention (Phase 11 rooms). When set, asks the relay
+    # to keep this blob in its replay buffer for up to this many seconds (capped
+    # server-side) so a client joining a room can rewind the catch-up windows.
+    # Absent → the relay's default short TTL. The relay learns nothing from this
+    # beyond "keep this one blob a little longer".
+    ttl_seconds: int | None = None
 
 
 class RelayClient:
@@ -342,6 +348,9 @@ class RelayClient:
         # FMD key; lets an FMD-subscribed relay pre-filter. Absent → no overhead.
         if envelope.fmd_flag is not None:
             payload["fmd"] = base64.b64encode(envelope.fmd_flag).decode()
+        # Rooms: request longer replay retention (capped server-side).
+        if envelope.ttl_seconds is not None:
+            payload["ttl_seconds"] = envelope.ttl_seconds
         try:
             resp = await self._http.post(f"{self._http_base}/send", json=payload)
             resp.raise_for_status()

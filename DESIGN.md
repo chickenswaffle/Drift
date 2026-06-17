@@ -379,3 +379,90 @@ Even at O(n), a DRIFT group inherits the whole metadata story: the relay sees
 only a fan of unlinkable one-time addresses with independent ciphertexts and no
 shared field tying them together, so it cannot even tell that a "group" exists,
 let alone who is in it. That unlinkability — not raw throughput — is the point.
+
+---
+
+## 12. Sovereign rooms (Phase 11 — cryptographic chatrooms, no server-side room)
+
+A DRIFT room is **not** a server-side chatroom. There is no row in any database,
+no object the relay owns, nothing to subpoena. A room exists purely as **math**:
+a shared secret derived from its name. Anyone who knows the name derives the same
+key material and participates; anyone who does not cannot find the room, read it,
+or even prove it exists. Like groups (Section 11), this is composition of
+primitives we already have — HKDF, HMAC, XChaCha20-Poly1305, Ed25519 — not a new
+construction.
+
+**Key schedule.** `room_secret = HKDF(SHA256(room_name), info="drift-room-v1",
+length=64)`, split into a 32-byte content key (`encrypt_key`) and a 32-byte
+address seed (`scan_key`). The name is the password: derivation is byte- and
+case-exact, so `cats` and `Cats` are entirely different rooms.
+
+**Rotating addresses.** A room never uses a fixed relay address — that would let
+the relay correlate all of a room's traffic. Instead the address rotates every
+10 minutes on a deterministic schedule every participant computes independently:
+`room_addr_n = HKDF(scan_key, info="drift-room-addr-" + n)`, `n = unix // 600`.
+The relay sees a stream of blobs landing at addresses that change every ten
+minutes with nothing tying them together. Clients scan the current window plus
+the previous three (≈30 minutes) to catch up, and ask the relay — via a capped
+`ttl_seconds` on `/send` — to retain room blobs long enough for that catch-up.
+The relay change for the entire feature is exactly this one optional retention
+knob; it never learns a room exists.
+
+**Sender tags.** Each message carries `HMAC(auth_key, ephemeral_pub)` where
+`ephemeral_pub` is a per-session value. This proves the sender knows the room
+secret (or, for invite rooms, the posting key) without revealing *which*
+participant they are. The first 4 hex chars are shown as a pseudonym (`[a3f9]`).
+
+**Three tiers.** *Open* — anyone with the name reads and posts. *Invite* —
+anyone with the name reads; posting needs an invite token that derives a separate
+posting key, and honest clients reject a post whose tag doesn't verify under it
+(a lurker reads, a token-holder posts). *Dark* — no human-readable name at all;
+the room *is* a random 64-byte secret exchanged out of band as a QR code,
+undiscoverable by anyone who hasn't scanned it.
+
+**Room shards (the outside-the-box bit).** A room may be split across several
+federation relays: each shard has its own address schedule on its own relay, and
+clients subscribe to all shards and merge locally. No single relay sees the whole
+room, and taking one down doesn't kill it — the Phase 4 federation, used for
+something it was never explicitly designed for. The shard list travels in the
+room's QR code.
+
+### Be honest about the costs
+
+- **Rooms are encrypted but NOT forward-secret.** Anyone who ever learns the room
+  secret can decrypt *all* past and future room messages — there is no ratchet,
+  because there is no pairwise channel to ratchet. This is inherent to a
+  shared-key construction. The lock shows 🔒, never 🔒⁺, even over Tor, and the
+  UI says so out loud. If you need forward secrecy, use a 1:1 chat or a group.
+
+- **The sender tag is within-session consistency, not identity.** You can tell
+  that two messages in one session came from the same sender; you cannot link
+  that sender to a real identity, to a contact code, or across sessions (a new
+  session draws a new ephemeral and thus an unlinkable tag). It is a pseudonym,
+  not a name. An optional Ed25519-signed display name lets a sender *choose* to
+  attach a name, bound to their session ephemeral — but that's opt-in vanity, not
+  an authenticated identity.
+
+- **Open rooms are as guessable as their name.** Treat room names as *passwords,
+  not usernames*. A short or common name (`test`, `chat`, `nyc`) is a weak room
+  anyone can guess their way into. There is no membership list to gate entry —
+  knowing the name *is* membership. The invite token can't be enforced as
+  one-use either: the relay is blind, so every holder of a token shares the same
+  posting capability; revoking posting means rotating the room.
+
+- **The rotating address hides room traffic from the relay, not from a global
+  passive adversary.** Someone who watches all traffic to all relays at once can
+  still time-correlate — the same caveat that applies to the rest of DRIFT. The
+  rotation defeats a single relay correlating a room's blobs; it does not defeat
+  a global observer, and we don't claim it does.
+
+### Why this is still worth shipping
+
+A surveillance state cannot subpoena a room that has no server-side
+representation beyond opaque ciphertext indexed by rotating stealth addresses.
+The relay's WITNESS certificate (Section 6) counts room messages in
+`messages_routed` and attributes exactly zero of them to any sender or recipient
+— the same structural blindness as 1:1 traffic. That is the point: not that
+rooms are the most secure channel in DRIFT (they are deliberately not), but that
+a whole public conversation can exist with no server that owns it, knows it, or
+can be compelled to give it up.

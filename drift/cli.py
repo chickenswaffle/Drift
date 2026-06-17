@@ -28,8 +28,10 @@ from rich.panel import Panel
 from rich.text import Text
 
 from drift import __version__, storage
-from drift.crypto import Identity, groups
+from drift.crypto import Identity, b58decode, b58encode, groups
+from drift.crypto import rooms as rooms_crypto
 from drift.crypto.groups import ContactInfo, GroupError, create_group
+from drift.crypto.rooms import Room, RoomError
 from drift.storage import StorageError
 
 app = typer.Typer(
@@ -606,6 +608,336 @@ def group_list() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Rooms (Phase 11) — sovereign rooms: cryptographic chatrooms, no server-side
+# representation. A room is a shared secret derived from its name; the relay
+# only ever sees opaque blobs at rotating stealth addresses.
+# ---------------------------------------------------------------------------
+
+room_app = typer.Typer(
+    name="room",
+    help="Sovereign rooms — encrypted chatrooms that exist only as math (Phase 11).",
+    no_args_is_help=True,
+)
+app.add_typer(room_app, name="room")
+
+
+_TIER_BLURB = {
+    rooms_crypto.TIER_OPEN: "open — anyone who knows the name can read and post",
+    rooms_crypto.TIER_INVITE: "invite — anyone can read; posting needs an invite token",
+    rooms_crypto.TIER_DARK: "dark — no name, joinable only via its QR/secret",
+}
+
+
+def _render_room_qr(descriptor: str) -> None:
+    """Print a scannable QR of a room descriptor to the terminal (segno), or a
+    note if segno is unavailable. The descriptor itself is always printed too."""
+    try:
+        import segno
+        segno.make(descriptor, error="l").terminal(compact=True)
+    except Exception:  # noqa: BLE001 — QR rendering is best-effort, never fatal
+        console.print("[dim](install the 'qr' extra to render a scannable QR)[/dim]")
+
+
+def _save_room_qr_png(label: str, descriptor: str) -> str | None:
+    """Write a scannable PNG of the descriptor next to the config dir; return its
+    path, or None if segno/PNG support is unavailable."""
+    try:
+        import segno
+        path = storage.CONFIG_DIR / f"room-{label.replace('/', '_')}.png"
+        storage.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        segno.make(descriptor, error="m").save(str(path), scale=6, border=2)
+        return str(path)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+async def _discover_relays(relay: str, want: int) -> list[str]:
+    """Pick up to ``want`` distinct relays for sharding: this relay plus its
+    advertised federation peers. Returns whatever is available (possibly fewer
+    than ``want``)."""
+    import httpx
+
+    base = _relay_http(relay)
+    relays = [relay]
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(f"{base}/federation/peers", timeout=10.0)
+            peers = resp.json().get("peers", []) if resp.status_code == 200 else []
+    except httpx.HTTPError:
+        peers = []
+    for p in peers:
+        if p not in relays:
+            relays.append(p)
+    return relays[:want]
+
+
+@room_app.command("create")
+def room_create(
+    name: str = typer.Argument(None, help="Room name (omit for --dark)"),
+    invite_only: bool = typer.Option(
+        False, "--invite-only", help="Posting requires an invite token"),
+    dark: bool = typer.Option(False, "--dark", help="No name — joinable only via QR/secret"),
+    shards: int = typer.Option(0, "--shards", help="Split the room across N federation relays"),
+    relay: str = typer.Option("ws://localhost:8765", "--relay", help="Relay (for shard discovery)"),
+    label: str = typer.Option(None, "--label", help="Local label (defaults to the name)"),
+) -> None:
+    """
+    Create a sovereign room.
+
+    The room has no server-side representation — it is purely the shared secret
+    derived from its name (or, for --dark, a random secret you share by QR).
+    Treat the name as a *password*: a short or common name is a weak room anyone
+    can guess into.
+    """
+    identity = _require_identity()
+    if invite_only and dark:
+        console.print("[red]--invite-only and --dark cannot be combined.[/red]")
+        raise typer.Exit(1)
+    tier = (
+        rooms_crypto.TIER_DARK if dark
+        else rooms_crypto.TIER_INVITE if invite_only
+        else rooms_crypto.TIER_OPEN
+    )
+    if not dark and not name:
+        console.print("[red]A room name is required (or use --dark).[/red]")
+        raise typer.Exit(1)
+
+    shard_relays: list[str] = []
+    if shards and shards > 1:
+        shard_relays = asyncio.run(_discover_relays(relay, shards))
+        if len(shard_relays) < shards:
+            console.print(
+                f"[yellow]Only {len(shard_relays)} relay(s) available for "
+                f"{shards} shards — sharding across {len(shard_relays)}.[/yellow]"
+            )
+
+    try:
+        room = rooms_crypto.make_room(name, tier=tier, label=label, shards=shard_relays)
+    except RoomError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from None
+
+    if storage.get_room(identity, room.label) is not None:
+        console.print(f"[red]A room labelled {room.label!r} already exists.[/red]")
+        raise typer.Exit(1)
+    storage.add_room(identity, room)
+
+    console.print(
+        f"[green]✓[/green] Created [bold]⬡ {room.label}[/bold]  "
+        f"[dim]({_TIER_BLURB[tier]})[/dim]"
+    )
+    if room.shard_count:
+        console.print(f"[dim]Sharded across {room.shard_count} relay(s):[/dim] "
+                      + ", ".join(room.shards))
+    if tier == rooms_crypto.TIER_INVITE:
+        token = _room_token(room)
+        console.print(Panel(
+            f"Posting token (share with members):\n[bold cyan]{token}[/bold cyan]\n\n"
+            f"They join with [bold]drift room join {name} --token {token}[/bold].\n"
+            f"[dim]The relay can't enforce one-use; everyone with the token can post.[/dim]",
+            border_style="cyan", title="[cyan]invite token[/cyan]",
+        ))
+    if tier == rooms_crypto.TIER_DARK:
+        descriptor = room.to_qr()
+        console.print(Panel(
+            f"This room has no name. Share it [bold]only[/bold] by this code/QR:\n\n"
+            f"[bold magenta]{descriptor}[/bold magenta]",
+            border_style="red", title="[red]dark room — keep this secret[/red]",
+        ))
+        _render_room_qr(descriptor)
+        png = _save_room_qr_png(room.label, descriptor)
+        if png:
+            console.print(f"[dim]Scannable QR saved to[/dim] {png}")
+        console.print("[dim]Others join with[/dim] "
+                      "[bold]drift room join --qr --file <code-or-png>[/bold]")
+    console.print(f"\n[dim]Open it with[/dim] [bold]drift chat {room.label!r}[/bold]")
+
+
+def _room_token(room: Room) -> str:
+    """The invite token for an invite room (the posting secret, base58)."""
+    if not room.post_secret_b58:
+        raise RoomError("not an invite room (no posting secret)")
+    return rooms_crypto.encode_invite_token(b58decode(room.post_secret_b58))
+
+
+@room_app.command("join")
+def room_join(
+    name: str = typer.Argument(None, help="Room name to join (omit for --qr)"),
+    token: str = typer.Option(None, "--token", help="Invite token (for invite-only rooms)"),
+    invite_only: bool = typer.Option(
+        False, "--invite-only", help="Mark this as an invite room when joining by name"),
+    qr: bool = typer.Option(False, "--qr", help="Join a dark room from its QR/descriptor"),
+    file: str = typer.Option(
+        None, "--file", help="Path to a QR image or a text file holding the driftroom: code"),
+    label: str = typer.Option(None, "--label", help="Local label (defaults to the name)"),
+) -> None:
+    """
+    Join a room — derive its keys and save it locally so you can `drift chat` it.
+
+    There is nothing to register with any server: joining is purely deriving the
+    same key material everyone else derives from the name (or scanning the dark
+    room's QR). You can leave and rejoin at any time.
+    """
+    identity = _require_identity()
+
+    if qr or (name and name.startswith(rooms_crypto.QR_PREFIX)):
+        descriptor = (
+            name if (name and name.startswith(rooms_crypto.QR_PREFIX))
+            else _read_descriptor(file)
+        )
+        try:
+            room = Room.from_qr(descriptor, label=label)
+        except RoomError as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(1) from None
+    else:
+        if not name:
+            console.print("[red]A room name is required (or use --qr).[/red]")
+            raise typer.Exit(1)
+        tier = rooms_crypto.TIER_INVITE if (token or invite_only) else rooms_crypto.TIER_OPEN
+        post_b58 = None
+        if token:
+            try:
+                post_b58 = b58encode(rooms_crypto.decode_invite_token(token))
+            except RoomError as exc:
+                console.print(f"[red]{exc}[/red]")
+                raise typer.Exit(1) from None
+            tier = rooms_crypto.TIER_INVITE
+        room = Room(label=label or name, tier=tier, name=name, post_secret_b58=post_b58)
+
+    if storage.get_room(identity, room.label) is not None:
+        console.print(f"[yellow]Already joined[/yellow] [bold]⬡ {room.label}[/bold].")
+        return
+    storage.add_room(identity, room)
+    blurb = _TIER_BLURB[room.tier]
+    console.print(f"[green]✓[/green] Joined [bold]⬡ {room.label}[/bold]  [dim]({blurb})[/dim]")
+    if room.tier == rooms_crypto.TIER_INVITE and not room.post_secret_b58:
+        console.print("[dim]You joined as a lurker (read-only). Post with an invite token.[/dim]")
+    console.print(
+        Panel(
+            "[bold yellow]⚠ PUBLIC ROOM[/bold yellow] — everyone who knows this room can read "
+            "what you post.\nRooms are encrypted but [bold]not forward-secret[/bold]: anyone who "
+            "ever learns the\nname/secret can read all past messages.",
+            border_style="yellow",
+        )
+    )
+    console.print(f"[dim]Open it with[/dim] [bold]drift chat {room.label!r}[/bold]")
+
+
+def _read_descriptor(file: str | None) -> str:
+    """Resolve a dark-room descriptor from --file: a text file holding the
+    ``driftroom:`` code, or (if a QR decoder is installed) a QR image. Camera
+    capture is not available in this environment."""
+    if not file:
+        console.print(
+            "[red]--qr needs --file <code-or-image>.[/red] "
+            "Live camera capture isn't available here; paste the driftroom: code "
+            "into a text file, or pass a QR PNG if you have a decoder installed."
+        )
+        raise typer.Exit(1)
+    from pathlib import Path
+    p = Path(file)
+    if not p.exists():
+        console.print(f"[red]No such file:[/red] {file}")
+        raise typer.Exit(1)
+    # Text file or pasted descriptor.
+    try:
+        text = p.read_text().strip()
+        if text.startswith(rooms_crypto.QR_PREFIX):
+            return text
+    except (UnicodeDecodeError, OSError):
+        pass
+    # Otherwise try to decode an image, if any decoder is available.
+    decoded = _decode_qr_image(p)
+    if decoded:
+        return decoded
+    console.print(
+        "[red]Could not read a room code from that file.[/red] "
+        "No QR image decoder is installed — save the [bold]driftroom:[/bold] text into a "
+        "file and pass that instead."
+    )
+    raise typer.Exit(1)
+
+
+def _decode_qr_image(path: Any) -> str | None:
+    """Best-effort QR-image decode using whatever optional decoder is present."""
+    try:
+        from PIL import Image
+        from pyzbar.pyzbar import decode
+        for sym in decode(Image.open(path)):
+            data = str(sym.data.decode("utf-8", "ignore"))
+            if data.startswith(rooms_crypto.QR_PREFIX):
+                return data
+    except Exception:  # noqa: BLE001 — decoder is optional
+        return None
+    return None
+
+
+@room_app.command("list")
+def room_list() -> None:
+    """List your joined rooms with their tier and recent activity."""
+    identity = _require_identity()
+    saved = storage.load_rooms(identity)
+    if not saved:
+        console.print("[dim]No rooms yet. Use [bold]drift room create[/bold] or "
+                      "[bold]drift room join[/bold].[/dim]")
+        return
+    tier_color = {
+        rooms_crypto.TIER_OPEN: "yellow",
+        rooms_crypto.TIER_INVITE: "cyan",
+        rooms_crypto.TIER_DARK: "red",
+    }
+    for label, room in saved.items():
+        color = tier_color.get(room.tier, "white")
+        shard = f" · {room.shard_count} shards" if room.shard_count else ""
+        can_post = room.tier != rooms_crypto.TIER_INVITE or bool(room.post_secret_b58)
+        post = "" if can_post else " · read-only"
+        last = f"window {room.last_window}" if room.last_window else "never"
+        console.print(
+            f"  [bold]⬡ {label}[/bold]  [{color}]{room.tier}[/{color}]{shard}{post}  "
+            f"[dim]{room.message_count} msgs · last {last}[/dim]"
+        )
+
+
+@room_app.command("invite")
+def room_invite(
+    label: str = typer.Argument(..., help="The invite-only room to mint a token for"),
+) -> None:
+    """Mint an invite token for an invite-only room (grants posting rights)."""
+    identity = _require_identity()
+    room = storage.get_room(identity, label)
+    if room is None:
+        console.print(f"[red]Unknown room:[/red] {label}")
+        raise typer.Exit(1)
+    if room.tier != rooms_crypto.TIER_INVITE or not room.post_secret_b58:
+        console.print(f"[red]{label!r} is not an invite-only room you can invite to.[/red]")
+        raise typer.Exit(1)
+    token = _room_token(room)
+    target = room.name or label
+    console.print(Panel(
+        f"[bold cyan]{token}[/bold cyan]\n\n"
+        f"Share it so someone can post:\n"
+        f"[bold]drift room join {target} --token {token}[/bold]\n\n"
+        f"[dim]Honest note: the relay is blind, so it can't enforce one-use — every "
+        f"holder of this token can post. To revoke, recreate the room.[/dim]",
+        border_style="cyan", title="[cyan]invite token[/cyan]",
+    ))
+
+
+@room_app.command("leave")
+def room_leave(
+    label: str = typer.Argument(..., help="The room to leave (local only)"),
+) -> None:
+    """Forget a room locally. You can rejoin any time with the name/token/QR."""
+    identity = _require_identity()
+    if storage.get_room(identity, label) is None:
+        console.print(f"[red]Unknown room:[/red] {label}")
+        raise typer.Exit(1)
+    storage.remove_room(identity, label)
+    console.print(f"[green]✓[/green] Left [bold]⬡ {label}[/bold] (local state removed).")
+
+
+# ---------------------------------------------------------------------------
 # Witness — verify a relay's cryptographic proof of blindness (Phase 10)
 # ---------------------------------------------------------------------------
 
@@ -820,11 +1152,16 @@ def chat(
     """
     identity = _require_identity()
     saved = storage.load_contacts(identity)
-    # A name may refer to a group or a contact; groups take precedence.
+    saved_rooms = storage.load_rooms(identity)
+    # A name may refer to a group, a room, or a contact; groups take precedence,
+    # then rooms, then 1:1 contacts.
     group = storage.get_group(identity, name) if name is not None else None
+    room = (
+        saved_rooms.get(name) if name is not None and group is None else None
+    )
 
-    if name is not None and group is None and name not in saved:
-        console.print(f"[red]Unknown contact or group:[/red] {name}")
+    if name is not None and group is None and room is None and name not in saved:
+        console.print(f"[red]Unknown contact, group, or room:[/red] {name}")
         raise typer.Exit(1)
 
     if no_tor and tor_only:
@@ -838,13 +1175,19 @@ def chat(
 
     if no_tui:
         if name is None:
-            console.print("[red]--no-tui requires a contact or group name.[/red]")
+            console.print("[red]--no-tui requires a contact, group, or room name.[/red]")
             raise typer.Exit(1)
         if group is not None:
             ok = asyncio.run(
                 _group_chat_async(
                     identity, group, relay,
                     use_tor=use_tor, tor_only=tor_only, fmd_key=fmd_key,
+                )
+            )
+        elif room is not None:
+            ok = asyncio.run(
+                _room_chat_async(
+                    identity, room, relay, use_tor=use_tor, tor_only=tor_only,
                 )
             )
         else:
@@ -861,8 +1204,10 @@ def chat(
     from drift.ui.app import DriftApp
     DriftApp(
         identity, dict(saved), relay,
-        active=name if group is None else None,
+        active=name if (group is None and room is None) else None,
         group=group,
+        rooms=dict(saved_rooms),
+        room=room,
         use_tor=use_tor, tor_required=tor_only, fmd_key=fmd_key,
     ).run()
 
@@ -1011,6 +1356,76 @@ async def _group_receive_loop(gs: Any) -> None:
             console.print(f"\n[bold cyan]{gm.sender_name}:[/bold cyan] {gm.text}")
     except InvalidTag:
         console.print("\n[red]Authentication failure — message rejected.[/red]")
+
+
+async def _room_chat_async(
+    identity: Identity,
+    room: Room,
+    relay_url: str,
+    *,
+    use_tor: bool = True,
+    tor_only: bool = False,
+) -> bool:
+    """Headless room chat loop (--no-tui). Messages show the anonymous 4-char
+    sender tag (or a signed display name); a banner reminds you it's public."""
+    from drift.transport.room_session import RoomSession
+
+    tor_client = await _bootstrap_tor_cli(use_tor=use_tor, tor_only=tor_only)
+    if tor_client is False:
+        return False
+
+    console.print(f"[dim]Connecting to {relay_url} …[/dim]")
+    tier_colour = {"open": "yellow", "invite": "cyan", "dark": "red"}.get(room.tier, "yellow")
+    try:
+        async with RoomSession(
+            identity, room, relay_url, tor_client=tor_client,
+        ) as rs:
+            console.print(
+                f"[{tier_colour}]⚠ PUBLIC ROOM[/] [dim]— everyone with this room can "
+                f"read what you post. Encrypted, not forward-secret.[/dim]"
+            )
+            console.print(
+                f"[green]Connected.[/green] [bold]⬡ {room.label}[/bold] "
+                f"({room.tier}). You are [bold]{rs.session_tag}[/bold]. Ctrl+C to quit.\n"
+            )
+            if not rs.can_post():
+                console.print("[dim]Read-only: you joined without an invite token.[/dim]\n")
+            recv_task = asyncio.create_task(_room_receive_loop(rs))
+            loop = asyncio.get_running_loop()
+            try:
+                while True:
+                    line = await loop.run_in_executor(None, sys.stdin.readline)
+                    if not line:
+                        break
+                    text = line.rstrip("\n")
+                    if text:
+                        try:
+                            await rs.send_to_room(text)
+                        except Exception as exc:  # noqa: BLE001
+                            console.print(f"[red]send error:[/red] {exc}")
+                            continue
+                        console.print(f"[bold green]you ({rs.session_tag}):[/bold green] {text}")
+            except (KeyboardInterrupt, asyncio.CancelledError):
+                pass
+            finally:
+                recv_task.cancel()
+                try:
+                    await recv_task
+                except asyncio.CancelledError:
+                    pass
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]Connection error:[/red] {exc}")
+    finally:
+        if tor_client is not None:
+            await tor_client.close()
+    return True
+
+
+async def _room_receive_loop(rs: Any) -> None:
+    async for rm in rs.messages():
+        who = rm.display_name if rm.display_name else rm.tag_label
+        flag = "" if rm.authorized else " [dim red](unverified)[/]"
+        console.print(f"\n[bold cyan][{who}]{flag}:[/bold cyan] {rm.text}")
 
 
 async def _bootstrap_tor_cli(*, use_tor: bool, tor_only: bool) -> Any:

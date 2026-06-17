@@ -176,15 +176,31 @@ _recent: dict[str, list[dict[str, Any]]] = defaultdict(list)
 RECENT_TTL = 30.0    # seconds — covers the subscribe race + brief late-join
 RECENT_MAX = 500     # envelopes per channel
 
+# Phase 11 (sovereign rooms): a sender may request a *longer* retention per
+# envelope via /send's "ttl_seconds", so a client joining a room can rewind the
+# previous catch-up windows (rooms.CATCHUP_WINDOWS × 10 min). The relay caps it
+# hard server-side — it never learns the blob is a "room" message, only that
+# this one blob asked to live a little longer. Default stays RECENT_TTL.
+RECENT_MAX_TTL = 1800.0   # 30 min — the hard server-side cap on requested TTL
+
 # Max simultaneous WebSocket subscribers, across all channels. None = unlimited
 # (the full relay). The Pi-Zero node sets this to a small number (see node.py).
 MAX_CONNECTIONS: int | None = None
 
 
 def _prune_recent(channel: str) -> None:
-    """Drop expired / overflow envelopes from a channel's replay buffer."""
-    cutoff = time.time() - RECENT_TTL
-    buf = [e for e in _recent[channel] if e["_relay_ts"] >= cutoff]
+    """Drop expired / overflow envelopes from a channel's replay buffer.
+
+    Each envelope expires on its own TTL: the default ``RECENT_TTL``, or a
+    longer per-envelope ``_ttl`` a sender requested (room messages, capped at
+    ``RECENT_MAX_TTL``). This is the only change rooms need — the relay still
+    cannot tell a room blob from a 1:1 blob; it just honours a longer-lived one.
+    """
+    now = time.time()
+    buf = [
+        e for e in _recent[channel]
+        if e["_relay_ts"] + e.get("_ttl", RECENT_TTL) >= now
+    ]
     if len(buf) > RECENT_MAX:
         buf = buf[-RECENT_MAX:]
     _recent[channel] = buf
@@ -378,7 +394,9 @@ async def send_message(envelope: dict[str, Any]) -> JSONResponse:
             "to":   "<channel>",     // firehose routing key (opaque to relay)
             "ct":   "<base64>",      // opaque sealed blob (opaque to relay)
             "ts":   1234567890,      // unix timestamp (for TTL)
-            "addr": "<base64>"       // recipient one-time stealth address
+            "addr": "<base64>",      // recipient one-time stealth address
+            "ttl_seconds": 1800      // OPTIONAL: request longer replay retention
+                                     //   (rooms; capped at RECENT_MAX_TTL)
         }
 
     The relay never inspects "ct" or "addr". The sender's ephemeral key and the
@@ -401,6 +419,16 @@ async def send_message(envelope: dict[str, Any]) -> JSONResponse:
         "_relay_ts": time.time(),
         "_id": str(uuid4()),
     }
+    # Optional longer retention (Phase 11 rooms): clamp to (0, RECENT_MAX_TTL].
+    # Only stored when a sane positive value is requested; otherwise the default
+    # RECENT_TTL applies via _prune_recent. The relay learns nothing from this
+    # beyond "keep this one blob a bit longer".
+    try:
+        requested_ttl = float(envelope.get("ttl_seconds", 0) or 0)
+    except (TypeError, ValueError):
+        requested_ttl = 0.0
+    if requested_ttl > 0:
+        record["_ttl"] = min(requested_ttl, RECENT_MAX_TTL)
     # Carry the recipient's one-time address through untouched (routing/detection).
     if "addr" in envelope:
         record["addr"] = envelope["addr"]

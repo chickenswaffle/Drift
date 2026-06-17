@@ -79,6 +79,7 @@ if TYPE_CHECKING:
 
     from drift.crypto import Identity
     from drift.crypto.groups import GroupState
+    from drift.crypto.rooms import Room
     from drift.storage import Contacts
 
 __all__ = ["DriftApp"]
@@ -425,6 +426,13 @@ class ContactSelected(Message):
         self.name = name
 
 
+class RoomSelected(Message):
+    """A sidebar ⬡ room row was clicked (Phase 11)."""
+    def __init__(self, label: str) -> None:
+        super().__init__()
+        self.label = label
+
+
 class SecurityPillClicked(Message):
     """A security indicator was clicked — show its one-line explanation."""
     def __init__(self, label: str, tooltip: str) -> None:
@@ -455,6 +463,21 @@ class GroupMembershipEvent(Message):
         super().__init__()
         self.action = action
         self.target = target
+
+
+class IncomingRoomMessage(Message):
+    """Worker → UI: a decrypted room message arrived (Phase 11).
+
+    ``tag`` is the 4-char pseudonymous sender tag; ``display_name`` is a verified
+    signed name if the sender chose to include one; ``authorized`` is False for an
+    invite-room post a lurker could not verify under the posting key."""
+    def __init__(self, tag: str, text: str, *, display_name: str | None,
+                 authorized: bool) -> None:
+        super().__init__()
+        self.tag = tag
+        self.text = text
+        self.display_name = display_name
+        self.authorized = authorized
 
 
 class CryptoEvent(Message):
@@ -891,16 +914,24 @@ class CommandPalette(Horizontal):
 
 
 class ContactItem(Static):
-    """One contact row in the sidebar: ``▶ name (unread)``."""
+    """One contact row in the sidebar: ``▶ name (unread)``.
+
+    A *room* row (``is_room``) is prefixed with ``⬡`` to set it apart from 1:1
+    contacts and tinted by its tier colour (Phase 11)."""
 
     can_focus = True
 
-    def __init__(self, name: str, *, active: bool, unread: int, index: int = 0) -> None:
+    def __init__(
+        self, name: str, *, active: bool, unread: int, index: int = 0,
+        is_room: bool = False, tier: str | None = None,
+    ) -> None:
         super().__init__()
         self.contact_name = name
         self.active = active
         self.unread = unread
         self.index = index
+        self.is_room = is_room
+        self.tier = tier
         if active:
             self.add_class("active")
 
@@ -911,14 +942,26 @@ class ContactItem(Static):
         num = f"[#555555]{self.index}[/] " if self.index else ""
         colour = _P if self.active else _DM
         badge = f"  [{_S}]●{self.unread}[/]" if self.unread else ""
+        if self.is_room:
+            # ⬡ prefix, tinted by tier (yellow=open, cyan=invite, red=dark).
+            tier_colour = {"open": "yellow", "invite": "cyan", "dark": "red"}.get(
+                self.tier or "open", "yellow")
+            hexmark = f"[{_P}]⬡[/]" if self.active else f"[{tier_colour}]⬡[/]"
+            return f"{accent}{num}{hexmark} [{colour}]{self.contact_name}[/]{badge}"
         return f"{accent}{num}[{colour}]{self.contact_name}[/]{badge}"
 
+    def _select(self) -> None:
+        if self.is_room:
+            self.post_message(RoomSelected(self.contact_name))
+        else:
+            self.post_message(ContactSelected(self.contact_name))
+
     def on_click(self) -> None:
-        self.post_message(ContactSelected(self.contact_name))
+        self._select()
 
     def on_key(self, event: Key) -> None:
         if event.key == "enter":
-            self.post_message(ContactSelected(self.contact_name))
+            self._select()
             event.stop()
 
 
@@ -933,26 +976,36 @@ class Sidebar(Vertical):
         self.border_title = "CONTACTS"
 
     async def populate(
-        self, contacts: Contacts, active: str | None, unread: dict[str, int]
+        self, contacts: Contacts, active: str | None, unread: dict[str, int],
+        rooms: dict[str, Room] | None = None,
     ) -> None:
-        """Rebuild the contact rows from the current model state."""
-        self.border_title = f"CONTACTS · {len(contacts)}" if contacts else "CONTACTS"
+        """Rebuild the contact (and ⬡ room) rows from the current model state."""
+        rooms = rooms or {}
+        total = len(contacts) + len(rooms)
+        self.border_title = f"CONTACTS · {total}" if total else "CONTACTS"
         listing = self.query_one("#contact-list", VerticalScroll)
         await listing.remove_children()
-        if not contacts:
+        if not contacts and not rooms:
             await listing.mount(Static("[dim]no contacts yet[/]", classes="empty-hint"))
             return
-        await listing.mount(
-            *(
-                ContactItem(
-                    name,
-                    active=(name == active),
-                    unread=unread.get(name, 0),
-                    index=(i + 1 if i < 9 else 0),
-                )
-                for i, name in enumerate(contacts)
+        items = [
+            ContactItem(
+                name,
+                active=(name == active),
+                unread=unread.get(name, 0),
+                index=(i + 1 if i < 9 else 0),
             )
-        )
+            for i, name in enumerate(contacts)
+        ]
+        # Rooms sit below contacts, each with a ⬡ prefix and tier tint.
+        items += [
+            ContactItem(
+                label, active=(label == active), unread=unread.get(label, 0),
+                is_room=True, tier=room.tier,
+            )
+            for label, room in rooms.items()
+        ]
+        await listing.mount(*items)
 
 
 class _SentLine(Static):
@@ -1638,6 +1691,8 @@ class DriftApp(App[None]):
         *,
         active: str | None = None,
         group: GroupState | None = None,
+        rooms: dict[str, Room] | None = None,
+        room: Room | None = None,
         use_tor: bool = False,
         tor_required: bool = False,
         fmd_key: Any = None,
@@ -1650,6 +1705,12 @@ class DriftApp(App[None]):
         # GroupSession instead of a 1:1 Session (everything else is shared).
         self._group = group
         self._group_session: Any = None
+        # Phase 11: sovereign rooms. ``_rooms`` is the sidebar list (label → Room);
+        # ``_room`` is the currently-open room (None unless one is active), driven
+        # by a RoomSession worker mirroring the group path.
+        self._rooms: dict[str, Room] = rooms or {}
+        self._room = room
+        self._room_session: Any = None
         # FMD detection key (audit M4): when set, sessions subscribe to the relay
         # in FMD pre-filter mode. None → classic full firehose scanning.
         self._fmd_key = fmd_key
@@ -1720,7 +1781,7 @@ class DriftApp(App[None]):
 
     async def on_mount(self) -> None:
         self._header.relay_url = self._primary_relay
-        await self._sidebar.populate(self._contacts, self._active, self._unread)
+        await self._sidebar.populate(self._contacts, self._active, self._unread, self._rooms)
         self._update_chat_title()
         self.set_interval(0.8, self._tick_pulse)
         self._input.focus()
@@ -1732,6 +1793,8 @@ class DriftApp(App[None]):
             return
         if self._group is not None:
             await self._open_group()
+        elif self._room is not None:
+            await self._open_room(self._room)
         elif self._active is not None:
             await self._open_conversation(self._active)
         else:
@@ -1962,8 +2025,94 @@ class DriftApp(App[None]):
             except OSError:
                 pass
 
+    # ── Room conversation (Phase 11) ───────────────────────────────────────
+
+    _ROOM_TIER_COLOUR: ClassVar[dict[str, str]] = {
+        "open": "yellow", "invite": "cyan", "dark": "red",
+    }
+
+    async def _open_room(self, room: Room) -> None:
+        """Open a sovereign room and start its RoomSession worker."""
+        # Tear down any 1:1/group session by clearing their handles; the
+        # exclusive `group="session"` worker below cancels the previous worker.
+        self._group = None
+        self._group_session = None
+        self._session = None
+        self._active = None
+        self._room = room
+        self._room_session = None
+        self._connected = False
+        self._unread[room.label] = 0
+        self._header.contact_name = room.label
+        self._header.connected = False
+        # Rooms are encrypted but NOT forward-secret → 🔒, never 🔒⁺ (max).
+        self._set_secure(False)
+        self._sent_count = self._recv_count = self._stealth_count = 0
+        self._stealth_recent = []
+        self._session_start = time.monotonic()
+        self.query_one(UptimePill).start(self._session_start)
+        await self._sidebar.populate(self._contacts, room.label, self._unread, self._rooms)
+        await self._pane.clear()
+        self._update_room_title()
+        self._write_room_banner(room)
+        self._pane.write_separator(f"room · {room.label} · {_now()}")
+        self._run_room_session()
+
+    def _write_room_banner(self, room: Room) -> None:
+        """The dim, tier-coloured ⚠ PUBLIC ROOM banner shown atop every room."""
+        colour = self._ROOM_TIER_COLOUR.get(room.tier, "yellow")
+        self._pane._add(Static(
+            f"[{colour}]⚠ PUBLIC ROOM[/] [dim]— everyone with this room "
+            f"{'secret' if room.tier == 'dark' else 'name'} can read this. "
+            f"Encrypted, but [bold]not forward-secret[/]: anyone who ever learns the "
+            f"{'secret' if room.tier == 'dark' else 'name'} can read all past messages.[/]"
+        ))
+
+    def _update_room_title(self) -> None:
+        """Room equivalent of _update_chat_title: label + ⬡ ROOM (tier) pill."""
+        if self._room is None:
+            return
+        pane = self._pane
+        pane.border_title = f" ⬡ {self._room.label} "
+        state = "🔒 secure" if self._connected else "offline"
+        shard = f" · {self._room.shard_count} shards" if self._room.shard_count else ""
+        # 🔒 (shared-key), deliberately NOT 🔒⁺ — rooms are not forward-secret.
+        pane.border_subtitle = f"⬡ ROOM ({self._room.tier}){shard} · {state}"
+
+    @work(exclusive=True, group="session")
+    async def _run_room_session(self) -> None:
+        from drift.transport.room_session import RoomSession
+
+        assert self._room is not None
+        room = self._room
+        label = room.label
+        rs = RoomSession(
+            self._identity, room, self._relay_url,
+            on_event=self._emit_crypto, tor_client=self._tor_client,
+        )
+        self._room_session = rs
+        try:
+            await rs.connect()
+            self.post_message(SessionUp(label))
+            async for rm in rs.messages():
+                self.post_message(IncomingRoomMessage(
+                    rm.tag_label, rm.text,
+                    display_name=rm.display_name, authorized=rm.authorized,
+                ))
+            self.post_message(SessionDown(label, "relay closed the connection"))
+        except Exception as exc:  # noqa: BLE001 — surface any relay error to the user
+            self.post_message(SessionDown(label, str(exc)))
+        finally:
+            try:
+                await rs.close()
+            except OSError:
+                pass
+
     async def _open_conversation(self, name: str) -> None:
         """Switch the active contact and (re)start its session."""
+        # Leaving any open room: drop its handles so session routing is 1:1 again.
+        self._room = None
+        self._room_session = None
         self._active = name
         self._unread[name] = 0
         self._connected = False
@@ -1978,7 +2127,7 @@ class DriftApp(App[None]):
         self._session_start = time.monotonic()
         self.query_one(UptimePill).start(self._session_start)
         self.query_one(RatchetPill).count = 0
-        await self._sidebar.populate(self._contacts, self._active, self._unread)
+        await self._sidebar.populate(self._contacts, self._active, self._unread, self._rooms)
 
         # Replay this contact's history into a fresh pane.
         await self._pane.clear()
@@ -2008,9 +2157,17 @@ class DriftApp(App[None]):
         self._connected = True
         self._header.connected = True
         # E2E + ratchet active → secured. With a live Tor circuit it's maximum (🔒⁺).
-        self._set_secure(True, maximum=self._tor_active)
+        # Rooms are shared-key and NOT forward-secret, so they show 🔒, never 🔒⁺,
+        # even over Tor — the lock must not over-promise.
+        maximum = self._tor_active and self._room is None
+        self._set_secure(True, maximum=maximum)
         self._refresh_conversation_title()
-        self._pane.write_system(f"⣿ secured channel to {self._relay_url}")
+        if self._room is not None:
+            self._pane.write_system(
+                "⬡ room channel live — messages encrypted with the shared room key"
+            )
+        else:
+            self._pane.write_system(f"⣿ secured channel to {self._relay_url}")
 
     @on(SessionDown)
     def _on_session_down(self, event: SessionDown) -> None:
@@ -2023,12 +2180,18 @@ class DriftApp(App[None]):
         self._pane.write_warning(event.reason)
 
     def _conversation_name(self) -> str | None:
-        """The active conversation's key — group name in group mode, else contact."""
-        return self._group.name if self._group is not None else self._active
+        """The active conversation's key — group name, room label, or contact."""
+        if self._group is not None:
+            return self._group.name
+        if self._room is not None:
+            return self._room.label
+        return self._active
 
     def _refresh_conversation_title(self) -> None:
         if self._group is not None:
             self._update_group_title()
+        elif self._room is not None:
+            self._update_room_title()
         else:
             self._update_chat_title()
 
@@ -2043,6 +2206,23 @@ class DriftApp(App[None]):
         self._pane.write_system(f"→ {event.target} {verb} the group")
         self._update_group_title()  # member count changed
 
+    @on(IncomingRoomMessage)
+    def _on_incoming_room(self, event: IncomingRoomMessage) -> None:
+        # Anonymous within the room: show the 4-char pseudonym, or a verified
+        # signed display name if the sender included one ([river] vs [a3f9]).
+        who = event.display_name if event.display_name else event.tag
+        sender = f"[{who}]"
+        if not event.authorized:
+            sender += " [dim red](unverified)[/]"
+        self._pane.write_incoming(sender, event.text, _now())
+
+    @on(RoomSelected)
+    async def _on_room_selected(self, event: RoomSelected) -> None:
+        room = self._rooms.get(event.label)
+        if room is not None and event.label != self._conversation_name():
+            await self._open_room(room)
+        self._input.focus()
+
     @on(IncomingMessage)
     def _on_incoming(self, event: IncomingMessage) -> None:
         record = MessageRecord("in", event.contact, event.text, _now())
@@ -2052,7 +2232,7 @@ class DriftApp(App[None]):
         else:
             self._unread[event.contact] = self._unread.get(event.contact, 0) + 1
             self.call_later(
-                self._sidebar.populate, self._contacts, self._active, self._unread
+                self._sidebar.populate, self._contacts, self._active, self._unread, self._rooms
             )
 
     @on(CryptoEvent)
@@ -2249,6 +2429,19 @@ class DriftApp(App[None]):
 
     async def _send(self, text: str) -> None:
         line = self._pane.write_outgoing(text, _now(), status="sending")
+        # Room mode: post to the room's current rotating address.
+        if self._room_session is not None:
+            try:
+                await self._room_session.send_to_room(text)
+            except Exception:
+                line.status = "failed"
+                self._pane.write_warning(
+                    "could not post — this is a read-only invite room (no token)"
+                    if not self._room_session.can_post() else "send failed"
+                )
+                return
+            line.status = "sent"
+            return
         # Group mode: fan out to every member via the GroupSession.
         if self._group_session is not None:
             try:
@@ -2389,7 +2582,7 @@ class DriftApp(App[None]):
         except storage.StorageError as exc:
             self._pane.write_warning(f"found beacon but could not add contact: {exc}")
             return
-        await self._sidebar.populate(self._contacts, self._active, self._unread)
+        await self._sidebar.populate(self._contacts, self._active, self._unread, self._rooms)
         self._pane.write_system(
             f"🔦 found {handle} → added as contact · run /verify after selecting them"
         )

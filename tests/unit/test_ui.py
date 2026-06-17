@@ -886,3 +886,72 @@ async def test_group_membership_event_renders_system_line() -> None:
         app.post_message(GroupMembershipEvent("add", "carol"))
         await pilot.pause()
         assert len(pane.children) > before  # "→ carol added the group" system line
+
+
+# ---------------------------------------------------------------------------
+# Phase 11 — sovereign room UI
+# ---------------------------------------------------------------------------
+
+from drift.crypto.rooms import TIER_OPEN, Room, make_room  # noqa: E402
+from drift.ui.app import ContactItem, IncomingRoomMessage, SessionUp  # noqa: E402
+
+
+def _rooms_app() -> DriftApp:
+    me = Identity.generate()
+    rooms = {
+        "cats": Room(label="cats", tier=TIER_OPEN, name="cats"),
+        "v": Room.from_qr(make_room(None, tier="dark", label="v").to_qr(), label="v"),
+    }
+    return DriftApp(
+        me, {"alice": {"code": Identity.generate().contact_code()}},
+        "ws://127.0.0.1:1", rooms=rooms,
+    )
+
+
+@pytest.mark.asyncio
+async def test_rooms_appear_in_sidebar_with_hexagon_prefix() -> None:
+    async with _rooms_app().run_test() as pilot:
+        app = pilot.app
+        await pilot.pause()
+        rows = {i.contact_name: i for i in app.query(ContactItem)}
+        # 1:1 contact is not a room; rooms are flagged is_room with their tier.
+        assert rows["alice"].is_room is False
+        assert rows["cats"].is_room is True and rows["cats"].tier == "open"
+        assert rows["v"].is_room is True and rows["v"].tier == "dark"
+        # The ⬡ hexagon marks a room row in its rendered output.
+        assert "⬡" in str(rows["cats"].render())
+
+
+@pytest.mark.asyncio
+async def test_opening_a_room_shows_room_pill_and_keeps_lock_non_maximum() -> None:
+    app = _rooms_app()
+    async with app.run_test() as pilot:
+        await app._open_room(app._rooms["cats"])
+        await pilot.pause()
+        pane = app.query_one("#pane", MessagePane)
+        assert "⬡ ROOM (open)" in (pane.border_subtitle or "")
+        assert app._conversation_name() == "cats"
+        # Rooms are NOT forward-secret → 🔒, never 🔒⁺: even with Tor active the
+        # lock stays non-maximum when the session comes up for a room.
+        app._tor_active = True
+        app._on_session_up(SessionUp("cats"))
+        await pilot.pause()
+        assert app._lock.secure is True
+        assert app._lock.maximum is False
+
+
+@pytest.mark.asyncio
+async def test_room_message_renders_anonymous_tag_and_signed_name() -> None:
+    app = _rooms_app()
+    async with app.run_test() as pilot:
+        await app._open_room(app._rooms["cats"])
+        await pilot.pause()
+        pane = app.query_one("#pane", MessagePane)
+        before = len(pane.children)
+        app.post_message(IncomingRoomMessage("a3f9", "hey", display_name=None, authorized=True))
+        app.post_message(
+            IncomingRoomMessage("b1c2", "yo", display_name="river", authorized=True))
+        app.post_message(
+            IncomingRoomMessage("cccc", "sus", display_name=None, authorized=False))
+        await pilot.pause()
+        assert len(pane.children) >= before + 3

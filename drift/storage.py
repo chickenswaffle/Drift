@@ -23,6 +23,7 @@ from typing import TypedDict
 
 from drift.crypto import Identity
 from drift.crypto.groups import GroupState
+from drift.crypto.rooms import Room
 
 # Config directory: ~/.config/drift/ by default, overridable via $DRIFT_CONFIG.
 # The override lets two terminals run separate identities on one machine (each
@@ -41,6 +42,14 @@ CONTACTS_DIR = CONFIG_DIR / "contacts"
 # same at-rest vault sealing (audit H4): a locked/seized device holds no
 # plaintext group membership.
 GROUPS_DIR = CONFIG_DIR / "groups"
+
+# Phase 11: sovereign rooms are scoped per identity exactly like contacts and
+# groups. A room record can hold real secret material — a dark room's only key,
+# or an invite room's posting secret — so it gets the same per-identity
+# isolation, the same chmod 0o600, and (audit H4) is sealed into the duress
+# vault and shredded on lock/decoy: a seized device must not leak a dark room's
+# secret in plaintext.
+ROOMS_DIR = CONFIG_DIR / "rooms"
 
 # Phase 5: the encrypted duress vault (the at-rest sealed identity store) and the
 # small settings file (currently just the FMD privacy-dial rate). The vault is
@@ -196,6 +205,66 @@ def is_group(identity: Identity, name: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Rooms (Phase 11) — per-identity, keyed by local room label
+# ---------------------------------------------------------------------------
+
+Rooms = dict[str, Room]
+
+
+def rooms_file(identity: Identity) -> Path:
+    """Path to ``identity``'s rooms file, named by its public scan key."""
+    return ROOMS_DIR / f"{identity.scan_keypair.public_b58()}.json"
+
+
+def load_rooms(identity: Identity) -> Rooms:
+    """Load ``identity``'s joined rooms (empty if none saved)."""
+    path = rooms_file(identity)
+    if not path.exists():
+        return {}
+    raw: dict[str, dict[str, object]] = json.loads(path.read_text())
+    return {label: Room.from_dict(d) for label, d in raw.items()}
+
+
+def save_rooms(identity: Identity, rooms: Rooms) -> None:
+    """Persist ``rooms`` for ``identity`` only (``chmod 0o600``)."""
+    ROOMS_DIR.mkdir(parents=True, exist_ok=True)
+    path = rooms_file(identity)
+    path.write_text(
+        json.dumps({label: r.to_dict() for label, r in rooms.items()}, indent=2)
+    )
+    path.chmod(0o600)
+
+
+def add_room(identity: Identity, room: Room) -> Rooms:
+    """Save ``room`` under its local label, returning the updated map."""
+    rooms = load_rooms(identity)
+    rooms[room.label] = room
+    save_rooms(identity, rooms)
+    return rooms
+
+
+def get_room(identity: Identity, label: str) -> Room | None:
+    """The room labelled ``label``, or ``None`` if there is no such room."""
+    return load_rooms(identity).get(label)
+
+
+def remove_room(identity: Identity, label: str) -> Rooms:
+    """Forget the room labelled ``label`` (local only), returning the rest.
+
+    Rooms have no server-side state, so leaving is purely local: the keys can be
+    re-derived at any time from the name (or the saved dark-room secret/QR)."""
+    rooms = load_rooms(identity)
+    rooms.pop(label, None)
+    save_rooms(identity, rooms)
+    return rooms
+
+
+def is_room(identity: Identity, label: str) -> bool:
+    """True if ``label`` refers to a room (used by ``drift chat`` to route)."""
+    return label in load_rooms(identity)
+
+
+# ---------------------------------------------------------------------------
 # Verification
 # ---------------------------------------------------------------------------
 
@@ -243,17 +312,18 @@ def _identity_payload(identity: Identity) -> dict[str, object]:
 
 
 def _shred_contacts_dir() -> None:
-    """Securely delete every plaintext contacts **and groups** file (any
+    """Securely delete every plaintext contacts, groups **and rooms** file (any
     identity's).
 
     Used before materializing a different identity and on lock, so a previous
-    identity's address book — contacts *and* group membership — never lingers in
-    plaintext (audit H4 — a decoy unlock must leave no trace of the real contact
-    graph, of which groups are a part).
+    identity's address book — contacts, group membership *and* joined rooms
+    (including any dark-room secret) — never lingers in plaintext (audit H4 — a
+    decoy unlock must leave no trace of the real contact graph, of which groups
+    and rooms are a part).
     """
     from drift.crypto import panic
 
-    for directory in (CONTACTS_DIR, GROUPS_DIR):
+    for directory in (CONTACTS_DIR, GROUPS_DIR, ROOMS_DIR):
         if directory.exists():
             for path in directory.glob("*.json"):
                 panic.secure_overwrite(path)
@@ -263,13 +333,16 @@ def _materialize(
     identity_dict: dict[str, str],
     contacts: Contacts,
     groups_data: dict[str, dict[str, object]] | None = None,
+    rooms_data: dict[str, dict[str, object]] | None = None,
 ) -> None:
-    """Write identity.json + that identity's contacts and groups (working copy).
+    """Write identity.json + that identity's contacts, groups and rooms (working
+    copy).
 
-    Any other identity's plaintext contacts/groups are shredded first, so
-    switching identities (real ↔ decoy) never leaves a stale address book or
-    group membership on disk. ``groups_data`` is the on-disk JSON form
-    (``{name: GroupState.to_dict()}``).
+    Any other identity's plaintext contacts/groups/rooms are shredded first, so
+    switching identities (real ↔ decoy) never leaves a stale address book, group
+    membership, or joined-room secret on disk. ``groups_data``/``rooms_data`` are
+    the on-disk JSON forms (``{name: GroupState.to_dict()}`` /
+    ``{label: Room.to_dict()}``).
     """
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     IDENTITY_FILE.write_text(json.dumps(identity_dict, indent=2))
@@ -285,6 +358,11 @@ def _materialize(
         gpath = GROUPS_DIR / f"{identity_dict['scan_pub']}.json"
         gpath.write_text(json.dumps(groups_data, indent=2))
         gpath.chmod(0o600)
+    if rooms_data:
+        ROOMS_DIR.mkdir(parents=True, exist_ok=True)
+        rpath = ROOMS_DIR / f"{identity_dict['scan_pub']}.json"
+        rpath.write_text(json.dumps(rooms_data, indent=2))
+        rpath.chmod(0o600)
 
 
 def _generate_decoy() -> tuple[dict[str, str], Contacts]:
@@ -305,6 +383,7 @@ def create_vault(
     duress_mode: str | None = None,
     real_contacts: Contacts | None = None,
     real_groups: dict[str, dict[str, object]] | None = None,
+    real_rooms: dict[str, dict[str, object]] | None = None,
     materialize: bool = True,
     params: object | None = None,
 ) -> None:
@@ -330,11 +409,13 @@ def create_vault(
     kdf = params if params is not None else panic.DEFAULT_PARAMS
     real_contacts = real_contacts or {}
     real_groups = real_groups or {}
+    real_rooms = real_rooms or {}
 
     real_payload = json.dumps({
         "role": "real", **_identity_payload(real_identity),
         "contacts": real_contacts,
         "groups": real_groups,
+        "rooms": real_rooms,
     }).encode()
 
     duress_payload = b""
@@ -360,7 +441,7 @@ def create_vault(
     VAULT_FILE.chmod(0o600)
 
     if materialize:
-        _materialize(real_identity.to_dict(), real_contacts, real_groups)
+        _materialize(real_identity.to_dict(), real_contacts, real_groups, real_rooms)
 
 
 def shred_working_copy() -> None:
@@ -402,10 +483,12 @@ def lock(passphrase: str) -> bool:
     identity = load_identity()
     contacts = load_contacts(identity)
     groups = load_groups(identity)
+    rooms = load_rooms(identity)
     payload_obj = dict(json.loads(current))
     payload_obj["identity"] = identity.to_dict()
     payload_obj["contacts"] = contacts
     payload_obj["groups"] = {name: gs.to_dict() for name, gs in groups.items()}
+    payload_obj["rooms"] = {label: r.to_dict() for label, r in rooms.items()}
     new_vault = panic.reseal_slot(vault, passphrase, json.dumps(payload_obj).encode())
     if new_vault is None:  # pragma: no cover - try_unlock already proved it opens
         return False
@@ -453,12 +536,14 @@ def unlock(passphrase: str) -> str:
 
     data = json.loads(payload)
     if data.get("role") == "real":
-        _materialize(data["identity"], data.get("contacts", {}), data.get("groups", {}))
+        _materialize(data["identity"], data.get("contacts", {}),
+                     data.get("groups", {}), data.get("rooms", {}))
         return UNLOCK_PROCEED
 
     # Duress.
     if data.get("mode") == "decoy":
-        _materialize(data["identity"], data.get("contacts", {}), data.get("groups", {}))
+        _materialize(data["identity"], data.get("contacts", {}),
+                     data.get("groups", {}), data.get("rooms", {}))
         return UNLOCK_PROCEED
 
     # Wipe: destroy the real identity, then present an empty messenger.
