@@ -11,8 +11,8 @@
 # DRIFT
 
 [![CI](https://github.com/chickenswaffle/Drift/actions/workflows/ci.yml/badge.svg)](https://github.com/chickenswaffle/Drift/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-v0.12.0-blue)](https://github.com/chickenswaffle/Drift/releases/tag/v0.12.0)
-[![Phase](https://img.shields.io/badge/phase-10%20%E2%80%94%20WITNESS-brightgreen)](#project-status)
+[![Version](https://img.shields.io/badge/version-v0.13.0-blue)](https://github.com/chickenswaffle/Drift/releases/tag/v0.13.0)
+[![Phase](https://img.shields.io/badge/phase-11%20%E2%80%94%20Sovereign%20Rooms-brightgreen)](#project-status)
 
 > A terminal-first, end-to-end encrypted messenger with rotating, unlinkable receiving addresses.
 
@@ -90,7 +90,7 @@ Being precise here is what separates a serious tool from snake oil.
 
 ## Project status
 
-🧪 **Alpha — Phases 0–6, 8, and the WITNESS proof layer complete.** Usable end-to-end, but not yet independently audited; not ready for high-stakes production use.
+🧪 **Alpha — Phases 0–6, 8, the WITNESS proof layer, and Sovereign Rooms complete.** Usable end-to-end, but not yet independently audited; not ready for high-stakes production use.
 
 | Phase | Goal | Status |
 |-------|------|--------|
@@ -103,6 +103,7 @@ Being precise here is what separates a serious tool from snake oil.
 | 6 | Beacon — ephemeral discoverable handles | ✅ Complete (`v0.9.0`) |
 | 8 | Group messaging (pairwise ratchets, ≤10 members) | ✅ Complete (`v0.11.0`) |
 | 10 | WITNESS — verifiable proof of relay blindness | ✅ Complete (`v0.12.0`) |
+| 11 | Sovereign Rooms — cryptographic chatrooms with no server-side representation, rotating stealth addresses, three security tiers (open/invite/dark), and optional federation sharding | ✅ Complete (`v0.13.0`) |
 
 ---
 
