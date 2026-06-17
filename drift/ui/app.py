@@ -44,7 +44,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import importlib.util
-import os
 import random
 import time
 from collections import deque
@@ -190,77 +189,13 @@ def _sparkline(samples: list[int], width: int = 0) -> str:
 # Themes — selected at module load via DRIFT_THEME env var.
 # ===========================================================================
 
-_THEMES: dict[str, dict[str, str]] = {
-    "matrix": {
-        "primary":       "#00ff41",
-        "secondary":     "#00d4ff",
-        "bg":            "#0a0a0a",
-        "dim_bg":        "#060606",
-        "modal_bg":      "#0c0c0c",
-        "border":        "#1a5c1a",
-        "hover_bg":      "#06160a",
-        "hover_bg_off":  "#160606",  # inactive SecurityPill hover
-        "dim":           "#888888",
-        "warning":       "#ff4444",
-        "scanlines":     "#00ff41 3.5%",
-    },
-    "amber": {
-        "primary":       "#ffaa00",
-        "secondary":     "#ff6600",
-        "bg":            "#0a0800",
-        "dim_bg":        "#060500",
-        "modal_bg":      "#0c0900",
-        "border":        "#5c4500",
-        "hover_bg":      "#160d00",
-        "hover_bg_off":  "#160500",
-        "dim":           "#887766",
-        "warning":       "#ff3300",
-        "scanlines":     "#ffaa00 3.5%",
-    },
-    "frost": {
-        "primary":       "#88ccff",
-        "secondary":     "#44aaff",
-        "bg":            "#080c10",
-        "dim_bg":        "#060810",
-        "modal_bg":      "#0a0e14",
-        "border":        "#1a3a5c",
-        "hover_bg":      "#061018",
-        "hover_bg_off":  "#060818",
-        "dim":           "#8899aa",
-        "warning":       "#ff6644",
-        "scanlines":     "#88ccff 3%",
-    },
-    "redacted": {
-        "primary":       "#ff3333",
-        "secondary":     "#ff8800",
-        "bg":            "#0a0a0a",
-        "dim_bg":        "#060606",
-        "modal_bg":      "#0c0c0c",
-        "border":        "#5c1a1a",
-        "hover_bg":      "#160808",
-        "hover_bg_off":  "#100000",
-        "dim":           "#888888",
-        "warning":       "#ff0000",
-        "scanlines":     "#ff3333 3%",
-    },
-    "ghost": {
-        "primary":       "#bbbbbb",
-        "secondary":     "#999999",
-        "bg":            "#0a0a0a",
-        "dim_bg":        "#060606",
-        "modal_bg":      "#0c0c0c",
-        "border":        "#3a3a3a",
-        "hover_bg":      "#111111",
-        "hover_bg_off":  "#0e0e0e",
-        "dim":           "#666666",
-        "warning":       "#ff4444",
-        "scanlines":     "#bbbbbb 2%",
-    },
-}
+# Palettes live in drift.ui.theme (no Textual import) so the lightweight CLI
+# welcome screen can share them; selection still honours DRIFT_THEME. _THEMES is
+# re-exported here for backwards compatibility (tests and callers import it).
+from drift.ui.theme import THEMES as _THEMES  # noqa: E402,F401
+from drift.ui.theme import active_theme as _active_theme  # noqa: E402
 
-_ACTIVE_THEME = _THEMES.get(
-    os.environ.get("DRIFT_THEME", "matrix").lower(), _THEMES["matrix"]
-)
+_ACTIVE_THEME = _active_theme()
 
 # Short aliases used in Rich markup and render() methods throughout this module.
 _P  = _ACTIVE_THEME["primary"]

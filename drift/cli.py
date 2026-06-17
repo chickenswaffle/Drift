@@ -38,9 +38,27 @@ app = typer.Typer(
     name="drift",
     help="Terminal-first E2E encrypted messenger with rotating stealth addresses.",
     add_completion=False,
-    no_args_is_help=True,
+    # No no_args_is_help: bare `drift` shows the welcome screen (the callback
+    # below) instead of a help dump.
+    invoke_without_command=True,
 )
 console = Console()
+
+
+@app.callback(invoke_without_command=True)
+def _main(
+    ctx: typer.Context,
+    no_animation: bool = typer.Option(
+        False, "--no-animation", help="Skip the boot-sequence animation on the welcome screen."
+    ),
+) -> None:
+    """Terminal-first E2E encrypted messenger with rotating stealth addresses."""
+    # Only fire for a bare `drift` (no subcommand). Subcommands run as usual.
+    if ctx.invoked_subcommand is not None:
+        return
+    from drift.ui.welcome import run as run_welcome
+
+    raise typer.Exit(run_welcome(no_animation=no_animation))
 
 
 def _require_identity() -> Identity:
