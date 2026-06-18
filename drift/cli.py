@@ -1383,6 +1383,7 @@ async def _chat_async(
         async with Session(
             identity, contact_code, relay_url,
             tor_client=tor_client, fmd_key=fmd_key, prekeys=prekeys,
+            on_prekeys_changed=lambda p: storage.save_prekey_privates(identity, p),
         ) as session:
             console.print(
                 f"[green]Connected.[/green] Chatting with [bold]{name}[/bold]. "

@@ -51,7 +51,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Callable, Coroutine
 from dataclasses import dataclass
 
 from cryptography.exceptions import InvalidTag
@@ -75,11 +75,13 @@ from drift.crypto.sealed import parse as parse_sender
 from drift.crypto.sealed import seal as seal_sender
 from drift.crypto.stealth import derive_one_time_address, scan_for_message
 from drift.crypto.x3dh import (
+    ONE_TIME_LOW_WATERMARK,
     PreKeyBundle,
     PreKeyPrivates,
     X3DHError,
     X3DHHeader,
     derive_master_secret_recv,
+    replenish_one_time,
     verify_prekey_bundle,
     x3dh_send,
 )
@@ -173,6 +175,10 @@ def _addr_digest(addr: bytes) -> str:
 # operations the session already performs (no crypto behaviour changes); the
 # only data exposed is the one-time address — which is public on the wire.
 EventHook = Callable[[str, str], None]
+# Called with the updated prekey privates after a mid-session replenishment, so
+# the owner (CLI/TUI) can persist the new one-time prekey privates to the vault.
+# None → keep them in-memory only (sufficient for the live session).
+PreKeysHook = Callable[["PreKeyPrivates"], None]
 
 
 class PairwiseRatchet:
@@ -240,6 +246,9 @@ class PairwiseRatchet:
         self._bootstrap_their_pub: bytes | None = None
         self._ratchet = init_receiver(self._root_secret, self._responder_keypair)
         self._last_sent_addr: bytes | None = None
+        # Set True by the latest x3dh_bootstrap_decrypt when it burns one of our
+        # one-time prekeys, so the owning Session can top up the relay-side pool.
+        self._otpk_just_consumed = False
 
     @property
     def burn_shared(self) -> bytes:
@@ -362,6 +371,7 @@ class PairwiseRatchet:
         our state — the same H1 guarantee ``ratchet_decrypt`` already provides.
         ``InvalidTag`` (genuine tamper of a message addressed to us) propagates.
         """
+        self._otpk_just_consumed = False
         if self._prekey_privates is None:
             raise RatchetError("no prekey privates — cannot complete X3DH handshake")
         if self._ratchet.their_ratchet_pub is not None:
@@ -378,7 +388,14 @@ class PairwiseRatchet:
         self._ratchet = trial
         if x3dh_header.one_time_prekey_id is not None:
             self._prekey_privates.consume(x3dh_header.one_time_prekey_id)
+            self._otpk_just_consumed = True
         return plaintext
+
+    @property
+    def otpk_just_consumed(self) -> bool:
+        """True if the most recent :meth:`x3dh_bootstrap_decrypt` burned a
+        one-time prekey — the signal the Session uses to replenish the relay."""
+        return self._otpk_just_consumed
 
     def decrypt_ratchet(
         self, header: Header, ratchet_ct: bytes, root_mix: bytes | None
@@ -475,6 +492,7 @@ class Session:
         tor_client: TorClient | None = None,
         fmd_key: FMDKeypair | None = None,
         prekeys: PreKeyPrivates | None = None,
+        on_prekeys_changed: PreKeysHook | None = None,
     ) -> None:
         # Optional sink for observable (non-secret) transport events; the UI
         # passes a callback that re-emits them as typed messages. Never carries
@@ -482,6 +500,9 @@ class Session:
         self._on_event = on_event
         # Optional callback for verified burn tombstones from the relay.
         self._on_burn = on_burn
+        # Optional persistence hook for prekey privates created during a
+        # mid-session replenishment (see ``_maybe_replenish_prekeys``).
+        self._on_prekeys_changed = on_prekeys_changed
         self._identity = identity
         # Phase 3: when a Tor circuit is supplied the session stays oblivious to
         # it — it only forwards the SOCKS5 endpoint to the transport, which dials
@@ -507,6 +528,13 @@ class Session:
             _, prekeys = generate_prekey_bundle(identity)
         self._prekeys = prekeys
         self._prekey_bundle_published = False
+        # Mid-session relay-side OTPK replenishment: ``_replenishing`` is a
+        # single-flight guard (a burst of consumed OTPKs must not fire a storm of
+        # overlapping top-ups), and ``_bg_tasks`` keeps the fire-and-forget tasks
+        # referenced so the loop can't GC them mid-flight and we can cancel them
+        # on close.
+        self._replenishing = False
+        self._bg_tasks: set[asyncio.Task[None]] = set()
 
         # All per-peer crypto — the Double Ratchet, its bootstrap material (X3DH
         # plus the legacy deterministic fallback), the peer's public keys and the
@@ -569,6 +597,10 @@ class Session:
         # forward-secret session with us asynchronously. Best-effort — a relay
         # that rejects it just means peers fall back to the legacy bootstrap.
         await self._publish_prekeys()
+        # If the relay already shows our pool drained below the watermark (peers
+        # consumed OTPKs while we were offline, or our persisted batch was low),
+        # top it up now — in the background so connect() stays fast.
+        self._spawn_bg(self._maybe_replenish_prekeys())
 
     async def _publish_prekeys(self) -> None:
         """Publish our public prekey bundle to the relay (best-effort, once)."""
@@ -583,6 +615,55 @@ class Session:
             self._emit("prekeys", f"bundle published · {self._prekeys.one_time_count()} OTPKs")
         except RelayError as exc:
             logger.debug("prekey publish failed (non-fatal): %s", exc)
+
+    def _spawn_bg(self, coro: Coroutine[object, object, None]) -> None:
+        """Fire-and-forget a coroutine without blocking the caller, keeping a
+        reference so the event loop can't GC it mid-flight."""
+        task = asyncio.create_task(coro)
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
+
+    async def _maybe_replenish_prekeys(self) -> None:
+        """Top up our relay-side one-time prekeys when senders have drained the
+        published pool below the low watermark.
+
+        Fired in the background after we burn an OTPK on receipt (a sender opened
+        a session with us) and once at startup. Without this, a recipient who
+        stays online while many senders consume their OTPKs drains to zero and
+        then silently serves weaker, OTPK-less handshakes. Best-effort: any relay
+        error is logged and swallowed, exactly like the initial publish.
+        """
+        if self._replenishing:
+            return  # a top-up is already in flight — don't pile on
+        self._replenishing = True
+        try:
+            addr = self._identity.scan_keypair.public_b58()
+            try:
+                status = await self._client.prekey_status(addr)
+            except RelayError as exc:
+                logger.debug("prekey status check failed (non-fatal): %s", exc)
+                return
+            if status is None:
+                return  # nothing published yet — _publish_prekeys handles that
+            if int(status.get("one_time_count", 0)) >= ONE_TIME_LOW_WATERMARK:
+                return  # pool is still healthy
+            new_ids = replenish_one_time(self._prekeys)
+            payload = [
+                {"id": pid, "pub": b58encode(self._prekeys.one_time[pid].public_bytes())}
+                for pid in new_ids
+            ]
+            try:
+                await self._client.replenish_prekeys(addr, payload)
+            except RelayError as exc:
+                logger.debug("prekey replenish failed (non-fatal): %s", exc)
+                return
+            # Persist the new privates so a later restart can still complete the
+            # handshakes the relay will now serve from them (no-op if unwired).
+            if self._on_prekeys_changed is not None:
+                self._on_prekeys_changed(self._prekeys)
+            self._emit("prekeys_replenish", str(len(new_ids)))
+        finally:
+            self._replenishing = False
 
     async def _ensure_peer_bundle(self) -> None:
         """Fetch the peer's prekey bundle once before our first send. On a 404 /
@@ -626,6 +707,8 @@ class Session:
         return self._client.is_onion
 
     async def close(self) -> None:
+        for task in list(self._bg_tasks):
+            task.cancel()
         await self._client.close()
 
     async def __aenter__(self) -> Session:
@@ -726,6 +809,7 @@ class Session:
             self._emit("recv", _addr_digest(item.one_time_addr))
 
             x3dh_header, fs_pub, header, ratchet_ct = parsed
+            consumed_otpk = False
             async with self._lock:
                 # 1:1: the peer is unambiguous, so an auth failure here is tamper —
                 # both decrypt paths let InvalidTag propagate.
@@ -735,6 +819,7 @@ class Session:
                     plaintext = self._channel.x3dh_bootstrap_decrypt(
                         x3dh_header, header, ratchet_ct
                     )
+                    consumed_otpk = self._channel.otpk_just_consumed
                 else:
                     # Legacy bootstrap forward-secrecy secret (audit H3): recovered
                     # from the ephemeral's public half. ratchet_decrypt applies it
@@ -747,6 +832,10 @@ class Session:
                     )
                     plaintext = self._channel.decrypt_ratchet(header, ratchet_ct, root_mix)
                 self._emit("ratchet", f"receiving chain step · msg #{self._channel.recv_count}")
+            # A sender just burned one of our OTPKs; top the relay pool back up in
+            # the background so we never start serving weaker OTPK-less handshakes.
+            if consumed_otpk:
+                self._spawn_bg(self._maybe_replenish_prekeys())
             self._emit("erase", "message key erased")
             yield plaintext.decode()
         logger.debug("messages: firehose ended — relay connection closed")

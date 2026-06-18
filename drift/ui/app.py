@@ -794,6 +794,7 @@ class CryptoTicker(Static):
         "tor": ("⬡", _S),
         "sealed": ("✉", _S),
         "prekeys": ("🔑", _S),
+        "prekeys_replenish": ("⚡", _S),  # relay OTPK pool topped up mid-session
         "legacy": ("⚠", "#ffaa00"),  # amber: X3DH unavailable, legacy bootstrap
     }
 
@@ -816,6 +817,8 @@ class CryptoTicker(Static):
             body = detail
         elif kind == "prekeys":
             body = detail
+        elif kind == "prekeys_replenish":
+            body = f"prekeys replenished — {detail} one-time prekeys uploaded"
         elif kind == "legacy":
             body = "legacy bootstrap — contact has no prekey bundle"
         else:  # ratchet
@@ -1883,6 +1886,7 @@ class DriftApp(App[None]):
             tor_client=self._tor_client,
             fmd_key=self._fmd_key,
             prekeys=self._prekeys,
+            on_prekeys_changed=lambda p: storage.save_prekey_privates(self._identity, p),
         )
         self._session = session
         try:
