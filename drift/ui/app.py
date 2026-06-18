@@ -979,8 +979,8 @@ class _SentLine(Static):
     """An outgoing message line whose delivery-status glyph can update in place."""
 
     _GLYPH: ClassVar[dict[str, tuple[str, str]]] = {
-        "sending": ("◌", "#3a8a4a"),    # dim green
-        "sent": ("✓", "#3a8a4a"),       # delivered to relay
+        "sending": ("⟳", "#3a8a4a"),    # in flight — spinner until relay ACK
+        "sent": ("✓", _P),              # delivered to relay (ACK)
         "failed": ("✗", _WN),
     }
 
@@ -1040,7 +1040,7 @@ class MessagePane(VerticalScroll):
         return line
 
     def write_system(self, text: str) -> None:
-        self._add(Static(f"[{_DM} italic]· {text}[/]"))
+        self._add(Static(RichRule(title=f"[{_DM}]{text}[/]", style=_BD, characters="─")))
 
     def write_warning(self, text: str) -> None:
         self._add(Static(f"[bold red]⚠  {text}[/]"))
