@@ -21,9 +21,10 @@ import os
 from pathlib import Path
 from typing import TypedDict
 
-from drift.crypto import Identity
+from drift.crypto import Identity, x3dh
 from drift.crypto.groups import GroupState
 from drift.crypto.rooms import Room
+from drift.crypto.x3dh import PreKeyPrivates
 
 # Config directory: ~/.config/drift/ by default, overridable via $DRIFT_CONFIG.
 # The override lets two terminals run separate identities on one machine (each
@@ -50,6 +51,14 @@ GROUPS_DIR = CONFIG_DIR / "groups"
 # vault and shredded on lock/decoy: a seized device must not leak a dark room's
 # secret in plaintext.
 ROOMS_DIR = CONFIG_DIR / "rooms"
+
+# X3DH (audit H3): the private halves of our published prekeys — the signed
+# prekey and the batch of one-time prekeys. Scoped per identity exactly like
+# contacts/groups/rooms, sealed into the duress vault and shredded on
+# lock/decoy/wipe (the same at-rest protection): a one-time prekey private is the
+# secret whose deletion-after-use closes H3, so a seized locked device must not
+# leak it in plaintext.
+PREKEYS_DIR = CONFIG_DIR / "prekeys"
 
 # Phase 5: the encrypted duress vault (the at-rest sealed identity store) and the
 # small settings file (currently just the FMD privacy-dial rate). The vault is
@@ -265,6 +274,60 @@ def is_room(identity: Identity, label: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# X3DH prekeys (audit H3) — per-identity private prekey store
+# ---------------------------------------------------------------------------
+
+def prekeys_file(identity: Identity) -> Path:
+    """Path to ``identity``'s prekey privates, named by its public scan key."""
+    return PREKEYS_DIR / f"{identity.scan_keypair.public_b58()}.json"
+
+
+def load_prekey_privates(identity: Identity) -> PreKeyPrivates | None:
+    """Load ``identity``'s prekey privates, or ``None`` if none have been generated."""
+    path = prekeys_file(identity)
+    if not path.exists():
+        return None
+    return PreKeyPrivates.from_dict(json.loads(path.read_text()))
+
+
+def save_prekey_privates(identity: Identity, privates: PreKeyPrivates) -> None:
+    """Persist ``identity``'s prekey privates (``chmod 0o600``)."""
+    PREKEYS_DIR.mkdir(parents=True, exist_ok=True)
+    path = prekeys_file(identity)
+    path.write_text(json.dumps(privates.to_dict(), indent=2))
+    path.chmod(0o600)
+
+
+def ensure_prekeys(identity: Identity) -> PreKeyPrivates:
+    """
+    Return ``identity``'s prekey privates, generating them on first use and
+    keeping them maintained: rotate the signed prekey weekly (retaining the
+    previous one for 24h), drop the previous one once its grace elapses, and
+    replenish one-time prekeys when fewer than the watermark remain. Persists any
+    change.
+    """
+    privates = load_prekey_privates(identity)
+    changed = False
+    if privates is None:
+        _, privates = x3dh.generate_prekey_bundle(identity)
+        changed = True
+    else:
+        if x3dh.needs_signed_prekey_rotation(privates):
+            x3dh.rotate_signed_prekey(identity, privates)
+            changed = True
+        had_prev = privates.prev_signed_prekey is not None
+        x3dh.drop_expired_prev_signed_prekey(privates)
+        if had_prev and privates.prev_signed_prekey is None:
+            changed = True
+        if x3dh.low_on_one_time(privates):
+            x3dh.replenish_one_time(privates)
+            changed = True
+    if changed:
+        save_prekey_privates(identity, privates)
+    return privates
+
+
+# ---------------------------------------------------------------------------
 # Verification
 # ---------------------------------------------------------------------------
 
@@ -323,7 +386,7 @@ def _shred_contacts_dir() -> None:
     """
     from drift.crypto import panic
 
-    for directory in (CONTACTS_DIR, GROUPS_DIR, ROOMS_DIR):
+    for directory in (CONTACTS_DIR, GROUPS_DIR, ROOMS_DIR, PREKEYS_DIR):
         if directory.exists():
             for path in directory.glob("*.json"):
                 panic.secure_overwrite(path)
@@ -334,15 +397,17 @@ def _materialize(
     contacts: Contacts,
     groups_data: dict[str, dict[str, object]] | None = None,
     rooms_data: dict[str, dict[str, object]] | None = None,
+    prekeys_data: dict[str, object] | None = None,
 ) -> None:
-    """Write identity.json + that identity's contacts, groups and rooms (working
-    copy).
+    """Write identity.json + that identity's contacts, groups, rooms and prekeys
+    (working copy).
 
-    Any other identity's plaintext contacts/groups/rooms are shredded first, so
-    switching identities (real ↔ decoy) never leaves a stale address book, group
-    membership, or joined-room secret on disk. ``groups_data``/``rooms_data`` are
-    the on-disk JSON forms (``{name: GroupState.to_dict()}`` /
-    ``{label: Room.to_dict()}``).
+    Any other identity's plaintext contacts/groups/rooms/prekeys are shredded
+    first, so switching identities (real ↔ decoy) never leaves a stale address
+    book, group membership, joined-room secret, or prekey private on disk.
+    ``groups_data``/``rooms_data`` are the on-disk JSON forms
+    (``{name: GroupState.to_dict()}`` / ``{label: Room.to_dict()}``);
+    ``prekeys_data`` is ``PreKeyPrivates.to_dict()``.
     """
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     IDENTITY_FILE.write_text(json.dumps(identity_dict, indent=2))
@@ -363,6 +428,11 @@ def _materialize(
         rpath = ROOMS_DIR / f"{identity_dict['scan_pub']}.json"
         rpath.write_text(json.dumps(rooms_data, indent=2))
         rpath.chmod(0o600)
+    if prekeys_data:
+        PREKEYS_DIR.mkdir(parents=True, exist_ok=True)
+        ppath = PREKEYS_DIR / f"{identity_dict['scan_pub']}.json"
+        ppath.write_text(json.dumps(prekeys_data, indent=2))
+        ppath.chmod(0o600)
 
 
 def _generate_decoy() -> tuple[dict[str, str], Contacts]:
@@ -384,6 +454,7 @@ def create_vault(
     real_contacts: Contacts | None = None,
     real_groups: dict[str, dict[str, object]] | None = None,
     real_rooms: dict[str, dict[str, object]] | None = None,
+    real_prekeys: dict[str, object] | None = None,
     materialize: bool = True,
     params: object | None = None,
 ) -> None:
@@ -410,12 +481,14 @@ def create_vault(
     real_contacts = real_contacts or {}
     real_groups = real_groups or {}
     real_rooms = real_rooms or {}
+    real_prekeys = real_prekeys or {}
 
     real_payload = json.dumps({
         "role": "real", **_identity_payload(real_identity),
         "contacts": real_contacts,
         "groups": real_groups,
         "rooms": real_rooms,
+        "prekeys": real_prekeys,
     }).encode()
 
     duress_payload = b""
@@ -441,7 +514,9 @@ def create_vault(
     VAULT_FILE.chmod(0o600)
 
     if materialize:
-        _materialize(real_identity.to_dict(), real_contacts, real_groups, real_rooms)
+        _materialize(
+            real_identity.to_dict(), real_contacts, real_groups, real_rooms, real_prekeys
+        )
 
 
 def shred_working_copy() -> None:
@@ -484,11 +559,13 @@ def lock(passphrase: str) -> bool:
     contacts = load_contacts(identity)
     groups = load_groups(identity)
     rooms = load_rooms(identity)
+    prekeys = load_prekey_privates(identity)
     payload_obj = dict(json.loads(current))
     payload_obj["identity"] = identity.to_dict()
     payload_obj["contacts"] = contacts
     payload_obj["groups"] = {name: gs.to_dict() for name, gs in groups.items()}
     payload_obj["rooms"] = {label: r.to_dict() for label, r in rooms.items()}
+    payload_obj["prekeys"] = prekeys.to_dict() if prekeys is not None else {}
     new_vault = panic.reseal_slot(vault, passphrase, json.dumps(payload_obj).encode())
     if new_vault is None:  # pragma: no cover - try_unlock already proved it opens
         return False
@@ -537,13 +614,15 @@ def unlock(passphrase: str) -> str:
     data = json.loads(payload)
     if data.get("role") == "real":
         _materialize(data["identity"], data.get("contacts", {}),
-                     data.get("groups", {}), data.get("rooms", {}))
+                     data.get("groups", {}), data.get("rooms", {}),
+                     data.get("prekeys", {}))
         return UNLOCK_PROCEED
 
     # Duress.
     if data.get("mode") == "decoy":
         _materialize(data["identity"], data.get("contacts", {}),
-                     data.get("groups", {}), data.get("rooms", {}))
+                     data.get("groups", {}), data.get("rooms", {}),
+                     data.get("prekeys", {}))
         return UNLOCK_PROCEED
 
     # Wipe: destroy the real identity, then present an empty messenger.

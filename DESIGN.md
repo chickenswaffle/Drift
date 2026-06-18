@@ -74,7 +74,7 @@ Only Alice can run this match, because only she has `scan_priv`. The relay is a 
 
 ## 4. Message encryption: the Double Ratchet
 
-Once the first message establishes a shared secret (via an X3DH-style handshake built on the stealth keys above), the conversation runs Signal's **Double Ratchet**. You don't need to invent this — it's well documented and there are vetted implementations to learn from.
+Once the first message establishes a shared secret (via the **X3DH** handshake described in "Bootstrap" below), the conversation runs Signal's **Double Ratchet**. You don't need to invent this — it's well documented and there are vetted implementations to learn from.
 
 It buys you two things that static keys can't:
 - **Forward secrecy** — steal today's keys and *past* messages remain unreadable.
@@ -82,21 +82,57 @@ It buys you two things that static keys can't:
 
 Every individual message is sealed with an AEAD cipher — use **XChaCha20-Poly1305** (the extended-nonce variant is forgiving about nonce handling, which is exactly what you want when you're learning).
 
-### Bootstrap and the exact forward-secrecy boundary
+### Bootstrap: X3DH asynchronous key agreement
 
-The "X3DH-style handshake" above is, in this build, **not** full X3DH — there is no prekey server and no interactive round trip. Instead both peers derive a shared root and an initial responder DH keypair *deterministically* from the static spend keys (`root = HKDF(ECDH(my_spend, their_spend))`), and whoever sends first promotes itself to ratchet initiator on the spot. Be precise about what that costs, because it is exactly where forward secrecy is subtle (audit H3):
+The first message establishes the shared root via **X3DH** (Extended Triple
+Diffie-Hellman, the Signal handshake — `crypto/x3dh.py`, `transport/session.py`),
+implemented to spec. Every user publishes a **prekey bundle** to the relay ahead
+of time: a long-lived **signed prekey** (X25519, signed by the identity's Ed25519
+key) plus a batch of **one-time prekeys** (OTPKs). When you open a chat, your
+client fetches the contact's bundle, verifies the signature, and runs:
 
-- **Once the DH ratchet has turned even once, forward secrecy is full.** Every chain after the first reply is keyed by fresh, deleted random DH keys, so later key theft reveals nothing about those messages. This is the ordinary Double Ratchet guarantee and it holds.
+```
+DH1 = ECDH(IK_A, SPK_B)     IK = the long-term X25519 spend key
+DH2 = ECDH(EK_A, IK_B)      EK = a fresh single-use ephemeral, discarded at once
+DH3 = ECDH(EK_A, SPK_B)     SPK = the recipient's signed prekey
+DH4 = ECDH(EK_A, OPK_B)     OPK = a one-time prekey, consumed and deleted
+root = HKDF(F ‖ DH1 ‖ DH2 ‖ DH3 ‖ DH4)
+```
 
-- **The opening burst is the only special case.** These are the messages the initiator sends *before the peer's first reply* — they ride the bootstrap chain, whose root is the deterministic one above. A naive deterministic bootstrap means a later compromise of **either** party's long-term spend key reconstructs that root and decrypts the whole opening burst. To narrow that, the initiator now folds a **fresh single-use ephemeral** into the bootstrap root: it computes `ECDH(ephemeral, recipient_spend_pub)`, mixes it into the root, and **discards the ephemeral's private half immediately** (it is never stored, never derived from the long-term key). The ephemeral's public half travels inside the sealed-sender envelope of every bootstrap-chain message; the recipient recovers the same secret with `ECDH(recipient_spend_priv, ephemeral_pub)`.
+The recipient's signed prekey is its initial Double Ratchet key, so the ratchet
+takes over immediately after. The X3DH header (`IK_A`, `EK_A`, prekey ids) rides
+*inside* the sealed-sender envelope of every opening-chain message, so a reordered
+opening message still bootstraps the responder, and the relay sees nothing.
 
-  The result — stated exactly:
-  - A later compromise of the **initiator's** long-term spend key **no longer** decrypts the opening burst. The mixed-in secret depended on an ephemeral private key that no longer exists, so the reconstructed deterministic root is not enough. ✅ This is the headline "steal today's keys, past messages stay safe" guarantee, now honoured for the sender's opening messages.
-  - A later compromise of the **recipient's** long-term spend key **still** decrypts the opening burst, because the recipient recovers the mix-in secret from `recipient_spend_priv` and the public ephemeral on the wire. ❌ This residue is **fundamental** to messaging someone from their long-term public key alone, with no prior interaction: the recipient contributes no deleted secret of their own, so their long-term key is the only thing protecting that first message, and compromising it must reveal it. Closing this needs an interactive prekey (true X3DH with one-time prekeys the recipient deletes) — a later phase.
+This is what makes forward secrecy complete (audit H3):
 
-- **Post-compromise security** is unchanged: a transient state compromise heals on the next DH ratchet from fresh randomness.
+- **Once the DH ratchet has turned even once, forward secrecy is full** — the
+  ordinary Double Ratchet guarantee, unchanged.
 
-So the honest one-liner: *forward secrecy is complete from the first ratchet turn onward; for the initiator's pre-reply opening burst it now holds against the sender's own key theft but not against theft of the recipient's long-term key.*
+- **The opening burst is now forward-secret against full key compromise.** The
+  one-time prekey's private half is **deleted the moment it is used** (the relay
+  hands each OTPK out exactly once; the recipient consumes it on receipt), and the
+  sender's `EK_A` private is discarded immediately. So a later compromise of
+  **either** party's long-term keys cannot reconstruct the opening master secret:
+  the OTPK it depended on no longer exists anywhere. ✅ This closes the residue
+  that the earlier deterministic bootstrap left against *recipient* key theft.
+
+- **Post-compromise security** is unchanged: a transient state compromise heals on
+  the next DH ratchet from fresh randomness.
+
+**Graceful degradation (legacy bootstrap).** If the relay has no bundle for a
+contact — an old client, or a bundle that expired — the sender falls back to the
+previous **deterministic** bootstrap (`root = HKDF(ECDH(my_spend, their_spend))`
+with a deterministic responder keypair) plus a fresh, discarded forward-secrecy
+ephemeral folded into the root. That fallback is forward-secret against the
+*sender's* later key theft but **not** the recipient's — the documented earlier
+boundary — and the UI shows a one-time amber warning when it engages. It exists
+only for interoperability during the transition; with prekeys published (the
+default since `drift init`), every conversation uses full X3DH.
+
+So the honest one-liner: *with X3DH prekeys, forward secrecy is complete from the
+very first message; the legacy deterministic bootstrap survives only as a
+visibly-warned fallback for peers who have published no bundle.*
 
 ---
 

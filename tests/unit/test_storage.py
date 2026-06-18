@@ -82,6 +82,8 @@ def gstore(tmp_path, monkeypatch):  # type: ignore[no-untyped-def]
     monkeypatch.setattr(storage, "IDENTITY_FILE", tmp_path / "identity.json")
     monkeypatch.setattr(storage, "CONTACTS_DIR", tmp_path / "contacts")
     monkeypatch.setattr(storage, "GROUPS_DIR", tmp_path / "groups")
+    monkeypatch.setattr(storage, "ROOMS_DIR", tmp_path / "rooms")
+    monkeypatch.setattr(storage, "PREKEYS_DIR", tmp_path / "prekeys")
     monkeypatch.setattr(storage, "VAULT_FILE", tmp_path / "vault.bin")
     monkeypatch.setattr(storage, "SETTINGS_FILE", tmp_path / "settings.json")
     return tmp_path
@@ -137,3 +139,71 @@ def test_vault_seals_and_restores_groups(gstore) -> None:  # type: ignore[no-unt
     restored = storage.load_groups(idt)
     assert "ops" in restored
     assert restored["ops"].group_id.raw == g.group_id.raw
+
+
+# ---------------------------------------------------------------------------
+# X3DH prekeys (audit H3) — generation, persistence, and at-rest vault sealing
+# ---------------------------------------------------------------------------
+
+def test_ensure_prekeys_generates_and_persists(gstore) -> None:  # type: ignore[no-untyped-def]
+    idt = Identity.generate()
+    assert storage.load_prekey_privates(idt) is None
+    privates = storage.ensure_prekeys(idt)
+    assert privates.one_time_count() == 10
+    # Persisted: a second call loads the same signed prekey, not a fresh one.
+    again = storage.ensure_prekeys(idt)
+    assert again.signed_prekey_id == privates.signed_prekey_id
+
+
+def test_prekeys_file_is_chmod_600(gstore) -> None:  # type: ignore[no-untyped-def]
+    idt = Identity.generate()
+    storage.ensure_prekeys(idt)
+    mode = storage.prekeys_file(idt).stat().st_mode & 0o777
+    assert mode == 0o600
+
+
+def test_ensure_prekeys_replenishes_when_low(gstore) -> None:  # type: ignore[no-untyped-def]
+    idt = Identity.generate()
+    privates = storage.ensure_prekeys(idt)
+    # Drain to below the watermark, persist, then re-ensure → replenished.
+    for pid in list(privates.one_time)[:8]:
+        privates.consume(pid)
+    storage.save_prekey_privates(idt, privates)
+    assert storage.load_prekey_privates(idt).one_time_count() == 2
+    refreshed = storage.ensure_prekeys(idt)
+    assert refreshed.one_time_count() >= 10
+
+
+def test_vault_seals_and_restores_prekeys(gstore) -> None:  # type: ignore[no-untyped-def]
+    idt = Identity.generate()
+    privates = storage.ensure_prekeys(idt)
+    spk_id = privates.signed_prekey_id
+    storage.create_vault(idt, "pw", materialize=True, real_prekeys=privates.to_dict())
+
+    # Lock: re-seal (incl. prekeys) and shred the plaintext prekey privates.
+    assert storage.lock("pw") is True
+    assert storage.load_prekey_privates(idt) is None  # no prekey privates at rest
+
+    # Unlock: prekeys come back from the vault.
+    assert storage.unlock("pw") == storage.UNLOCK_PROCEED
+    restored = storage.load_prekey_privates(idt)
+    assert restored is not None
+    assert restored.signed_prekey_id == spk_id
+
+
+def test_decoy_unlock_shreds_real_prekeys(gstore) -> None:  # type: ignore[no-untyped-def]
+    idt = Identity.generate()
+    privates = storage.ensure_prekeys(idt)
+    real_pub = privates.signed_prekey.public_b58()
+    storage.create_vault(
+        idt, "real-pw",
+        duress_passphrase="duress-pw", duress_mode="decoy",
+        materialize=True, real_prekeys=privates.to_dict(),
+    )
+    storage.lock("real-pw")  # seal + shred the real working copy
+
+    # A decoy unlock must leave none of the real prekey material on disk (H4).
+    assert storage.unlock("duress-pw") == storage.UNLOCK_PROCEED
+    on_disk = list((gstore / "prekeys").glob("*.json"))
+    for path in on_disk:
+        assert real_pub not in path.read_text()
