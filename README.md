@@ -11,12 +11,21 @@
 # DRIFT
 
 [![CI](https://github.com/chickenswaffle/Drift/actions/workflows/ci.yml/badge.svg)](https://github.com/chickenswaffle/Drift/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-v0.13.0-blue)](https://github.com/chickenswaffle/Drift/releases/tag/v0.13.0)
+[![Version](https://img.shields.io/badge/version-v0.14.1-blue)](https://github.com/chickenswaffle/Drift/releases/tag/v0.14.1)
 [![Phase](https://img.shields.io/badge/phase-11%20%E2%80%94%20Sovereign%20Rooms-brightgreen)](#project-status)
 
 > A terminal-first, end-to-end encrypted messenger with rotating, unlinkable receiving addresses.
 
 No phone numbers. No accounts. No central authority that can read or hand over your messages.
+
+> ⚠ **v0.14.1 is a wire-breaking protocol change. Existing sessions with
+> pre-v0.14.1 clients will fail to decrypt. Both parties must upgrade.**
+>
+> The M1 audit fix binds the message key to the spend key, changing the stealth
+> message-key derivation. A v0.14.1 client and a pre-v0.14.1 client can no longer
+> exchange messages in either direction. Separately, **safety numbers changed
+> (M5) — re-verify your contacts** with `drift verify` after upgrading. See the
+> [CHANGELOG](CHANGELOG.md#0141--2026-06-18).
 
 ## Try it in your browser
 

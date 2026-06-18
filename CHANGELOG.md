@@ -13,6 +13,9 @@ DRIFT uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.14.1] — 2026-06-18
 
+> ⚠ **v0.14.1 is a wire-breaking protocol change. Existing sessions with
+> pre-v0.14.1 clients will fail to decrypt. Both parties must upgrade.**
+
 **Audit findings M1–M3, M5 + lows L1, L3 — scan/spend privilege separation, burn
 token replay, beacon hash, safety number scope.** A correctness-and-honesty
 release closing the remaining medium audit findings and two straightforward lows.
@@ -22,7 +25,7 @@ update — 2026-06-18) and the updated DESIGN.md.
 > **Breaking / migration.** Two changes are wire/format breaking and require both
 > peers on ≥ `0.14.1`:
 > - **M1** changes the stealth message-key derivation, so a `0.14.1` client and an
->   older client can no longer exchange messages.
+>   older client can no longer exchange messages in either direction.
 > - **M5** changes every safety number — **re-verify your contacts out of band**.
 
 ### Security
