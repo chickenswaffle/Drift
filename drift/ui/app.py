@@ -900,10 +900,10 @@ class ContactItem(Static):
     def render(self) -> RenderableType:
         # Left accent bar marks the active row as a selected "card"; the leading
         # digit (1–9) is the quick-jump shortcut for that contact.
-        accent = f"[{_P}]▎[/]" if self.active else " "
+        accent = f"[{_S}]▌[/]" if self.active else " "
         num = f"[#555555]{self.index}[/] " if self.index else ""
         colour = _P if self.active else _DM
-        badge = f"  [{_S}]●{self.unread}[/]" if self.unread else ""
+        badge = f"  [{_P}]●[/]" if self.unread else ""
         if self.is_room:
             # ⬡ prefix, tinted by tier (yellow=open, cyan=invite, red=dark).
             tier_colour = {"open": "yellow", "invite": "cyan", "dark": "red"}.get(
@@ -1062,7 +1062,7 @@ class _SplashPane(Static):
     def render(self) -> RenderableType:
         body = Text(justify="center")
         body.append("\n\n\n")
-        body.append("d r i f t\n\n", style=f"bold {_BD}")
+        body.append("d r i f t\n\n", style=f"bold {_P}")
         body.append(
             "metadata-private  ·  end-to-end encrypted  ·  no accounts\n\n\n",
             style=_DM,
@@ -1089,7 +1089,10 @@ class InputBar(Vertical):
         yield Static(RichRule(style=_BD, characters="─"), id="input-rule")
         with Horizontal(id="input-row"):
             yield Static("▶", id="prompt")
-            yield Input(placeholder="message — or /command", id="msg-input")
+            yield Input(
+                placeholder="type a message  ·  /help for commands  ·  /beacon to go discoverable",
+                id="msg-input",
+            )
             yield Static("0", id="char-count")
         yield Static(self.HINT, id="input-hint")
 
