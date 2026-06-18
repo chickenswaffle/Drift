@@ -105,6 +105,10 @@ Being precise here is what separates a serious tool from snake oil.
 | 10 | WITNESS — verifiable proof of relay blindness | ✅ Complete (`v0.12.0`) |
 | 11 | Sovereign Rooms — cryptographic chatrooms with no server-side representation, rotating stealth addresses, three security tiers (open/invite/dark), and optional federation sharding | ✅ Complete (`v0.13.0`) |
 
+**Protocol upgrades** — cryptographic hardening that spans the whole stack rather than a single phase:
+
+- **X3DH key agreement** ✅ `v0.14.0` — forward-secret handshake, eliminates deterministic bootstrap
+
 ---
 
 ## Getting started (development)
