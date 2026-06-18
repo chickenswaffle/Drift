@@ -37,12 +37,16 @@ On first run, everything is generated locally and the private parts never leave 
 | Key | Curve / algo | Purpose |
 |-----|-------------|---------|
 | Identity key | Ed25519 | Signs things; anchors your "safety number" for verification |
-| Scan key | X25519 | Lets others derive one-time addresses *to* you; lets you detect your mail |
-| Spend key | X25519 | The secret that actually unlocks a detected message |
+| Scan key | X25519 | Lets others derive one-time addresses *to* you; lets you **detect** your mail |
+| Spend key | X25519 | Additionally required to **decrypt** a detected message |
 
-(The "scan / spend" split is borrowed from stealth-address systems. Keeping them separate means you could one day hand a *scan-only* key to a low-power device to filter your mail without ever giving it the power to read.)
+(The "scan / spend" split is borrowed from stealth-address systems. The two keys carry genuinely different privilege — and as of the M1 audit fix this is real, not just documented: the one-time address and ownership detection depend on the *scan* key alone, but the message key is `HKDF(ECDH(scan) ‖ ECDH(spend))`, so the private *spend* key is required to actually read anything. This means you can hand a **scan-only** key to a low-power device to filter your mail — it can confirm which messages are yours without ever being able to open them. See §3 for the two-step receive.)
+
+> **Before the M1 fix (≤ `v0.14.0`):** the message key derived from the scan secret alone, so the spend key added no confidentiality and a "scan-only" delegate could in fact read everything. Binding the spend key changes the derived message key, so peers must both run `v0.14.1+` to interoperate.
 
 Your shareable identity — your **contact code** — is just a compact encoding of your three public keys, e.g. `drift:aV9k7Hk2...Q2x`, also renderable as a QR code. There is no username registry, no phone number, no email. Your identity *is* your key material.
+
+> **Key-reuse coupling (audit L4, noted).** The Ed25519 identity/signing key is *derived* from the spend key via a domain-separated HKDF (`identity_seed = HKDF(spend_priv)`), while the spend key is also used directly as an X25519 DH key (X3DH identity key, ratchet bootstrap). Using one secret in two algebraic settings is tolerated here because the signing path is hashed — but it does couple the signing identity's compromise to the spend key and vice versa. Storing an independent Ed25519 key would decouple them; that changes the on-disk identity format and needs a migration, so it is **deferred**. Documented so the coupling is explicit rather than silent.
 
 ---
 
@@ -52,18 +56,18 @@ This is the "address that rotates and never gets pinned to one user" you asked f
 
 **Sending to Alice**, Bob's client:
 1. Generates a throwaway ephemeral keypair `(r, R)`.
-2. Computes a shared secret `s = ECDH(r, Alice_scan_pub)`.
-3. Derives a **one-time address**: `A_once = Alice_spend_pub + Hash(s)·G` (point addition on the curve).
-4. Posts `{ R, ciphertext }` to the mailbox keyed by `A_once`.
+2. Computes two shared secrets: `s_scan = ECDH(r, Alice_scan_pub)` and `s_spend = ECDH(r, Alice_spend_pub)`.
+3. Derives a **one-time address** from the scan secret only: `A_once = Alice_spend_pub + Hash(s_scan)·G` (point addition on the curve).
+4. Derives the **message key** from *both*: `k = HKDF(s_scan ‖ s_spend)`.
+5. Posts `{ R, ciphertext }` to the mailbox keyed by `A_once`.
 
 Every message produces a *different* `A_once`. To the relay these look like uniform random strings with no link to Alice and no link to each other.
 
-**Receiving**, Alice's client periodically scans posted messages:
-1. For each `{ R, ... }`, compute `s' = ECDH(Alice_scan_priv, R)`.
-2. Derive candidate `A' = Alice_spend_pub + Hash(s')·G`.
-3. If `A'` equals the mailbox address, the message is hers — and `s'` also yields the decryption key.
+**Receiving**, Alice's client periodically scans posted messages in **two steps** (the scan/spend privilege split, audit M1):
+1. *Detect — scan key.* For each `{ R, ... }`, compute `s_scan = ECDH(Alice_scan_priv, R)` and candidate `A' = Alice_spend_pub + Hash(s_scan)·G`. If `A'` equals the mailbox address, the message is hers. This step needs only the private **scan** key (and the public spend key), so a scan-only delegate can do it.
+2. *Decrypt — spend key.* Compute `s_spend = ECDH(Alice_spend_priv, R)` and the message key `k = HKDF(s_scan ‖ s_spend)`. This step requires the private **spend** key; the scan key alone cannot produce `k`.
 
-Only Alice can run this match, because only she has `scan_priv`. The relay is a public bulletin board of opaque, unlinkable blobs.
+Only Alice can run the match, because only she has `scan_priv` — and only Alice (or a device she's given the spend key) can decrypt, because step 2 needs `spend_priv`. The relay is a public bulletin board of opaque, unlinkable blobs.
 
 **The tradeoff (be honest about it):** scanning means Alice does a little work per message in the system. At small scale, just scan recent messages — it's nothing. As it grows, three escalating fixes:
 - **Time/shard bucketing** — only scan the windows or shards you could plausibly have mail in.
@@ -174,11 +178,13 @@ ct = R (32 bytes)  ‖  sealed(ratchet_header)  ‖  ratchet_ciphertext
 
 Everything else in this section works to make you *unlinkable*. Beacon is the deliberate exception, and it should be understood as one — not pitched as "just as private as the rest."
 
-A beacon lets a user *light* a short human handle (e.g. `Diego552`) for a few minutes. While it's lit, **anyone who knows that exact handle** can resolve it to the user's contact code and add them. The relay indexes the beacon by `SHA256("drift-beacon-lookup-v1" ‖ handle)` and stores an opaque blob encrypted under `HKDF(handle, "drift-beacon-v1")` — so the relay never learns the handle or the contact code, only that *some* handle hashing to this value is briefly active. After the TTL (capped at 10 minutes) the entry is **deleted**, not hidden: a lookup afterwards 404s, and there is no retroactive way to discover who was behind it.
+A beacon lets a user *light* a short human handle (e.g. `Diego552`) for a few minutes. While it's lit, **anyone who knows that exact handle** can resolve it to the user's contact code and add them. The relay indexes the beacon by `SHA256("drift-beacon-lookup-v1" ‖ relay_pubkey ‖ handle)` and stores an opaque blob encrypted under `HKDF(handle, "drift-beacon-v1")` — so the relay never learns the handle or the contact code, only that *some* handle hashing to this value is briefly active. After the TTL (capped at 10 minutes) the entry is **deleted**, not hidden: a lookup afterwards 404s, and there is no retroactive way to discover who was behind it on an *honest* relay.
 
-The index hash is **domain-separated** (a fixed `drift-beacon-lookup-v1` prefix, not a bare `SHA256(handle)`). This ties the hash to DRIFT's namespace so a relay can't apply a generic, precomputed SHA256 rainbow table to the index. It does **not** defend a *guessable* handle: a relay (or anyone) can still build a DRIFT-specific dictionary and grind common handles. That weakness is inherent to short, human-memorable handles and is mitigated by handle choice, not by the hash.
+The index hash is **domain-separated and relay-specific** (audit M3): a fixed `drift-beacon-lookup-v1` prefix *and* the relay's own long-term Ed25519 public key are folded in before the handle. The prefix ties the hash to DRIFT's namespace; the relay pubkey means **a lookup hash from one relay is meaningless against another**. A client fetches the relay pubkey from `GET /beacon/pubkey` (an alias of `/witness/pubkey`, already published since Phase 10) before computing any lookup hash. The practical effect: an attacker who logs lookup hashes and wants to discover *which handles were ever used* must build a separate offline dictionary per relay — there is no universal rainbow table that works everywhere, which dramatically raises the cost of grinding the index across the network.
 
-**Handles are semi-public.** Treat a handle as a low-entropy shared secret, not a password. For anything sensitive, pick something **unguessable** — a random word pair like `copper-lantern` or a random token, not `Alice123`. A predictable handle is dictionary-grindable for as long as the beacon is lit (up to 10 minutes), at which point it links to your contact code.
+It still does **not** defend a *guessable* handle on a *known* relay: anyone (including that relay) can build a DRIFT-and-relay-specific dictionary and grind common handles, and — be honest about this — a captured encrypted **payload** is offline-grindable *indefinitely* by anyone who kept the blob, because the payload key is `HKDF(handle)` with no relay binding or time bound. The "deleted after TTL → no retroactive lookup" property is therefore a policy of an honest relay, not a cryptographic guarantee. Both weaknesses are inherent to short, human-memorable handles and are mitigated by handle choice, not by the hash.
+
+**Handles are semi-public.** Treat a handle as a low-entropy shared secret, not a password. For anything sensitive, pick something **unguessable** — a random word pair like `copper-lantern` or a random token, not `Alice123`. A predictable handle is dictionary-grindable (per relay), and a captured payload blob is grindable forever, regardless of the lit window — so the handle is the only thing protecting it.
 
 **What you are trading.** During the window, the handle is a shared secret with a deliberately low bar: anyone you tell it to — and anyone *they* tell, or anyone who guesses a weak handle — can link that handle to your contact code for those minutes. That is a small, bounded amount of **temporal linkability** exchanged for the convenience of being found without exchanging a 90-character contact code out of band. It is opt-in (nothing is discoverable unless you light a beacon), time-boxed (minutes, then gone), and per-handle (lighting `Diego552` says nothing about any other handle or your default traffic).
 
@@ -191,6 +197,10 @@ A burn lets either party erase messages after the fact — both clients delete t
 **Why the relay can't be trusted to erase a "conversation."** The relay has no shared secret, so it cannot check a burn token. It also cannot tell which buffered blobs belong to one conversation — stealth addresses are unlinkable *by design*, which is the point of the whole system. An earlier version honoured a conversation-scope burn by wiping the entire channel's replay buffer; because the firehose is shared by every user and the relay can't authenticate the request, **any anonymous caller could erase every user's recent traffic with a single POST** (audit finding H2).
 
 **What the relay does now.** Relay-side erasure is addr-scoped only: a burn deletes *only* the single blob whose one-time address is explicitly named (`scope=message`). A `scope=conversation` burn does **not** touch the shared buffer at all. Conversation erasure is delivered entirely end-to-end — each client verifies the token and deletes its own copy on the tombstone — and any blob left in the relay buffer simply expires on its short `RECENT_TTL` (30 s on the full relay).
+
+**Burn tokens are single-use (audit M2).** Each token is `nonce.timestamp.mac`: a fresh 16-byte random nonce and a creation timestamp, both bound into the HMAC and both carried in the clear inside the token. This closes two earlier problems with the old static `HMAC(secret, scope)` token:
+- *Replay.* A captured token could previously be re-POSTed forever to force both clients to re-burn. Now the relay tracks seen nonces in a bounded LRU (the same dedup pattern as message envelopes) and rejects a repeat; it also rejects any token whose timestamp is more than `TOKEN_TTL_SECONDS` (300 s) old or in the future. The receiving client independently re-checks the MAC *and* the freshness window. A captured token is therefore either stale (client rejects) or already-burned (relay won't re-broadcast).
+- *Linkability.* The conversation token is no longer a stable per-conversation value an observer could cluster across burns — every burn carries a fresh nonce, so two burns of the same conversation are unlinkable on the wire.
 
 **The honest tradeoff.**
 - A conversation burn no longer instantly clears the relay's buffer; those opaque, already-encrypted blobs linger for up to `RECENT_TTL` before expiring. The *durable* erasure — your peer's stored copy — still happens immediately via the verified tombstone.
@@ -306,6 +316,8 @@ $ drift chat bob
 
 Behind that: Tor bootstraps, keys generate, stealth addresses rotate every message, the ratchet turns, cover traffic hums in the background. The user never reads the word "Curve25519" unless they go looking.
 
+The word list shown by `drift verify` is the **safety number**: `SHA256("drift-safety-v1" ‖ sorted([my_scan‖my_spend, their_scan‖their_spend]))`, rendered as a short hex group. It commits to **both** public keys of **both** parties, sorted so each side computes the same value — a mismatch means a man-in-the-middle. It deliberately covers the spend key, not just the scan key (audit M5): the spend key is the X3DH identity key and the beacon-signing seed, so a contact code that kept the real scan key but swapped the spend key used to pass verification unchanged. It no longer does. **Migration:** this changes the value for every contact, so any verification done on `v0.14.0` or earlier is invalidated — re-verify your contacts out of band once both sides are on `v0.14.1+`.
+
 ---
 
 ## 8. The unorthodox extras (your "outside the box")
@@ -314,7 +326,7 @@ These are the features that make DRIFT distinctive rather than "another Signal c
 
 - **Stealth rotating addresses** — the headline (Section 3). This alone is the differentiator.
 - **Fuzzy Message Detection** — a literal privacy/efficiency dial the user can turn.
-- **Panic / duress passphrase** — a *second* passphrase that, when entered, silently wipes keys (or unlocks a believable decoy) instead of opening the real account. Protection against "unlock it or else" coercion. Real and duress passphrases go through the same Argon2id KDF, the same constant-work two-slot unlock, and produce no error or timing difference — and the on-disk vault always has exactly two padded, shuffled slots (the second is indistinguishable random bytes when no duress is set), so a single forced unlock or disk image cannot prove a duress passphrase exists.
+- **Panic / duress passphrase** — a *second* passphrase that, when entered, silently wipes keys (or unlocks a believable decoy) instead of opening the real account. Protection against "unlock it or else" coercion. Real and duress passphrases go through the same Argon2id KDF, the same constant-work two-slot unlock, and produce no error or timing difference — and the on-disk vault always has exactly two padded, shuffled slots (the second is indistinguishable random bytes when no duress is set), so a single forced unlock or disk image cannot prove a duress passphrase exists. *Honest limit (audit L2):* the **wipe** variant is single-shot — it shreds the vault and materializes a fresh random identity, so a coercer who forces a *second* unlock afterwards sees no vault and a different identity than the first prompt. The indistinguishability guarantee covers one forced unlock, not repeated ones; the decoy variant (which keeps a plausible vault in place) is the better choice where a second unlock is plausible. Making wipe leave a convincing decoy vault behind is a larger change to the live panic vault and is **deferred** (it must not weaken the constant-work two-slot construction).
 - **Decoy contacts and hidden volumes** — a real set of chats behind your true passphrase, an innocuous set behind the duress one. The vault seals **the identity *and* its address book together** (audit H4), so a locked device holds no plaintext contact graph and a decoy unlock materializes only the decoy's contacts — the real contact list is shredded from disk and stays sealed. *Honest limits:* (1) while a session is unlocked, the identity and contacts are materialized in the clear (chmod 0600) — `drift lock`, which re-seals and shreds them, or closing the app is what restores the at-rest protection; the panic key defends the *locked* state. (2) `secure_overwrite` is best-effort on journaling/wear-levelled/snapshotted storage. (3) The vault hides a duress passphrase against a *single* image; an adversary who can diff *multiple* images across voluntary re-locks could spot which slot changed (the untouched duress slot's bytes are stable) — outside the single-image threat model, but stated plainly.
 - **Cover traffic on by default** — silence and conversation look identical on the wire.
 - **Serverless P2P mode** — for the truly paranoid or for two people on the same network.

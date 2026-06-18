@@ -130,6 +130,10 @@ class LRUSet:
         if len(self._items) > self._capacity:
             self._items.popitem(last=False)
 
+    def clear(self) -> None:
+        """Drop all remembered ids (used to reset state, e.g. between tests)."""
+        self._items.clear()
+
     def __len__(self) -> int:
         return len(self._items)
 

@@ -22,6 +22,12 @@ from drift.crypto import Identity
 from drift.crypto.beacon import create_beacon, lookup_hash, resolve_beacon
 from relay.federation import Federation
 
+# Fixed stand-in relay pubkey for hash consistency between create_beacon and
+# lookup_hash (audit M3). The relay stores under whatever hash the client sends,
+# so any consistent value works here; the real pubkey is exercised separately in
+# TestBeaconPubkey.
+_RELAY_PK = bytes(range(32))
+
 
 @pytest.fixture(autouse=True)
 def _fresh_relay() -> Any:
@@ -49,7 +55,7 @@ def client() -> TestClient:
 def _light(client: TestClient, handle: str, ttl: int = 300) -> tuple[str, str, Identity]:
     """Light a beacon via the relay; return (lookup_hash, payload_b64, identity)."""
     idy = Identity.generate()
-    b = create_beacon(idy, handle, ttl)
+    b = create_beacon(idy, handle, ttl, _RELAY_PK)
     payload_b64 = base64.b64encode(b.encrypted).decode()
     r = client.post("/beacon", json={
         "lookup_hash": b.lookup_hash, "payload": payload_b64, "ttl_seconds": ttl,
@@ -74,7 +80,7 @@ class TestBeaconLifecycle:
         assert info is not None and info.contact_code == idy.contact_code()
 
     def test_get_unknown_is_404(self, client: TestClient) -> None:
-        assert client.get(f"/beacon/{lookup_hash('nobody')}").status_code == 404
+        assert client.get(f"/beacon/{lookup_hash('nobody', _RELAY_PK)}").status_code == 404
 
     def test_delete_extinguishes(self, client: TestClient) -> None:
         digest, _, _ = _light(client, "Diego552")
@@ -96,7 +102,7 @@ class TestRelayBlindness:
 
     def test_lookup_hash_is_client_sha256(self, client: TestClient) -> None:
         digest, _, _ = _light(client, "Diego552")
-        assert digest == lookup_hash("Diego552")
+        assert digest == lookup_hash("Diego552", _RELAY_PK)
         assert digest in server._beacons
 
 
@@ -108,7 +114,7 @@ class TestRelayBlindness:
 class TestTTL:
     def test_ttl_capped_server_side(self, client: TestClient) -> None:
         idy = Identity.generate()
-        b = create_beacon(idy, "Diego552", 3600)  # client clamps too; force raw post
+        b = create_beacon(idy, "Diego552", 3600, _RELAY_PK)  # client clamps too; force raw post
         r = client.post("/beacon", json={
             "lookup_hash": b.lookup_hash,
             "payload": base64.b64encode(b.encrypted).decode(),
@@ -125,6 +131,28 @@ class TestTTL:
         server._beacons[digest]["expires_at"] = int(time.time()) - 1
         assert client.get(f"/beacon/{digest}").status_code == 404
         assert digest not in server._beacons  # deleted, not just hidden
+
+
+# --------------------------------------------------------------------------- #
+# Relay pubkey endpoint (audit M3)
+# --------------------------------------------------------------------------- #
+
+
+class TestBeaconPubkey:
+    def test_beacon_pubkey_matches_witness_pubkey(self, client: TestClient) -> None:
+        # /beacon/pubkey is an alias of /witness/pubkey; clients fetch it before
+        # computing the relay-specific lookup hash.
+        bp = client.get("/beacon/pubkey")
+        wp = client.get("/witness/pubkey")
+        assert bp.status_code == 200
+        assert bp.json()["pubkey_b58"] == wp.json()["pubkey_b58"]
+        assert bp.json()["algorithm"] == "ed25519"
+
+    def test_beacon_pubkey_not_shadowed_by_lookup_route(self, client: TestClient) -> None:
+        # The literal /beacon/pubkey must win over /beacon/{lookup_hash}: a real
+        # lookup hash is 64 hex chars, "pubkey" is not, so it can't collide — but
+        # guard the routing order regardless.
+        assert "pubkey_b58" in client.get("/beacon/pubkey").json()
 
 
 # --------------------------------------------------------------------------- #
@@ -158,7 +186,7 @@ class TestFederation:
 
     def test_gossip_endpoint_stores_and_dedups(self, client: TestClient) -> None:
         idy = Identity.generate()
-        b = create_beacon(idy, "Diego552", 300)
+        b = create_beacon(idy, "Diego552", 300, _RELAY_PK)
         record = {
             "lookup_hash": b.lookup_hash,
             "payload": base64.b64encode(b.encrypted).decode(),
@@ -201,7 +229,7 @@ def test_beacon_lit_on_relay_a_resolvable_via_relay_b() -> None:
     import asyncio
 
     idy = Identity.generate()
-    b = create_beacon(idy, "Diego552", 300)
+    b = create_beacon(idy, "Diego552", 300, _RELAY_PK)
     record = {
         "lookup_hash": b.lookup_hash,
         "payload": base64.b64encode(b.encrypted).decode(),

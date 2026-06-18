@@ -23,6 +23,10 @@ from drift.crypto.beacon import (
     resolve_beacon,
 )
 
+# A stand-in for a relay's long-term Ed25519 public key (raw 32 bytes). The lookup
+# hash is bound to it (audit M3), so tests fix one value.
+_RELAY_PK = bytes(range(32))
+
 # --------------------------------------------------------------------------- #
 # Identity signing key
 # --------------------------------------------------------------------------- #
@@ -52,30 +56,36 @@ class TestSigningKey:
 class TestRoundTrip:
     def test_resolve_with_correct_handle(self) -> None:
         idy = Identity.generate()
-        b = create_beacon(idy, "Diego552", 300)
+        b = create_beacon(idy, "Diego552", 300, _RELAY_PK)
         info = resolve_beacon("Diego552", b.encrypted)
         assert info is not None
         assert info.contact_code == idy.contact_code()
         assert info.handle == "Diego552"
 
-    def test_lookup_hash_is_domain_separated_sha256(self) -> None:
+    def test_lookup_hash_binds_prefix_and_relay_pubkey(self) -> None:
         import hashlib
 
         from drift.crypto.beacon import BEACON_LOOKUP_PREFIX
 
-        assert lookup_hash("Diego552") == hashlib.sha256(
-            BEACON_LOOKUP_PREFIX + b"Diego552"
+        assert lookup_hash("Diego552", _RELAY_PK) == hashlib.sha256(
+            BEACON_LOOKUP_PREFIX + _RELAY_PK + b"Diego552"
         ).hexdigest()
 
     def test_lookup_hash_is_not_bare_sha256(self) -> None:
         import hashlib
 
-        # The domain-separation prefix must actually change the digest, so a
-        # generic SHA256(handle) rainbow table doesn't apply.
-        assert lookup_hash("Diego552") != hashlib.sha256(b"Diego552").hexdigest()
+        # The domain-separation prefix + relay pubkey must actually change the
+        # digest, so a generic SHA256(handle) rainbow table doesn't apply.
+        assert lookup_hash("Diego552", _RELAY_PK) != hashlib.sha256(b"Diego552").hexdigest()
+
+    def test_lookup_hash_is_relay_specific(self) -> None:
+        # Audit M3: the same handle hashes differently per relay, so an offline
+        # table built against one relay is useless against another.
+        other_relay = bytes(range(1, 33))
+        assert lookup_hash("Diego552", _RELAY_PK) != lookup_hash("Diego552", other_relay)
 
     def test_handle_never_appears_in_ciphertext(self) -> None:
-        b = create_beacon(Identity.generate(), "SecretHandle9", 300)
+        b = create_beacon(Identity.generate(), "SecretHandle9", 300, _RELAY_PK)
         assert b"SecretHandle9" not in b.encrypted
 
 
@@ -86,27 +96,27 @@ class TestRoundTrip:
 
 class TestFailureModes:
     def test_wrong_handle_fails(self) -> None:
-        b = create_beacon(Identity.generate(), "Diego552", 300)
+        b = create_beacon(Identity.generate(), "Diego552", 300, _RELAY_PK)
         # One character off → a completely different HKDF key → decryption fails.
         assert resolve_beacon("Diego553", b.encrypted) is None
         assert resolve_beacon("diego552", b.encrypted) is None
 
     def test_tampered_payload_fails(self) -> None:
-        b = create_beacon(Identity.generate(), "Diego552", 300)
+        b = create_beacon(Identity.generate(), "Diego552", 300, _RELAY_PK)
         corrupt = bytearray(b.encrypted)
         corrupt[-1] ^= 0xFF
         assert resolve_beacon("Diego552", bytes(corrupt)) is None
 
     def test_expired_beacon_fails(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
         idy = Identity.generate()
-        b = create_beacon(idy, "Diego552", 5)
+        b = create_beacon(idy, "Diego552", 5, _RELAY_PK)
         # Correct handle, but the clock has moved past expiry.
         monkeypatch.setattr(beacon_mod.time, "time", lambda: b.expires_at + 1)
         assert resolve_beacon("Diego552", b.encrypted) is None
 
     def test_not_yet_expired_resolves(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
         idy = Identity.generate()
-        b = create_beacon(idy, "Diego552", 300)
+        b = create_beacon(idy, "Diego552", 300, _RELAY_PK)
         monkeypatch.setattr(beacon_mod.time, "time", lambda: b.expires_at - 1)
         assert resolve_beacon("Diego552", b.encrypted) is not None
 
@@ -121,16 +131,16 @@ class TestFailureModes:
 
 class TestTTL:
     def test_clamped_to_max(self) -> None:
-        b = create_beacon(Identity.generate(), "Diego552", 3600)  # 1 hour requested
+        b = create_beacon(Identity.generate(), "Diego552", 3600, _RELAY_PK)  # 1 hour requested
         assert b.ttl_seconds == MAX_TTL_SECONDS
         assert b.expires_at <= int(time.time()) + MAX_TTL_SECONDS
 
     def test_minimum_one_second(self) -> None:
-        b = create_beacon(Identity.generate(), "Diego552", 0)
+        b = create_beacon(Identity.generate(), "Diego552", 0, _RELAY_PK)
         assert b.ttl_seconds == 1
 
     def test_normal_ttl_preserved(self) -> None:
-        b = create_beacon(Identity.generate(), "Diego552", 300)
+        b = create_beacon(Identity.generate(), "Diego552", 300, _RELAY_PK)
         assert b.ttl_seconds == 300
 
 
@@ -147,7 +157,7 @@ def test_signature_rejects_field_swap() -> None:
     """
     idy = Identity.generate()
     handle = "Diego552"
-    b = create_beacon(idy, handle, 300)
+    b = create_beacon(idy, handle, 300, _RELAY_PK)
 
     # Decrypt (we know the handle), swap the contact code, re-encrypt — but keep
     # the original signature, which no longer covers the new code.
@@ -162,7 +172,7 @@ def test_signature_rejects_field_swap() -> None:
 def test_resolve_returns_none_for_non_drift_code() -> None:
     idy = Identity.generate()
     handle = "Diego552"
-    b = create_beacon(idy, handle, 300)
+    b = create_beacon(idy, handle, 300, _RELAY_PK)
     key = beacon_mod._encryption_key(handle)  # type: ignore[attr-defined]
     from drift.crypto import decrypt, encrypt
     env = json.loads(decrypt(key, b.encrypted))

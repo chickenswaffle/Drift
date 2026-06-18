@@ -487,6 +487,11 @@ def verify(
         subtitle="Compare out-of-band. Matches on both sides = key verified.",
         border_style="yellow",
     ))
+    console.print(
+        "[dim]Note: safety numbers changed in v0.14.1 (they now commit to the "
+        "spend key too — audit M5). Any verification done on an older version is "
+        "invalidated; re-verify, and make sure your contact is also on v0.14.1+.[/dim]"
+    )
     console.print()
 
 
@@ -525,19 +530,44 @@ def beacon(
     it expires (or you press Ctrl+C) it's gone — no retroactive lookup. The relay
     only ever sees a hash of the handle, never the handle itself.
     """
-    from drift.crypto.beacon import MAX_TTL_SECONDS, create_beacon
+    from drift.crypto.beacon import MAX_TTL_SECONDS
 
     identity = _require_identity()
     seconds = min(_parse_ttl(ttl), MAX_TTL_SECONDS)
-    payload = create_beacon(identity, handle, seconds)
-    asyncio.run(_beacon_async(payload, _relay_http(relay)))
+    asyncio.run(_beacon_async(identity, handle, seconds, _relay_http(relay)))
 
 
-async def _beacon_async(payload: Any, http_base: str) -> None:
+async def _fetch_relay_pubkey(http_base: str) -> bytes | None:
+    """Fetch the relay's long-term Ed25519 pubkey (raw bytes) for the M3
+    relay-specific beacon lookup hash. Returns None if the relay can't be reached
+    or doesn't expose the endpoint."""
+    import httpx
+
+    from drift.crypto import b58decode
+
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(f"{http_base}/beacon/pubkey", timeout=10.0)
+        if resp.status_code != 200:
+            return None
+        return b58decode(resp.json()["pubkey_b58"])
+    except (httpx.HTTPError, KeyError, ValueError):
+        return None
+
+
+async def _beacon_async(identity: Any, handle: str, seconds: int, http_base: str) -> None:
     import base64
 
     import httpx
     from rich.live import Live
+
+    from drift.crypto.beacon import create_beacon
+
+    relay_pubkey = await _fetch_relay_pubkey(http_base)
+    if relay_pubkey is None:
+        console.print("[red]Could not light beacon:[/red] relay pubkey unavailable")
+        raise typer.Exit(1)
+    payload = create_beacon(identity, handle, seconds, relay_pubkey)
 
     body = {
         "lookup_hash": payload.lookup_hash,
@@ -622,7 +652,10 @@ async def _find_async(handle: str, http_base: str, lookup_hash: Any, resolve_bea
 
     import httpx
 
-    digest = lookup_hash(handle)
+    relay_pubkey = await _fetch_relay_pubkey(http_base)
+    if relay_pubkey is None:
+        return None
+    digest = lookup_hash(handle, relay_pubkey)
     try:
         async with httpx.AsyncClient() as client:
             resp = await client.get(f"{http_base}/beacon/{digest}", timeout=10.0)

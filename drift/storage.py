@@ -335,13 +335,26 @@ def safety_number(identity: Identity, contact_code: str) -> str:
     """
     Derive the short out-of-band safety number shared by both parties.
 
-    Symmetric (sorted scan keys), so each side computes the same value; a
-    mismatch means a man-in-the-middle. This is a *public* verification value,
-    not secret key material — which is why it lives in the model, not the UI.
+    Symmetric (sorted per-party ``scan ‖ spend`` blobs), so each side computes
+    the same value; a mismatch means a man-in-the-middle. This is a *public*
+    verification value, not secret key material — which is why it lives in the
+    model, not the UI.
+
+    Audit M5: the digest commits to **both** the scan and spend public keys.
+    Earlier (``drift-safety-v0``) it covered only the scan keys, so a contact
+    code carrying the real scan key but a substituted spend key produced an
+    identical safety number and passed verification — and since X3DH makes the
+    spend key the X3DH identity key (and the beacon signing key derives from it),
+    that omission left the most security-critical key unanchored. Binding it
+    **invalidates every pre-``v0.14.1`` safety number**: contacts must re-verify
+    out of band once both sides upgrade.
     """
-    their_scan, _ = Identity.parse_contact_code(contact_code)
+    their_scan, their_spend = Identity.parse_contact_code(contact_code)
     my_scan = identity.scan_keypair.public_bytes()
-    combined = b"drift-safety-v0" + b"".join(sorted([my_scan, their_scan]))
+    my_spend = identity.spend_keypair.public_bytes()
+    mine = my_scan + my_spend
+    theirs = their_scan + their_spend
+    combined = b"drift-safety-v1" + b"".join(sorted([mine, theirs]))
     digest = hashlib.sha256(combined).digest()
     return "-".join(f"{digest[i * 4]:02x}{digest[i * 4 + 1]:02x}" for i in range(4))
 

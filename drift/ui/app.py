@@ -607,6 +607,23 @@ def _ws_to_http(url: str) -> str:
     return url.replace("wss://", "https://", 1).replace("ws://", "http://", 1)
 
 
+async def _fetch_relay_pubkey(http_base: str) -> bytes | None:
+    """Fetch the relay's long-term Ed25519 pubkey (raw bytes) for the M3
+    relay-specific beacon lookup hash. None if unreachable / unsupported."""
+    import httpx
+
+    from drift.crypto import b58decode
+
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(f"{http_base}/beacon/pubkey", timeout=10.0)
+        if resp.status_code != 200:
+            return None
+        return b58decode(resp.json()["pubkey_b58"])
+    except (httpx.HTTPError, KeyError, ValueError):
+        return None
+
+
 def _parse_ttl(ttl: str) -> int:
     """Parse a beacon TTL (``1m``/``5m``/``10m`` or raw seconds) → seconds."""
     ttl = ttl.strip().lower()
@@ -1451,7 +1468,9 @@ class VerifyModal(_FadeModal[bool]):
             )
             yield Static(
                 f"[{_DM}]Read these digits aloud over a trusted channel.\n"
-                "If they match on both sides, the key is verified.[/]",
+                "If they match on both sides, the key is verified.\n"
+                "Changed in v0.14.1 (now binds the spend key too — M5): "
+                "re-verify if you checked on an older version.[/]",
                 classes="modal-hint",
             )
             with Horizontal(classes="modal-actions"):
@@ -2467,8 +2486,12 @@ class DriftApp(App[None]):
 
         from drift.crypto.beacon import MAX_TTL_SECONDS, create_beacon
 
-        payload = create_beacon(self._identity, handle, min(ttl, MAX_TTL_SECONDS))
         http_base = _ws_to_http(self._primary_relay)
+        relay_pubkey = await _fetch_relay_pubkey(http_base)
+        if relay_pubkey is None:
+            self._pane.write_warning("could not light beacon: relay pubkey unavailable")
+            return
+        payload = create_beacon(self._identity, handle, min(ttl, MAX_TTL_SECONDS), relay_pubkey)
         body = {
             "lookup_hash": payload.lookup_hash,
             "payload": base64.b64encode(payload.encrypted).decode(),
@@ -2510,9 +2533,15 @@ class DriftApp(App[None]):
         from drift.crypto.beacon import lookup_hash, resolve_beacon
 
         http_base = _ws_to_http(self._primary_relay)
+        relay_pubkey = await _fetch_relay_pubkey(http_base)
+        if relay_pubkey is None:
+            self._pane.write_warning("find failed: relay pubkey unavailable")
+            return
         try:
             async with httpx.AsyncClient() as client:
-                resp = await client.get(f"{http_base}/beacon/{lookup_hash(handle)}", timeout=10.0)
+                resp = await client.get(
+                    f"{http_base}/beacon/{lookup_hash(handle, relay_pubkey)}", timeout=10.0
+                )
         except httpx.HTTPError as exc:
             self._pane.write_warning(f"find failed: {exc}")
             return

@@ -32,9 +32,17 @@ Let ``H`` be the handle string and ``id`` the lighting identity.
     owner is who you think — that's what ``drift verify`` is for).
 
   - **Relay index.** The relay stores the beacon under
-    ``SHA256("drift-beacon-lookup-v1" ‖ H)`` (computed by the client). The
-    plaintext handle never crosses the wire, and the domain-separation prefix
-    keeps a generic SHA256 rainbow table from applying to the index.
+    ``SHA256("drift-beacon-lookup-v1" ‖ relay_pubkey ‖ H)`` (computed by the
+    client, where ``relay_pubkey`` is the relay's long-term Ed25519 public key,
+    fetched from ``GET /beacon/pubkey`` — an alias of ``/witness/pubkey``). The
+    plaintext handle never crosses the wire, and folding in ``relay_pubkey``
+    makes the index **relay-specific** (audit M3): a lookup hash from one relay
+    is meaningless against another, so a dictionary/rainbow table an attacker
+    grinds offline only attacks the one relay it was built for. (This raises the
+    cost of guessing *which handles exist*; it does **not** make a low-entropy
+    handle safe — the encrypted payload is still offline-grindable by anyone who
+    keeps the blob. Pick an unguessable handle for anything sensitive — see
+    DESIGN.md.)
 
 What the relay learns is exactly: a hash of the handle, an opaque blob, and a
 TTL. What a *handle-knower* learns during the window is the contact code — that
@@ -57,11 +65,13 @@ from drift.crypto import Identity, decrypt, derive_message_key, encrypt
 # Domain separation for the handle-derived encryption key. Versioned.
 BEACON_INFO = b"drift-beacon-v1"
 
-# Domain separation for the relay index hash. Prefixed (not bare SHA256(handle))
-# so a relay can't reuse a generic SHA256 rainbow table against the index — the
-# lookup hash is tied to DRIFT's namespace. This does *not* defend a guessable
-# handle against a targeted dictionary attack (see DESIGN.md: handles are
-# semi-public — pick something unguessable for anything sensitive).
+# Domain separation for the relay index hash. The lookup hash is
+# SHA256(prefix ‖ relay_pubkey ‖ handle): the prefix ties it to DRIFT's namespace
+# and the relay's long-term pubkey makes it *relay-specific* (audit M3), so an
+# offline table built against one relay is useless against another. This does
+# *not* defend a guessable handle against a targeted dictionary attack on a known
+# relay (see DESIGN.md: handles are semi-public — pick something unguessable for
+# anything sensitive).
 BEACON_LOOKUP_PREFIX = b"drift-beacon-lookup-v1"
 
 # Hard cap on a beacon's lifetime, mirrored by the relay server-side.
@@ -76,7 +86,7 @@ class BeaconPayload:
     """A lit beacon ready to POST to a relay."""
 
     handle: str
-    lookup_hash: str   # hex SHA256(handle) — the relay's index key
+    lookup_hash: str   # hex SHA256(prefix ‖ relay_pubkey ‖ handle) — relay index key
     encrypted: bytes   # opaque to the relay (nonce ‖ ciphertext+tag)
     expires_at: int    # unix seconds
     ttl_seconds: int   # effective lifetime (already clamped to MAX_TTL_SECONDS)
@@ -91,13 +101,20 @@ class ContactInfo:
     expires_at: int
 
 
-def lookup_hash(handle: str) -> str:
-    """The relay index key for a handle: ``SHA256(prefix ‖ handle)`` as hex.
+def lookup_hash(handle: str, relay_pubkey: bytes) -> str:
+    """The relay index key for a handle:
+    ``SHA256(prefix ‖ relay_pubkey ‖ handle)`` as hex.
 
-    The fixed ``BEACON_LOOKUP_PREFIX`` domain-separates the index from a bare
-    ``SHA256(handle)`` so a generic rainbow table doesn't apply.
+    ``relay_pubkey`` is the target relay's long-term Ed25519 public key (raw
+    bytes; clients fetch it from ``GET /beacon/pubkey``). Binding it makes the
+    index relay-specific (audit M3): the same handle hashes differently on every
+    relay, so an offline table is only ever valid against the one relay it was
+    built for. The fixed ``BEACON_LOOKUP_PREFIX`` additionally domain-separates
+    the index from a bare ``SHA256(handle)``.
     """
-    return hashlib.sha256(BEACON_LOOKUP_PREFIX + handle.encode("utf-8")).hexdigest()
+    return hashlib.sha256(
+        BEACON_LOOKUP_PREFIX + relay_pubkey + handle.encode("utf-8")
+    ).hexdigest()
 
 
 def _encryption_key(handle: str) -> bytes:
@@ -112,12 +129,16 @@ def _canonical(fields: dict[str, object]) -> bytes:
     ).encode("utf-8")
 
 
-def create_beacon(identity: Identity, handle: str, ttl_seconds: int) -> BeaconPayload:
+def create_beacon(
+    identity: Identity, handle: str, ttl_seconds: int, relay_pubkey: bytes
+) -> BeaconPayload:
     """
     Light a beacon for ``handle`` pointing at ``identity``'s contact code.
 
     ``ttl_seconds`` is clamped to ``[1, MAX_TTL_SECONDS]`` so the signed expiry
-    never outlives the relay's own cap. The returned payload's ``encrypted``
+    never outlives the relay's own cap. ``relay_pubkey`` is the target relay's
+    long-term Ed25519 public key (raw bytes), folded into the lookup hash so the
+    index is relay-specific (audit M3). The returned payload's ``encrypted``
     bytes are opaque to the relay; only someone with the exact handle can open
     them.
     """
@@ -139,7 +160,7 @@ def create_beacon(identity: Identity, handle: str, ttl_seconds: int) -> BeaconPa
     encrypted = encrypt(_encryption_key(handle), plaintext)
     return BeaconPayload(
         handle=handle,
-        lookup_hash=lookup_hash(handle),
+        lookup_hash=lookup_hash(handle, relay_pubkey),
         encrypted=encrypted,
         expires_at=expires_at,
         ttl_seconds=ttl,

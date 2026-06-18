@@ -37,8 +37,9 @@ from uuid import uuid4
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse
 
+from drift.crypto.burn import TOKEN_TTL_SECONDS, BurnTokenError, parse_burn_token
 from drift.crypto.fmd import FMDKeypair, fmd_test
-from relay.federation import ANNOUNCE_TTL, DEFAULT_DEDUP_SIZE, Federation
+from relay.federation import ANNOUNCE_TTL, DEFAULT_DEDUP_SIZE, Federation, LRUSet
 from relay.witness import (
     MAX_CERTS,
     WitnessChain,
@@ -176,6 +177,12 @@ _recent: dict[str, list[dict[str, Any]]] = defaultdict(list)
 RECENT_TTL = 30.0    # seconds — covers the subscribe race + brief late-join
 RECENT_MAX = 500     # envelopes per channel
 
+# Hard cap on a single sealed blob (audit L3). The base64 "ct" field is bounded
+# so a client can't park RECENT_MAX oversized blobs per channel in memory. 64 KiB
+# of base64 (~48 KiB binary) is far larger than any real DRIFT message, which is
+# a sealed ratchet header plus a short ciphertext.
+MAX_CT_B64_LEN = 64 * 1024
+
 # Phase 11 (sovereign rooms): a sender may request a *longer* retention per
 # envelope via /send's "ttl_seconds", so a client joining a room can rewind the
 # previous catch-up windows (rooms.CATCHUP_WINDOWS × 10 min). The relay caps it
@@ -209,6 +216,19 @@ def _prune_recent(channel: str) -> None:
 def _connection_count() -> int:
     """Total live WebSocket subscribers across every channel."""
     return sum(len(v) for v in _subscribers.values())
+
+
+def _is_32_byte_b64(value: Any) -> bool:
+    """True iff ``value`` is base64 that decodes to exactly 32 bytes (audit L3 —
+    a one-time stealth address). The relay validates the shape without learning
+    anything: every address is a uniform 32-byte routing tag."""
+    if not isinstance(value, str):
+        return False
+    try:
+        # binascii.Error (invalid base64) subclasses ValueError.
+        return len(base64.b64decode(value, validate=True)) == 32
+    except ValueError:
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -460,6 +480,21 @@ async def send_message(envelope: dict[str, Any]) -> JSONResponse:
     if not to_addr:
         return JSONResponse({"error": "missing 'to' field"}, status_code=400)
 
+    # Size + shape validation (audit L3). Without this a client can park up to
+    # RECENT_MAX large blobs per channel in memory. The relay still never reads
+    # the blob — it only bounds its size and checks the routing address decodes
+    # to a 32-byte stealth address.
+    ct = envelope.get("ct", "")
+    if not isinstance(ct, str) or len(ct) > MAX_CT_B64_LEN:
+        return JSONResponse(
+            {"error": f"'ct' missing or larger than {MAX_CT_B64_LEN} chars"},
+            status_code=413,
+        )
+    if "addr" in envelope and not _is_32_byte_b64(envelope["addr"]):
+        return JSONResponse(
+            {"error": "'addr' must be base64 of a 32-byte address"}, status_code=400
+        )
+
     record: dict[str, Any] = {
         "to": to_addr,
         "ct": envelope.get("ct", ""),
@@ -588,6 +623,21 @@ async def light_beacon(body: dict[str, Any]) -> JSONResponse:
     return JSONResponse({"ok": True, "expires_at": expires_at, "ttl_seconds": ttl})
 
 
+@app.get("/beacon/pubkey")
+async def beacon_pubkey() -> JSONResponse:
+    """The relay's long-term Ed25519 public key (base58) — an alias of
+    ``/witness/pubkey``. Clients fetch this before computing a beacon lookup hash
+    so the hash is bound to *this* relay (audit M3). Declared before the
+    ``/beacon/{lookup_hash}`` route so the literal path wins.
+    """
+    rid = witness_chain.relay_id
+    return JSONResponse({
+        "algorithm": "ed25519",
+        "pubkey_b58": relay_pubkey_b58(rid),
+        "fingerprint": fingerprint(rid),
+    })
+
+
 @app.get("/beacon/{lookup_hash}")
 async def get_beacon(lookup_hash: str) -> JSONResponse:
     """Return a beacon's payload if live, 404 if absent or expired (and deleted)."""
@@ -684,8 +734,11 @@ async def prekeys_status(contact_addr: str) -> JSONResponse:
     })
 
 
-# HMAC-SHA256 token is 32 bytes = 64 lowercase hex characters.
-_BURN_TOKEN_RE = re.compile(r"^[0-9a-f]{64}$")
+# Single-use burn-token nonces seen recently (audit M2). Bounded LRU, same dedup
+# pattern as federation envelope ids — a token whose nonce is already here is a
+# replay and is rejected. Sized generously; nonces also age out implicitly because
+# a token older than TOKEN_TTL_SECONDS is rejected on its timestamp regardless.
+_burn_nonces_seen = LRUSet(DEFAULT_DEDUP_SIZE)
 
 
 @app.post("/burn")
@@ -696,7 +749,7 @@ async def burn_request(body: dict[str, Any]) -> JSONResponse:
 
     Expected body:
         {
-            "token":      "<64 hex chars>",        // HMAC-SHA256 burn token
+            "token":      "<nonce>.<ts>.<mac>",     // single-use burn token (M2)
             "scope":      "message"|"conversation",
             "channel":    "<channel name>",
             "message_id": "<base64 addr>"          // required for scope=message
@@ -705,6 +758,12 @@ async def burn_request(body: dict[str, Any]) -> JSONResponse:
     The relay does NOT verify the HMAC (it has no shared secret). Clients
     verify the token end-to-end before honouring the tombstone — that is the
     security boundary, not anything the relay does.
+
+    What the relay *does* enforce (audit M2): tokens are single-use. It reads the
+    nonce and timestamp out of the token (both MAC-bound, so a client would reject
+    any tombstone where they were altered), rejects tokens older than
+    ``TOKEN_TTL_SECONDS``, and rejects a nonce it has already seen — so a captured
+    token cannot be replayed to re-broadcast a tombstone.
 
     Relay-side erasure is therefore deliberately minimal and addr-scoped (audit
     H2). The firehose is shared by every user, and stealth addresses are
@@ -724,14 +783,25 @@ async def burn_request(body: dict[str, Any]) -> JSONResponse:
     channel = body.get("channel", "")
     message_id: str | None = body.get("message_id") or None
 
-    if not isinstance(token, str) or not _BURN_TOKEN_RE.match(token):
-        return JSONResponse({"error": "token must be 64 lowercase hex characters"}, status_code=400)
+    try:
+        nonce_hex, ts, _mac = parse_burn_token(token)
+    except BurnTokenError:
+        return JSONResponse({"error": "token must be 'nonce.timestamp.mac'"}, status_code=400)
     if scope not in ("message", "conversation"):
         return JSONResponse({"error": "scope must be 'message' or 'conversation'"}, status_code=400)
     if not channel:
         return JSONResponse({"error": "channel is required"}, status_code=400)
     if scope == "message" and not message_id:
         return JSONResponse({"error": "message_id required for scope=message"}, status_code=400)
+
+    # Single-use enforcement (audit M2): reject stale/future tokens on their
+    # MAC-bound timestamp, then reject any nonce already seen (replay). The MAC
+    # itself is verified end-to-end by the receiving client, not here.
+    if abs(int(time.time()) - ts) > TOKEN_TTL_SECONDS:
+        return JSONResponse({"error": "token expired or timestamp out of range"}, status_code=400)
+    if nonce_hex in _burn_nonces_seen:
+        return JSONResponse({"error": "token already used (replay rejected)"}, status_code=409)
+    _burn_nonces_seen.add(nonce_hex)
 
     # Erase only the exact named blob from the replay buffer. A conversation-scope
     # burn intentionally mutates nothing here (the relay can't identify a

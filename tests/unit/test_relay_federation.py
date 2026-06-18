@@ -122,6 +122,40 @@ def test_send_reports_replication_count(client: TestClient) -> None:
     assert r.json()["replicated"] == 2
 
 
+# --------------------------------------------------------------------------- #
+# /send size + shape validation (audit L3)
+# --------------------------------------------------------------------------- #
+
+
+def test_send_rejects_oversized_ct(client: TestClient) -> None:
+    big = "A" * (server.MAX_CT_B64_LEN + 1)
+    r = client.post("/send", json={"to": _CHANNEL, "ct": big, "ts": 1})
+    assert r.status_code == 413
+
+
+def test_send_accepts_ct_at_cap(client: TestClient) -> None:
+    ok = "A" * server.MAX_CT_B64_LEN
+    r = client.post("/send", json={"to": _CHANNEL, "ct": ok, "ts": 1})
+    assert r.status_code == 200
+
+
+def test_send_rejects_malformed_addr(client: TestClient) -> None:
+    import base64
+
+    # An address that doesn't decode to exactly 32 bytes is rejected.
+    short = base64.b64encode(b"too short").decode()
+    r = client.post("/send", json={"to": _CHANNEL, "ct": "aGk=", "addr": short, "ts": 1})
+    assert r.status_code == 400
+
+
+def test_send_accepts_valid_32_byte_addr(client: TestClient) -> None:
+    import base64
+
+    addr = base64.b64encode(bytes(range(32))).decode()
+    r = client.post("/send", json={"to": _CHANNEL, "ct": "aGk=", "addr": addr, "ts": 1})
+    assert r.status_code == 200
+
+
 def test_health_includes_federation_status(client: TestClient) -> None:
     server.federation.add_peer("http://peer1")
     r = client.get("/health")

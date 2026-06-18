@@ -10,7 +10,7 @@ The project is **pre-alpha**. The phased roadmap matters: each phase is a discre
 
 ### Phase status
 
-Current release: **`v0.14.0`**. No phase is in progress right now.
+Current release: **`v0.14.1`**. No phase is in progress right now.
 
 - **Phase 0 — transport** ✅ complete: X25519 ECDH → HKDF → XChaCha20-Poly1305, wired to the relay transport.
 - **Phase 1 — stealth addresses + TUI** ✅ complete: rotating one-time addressing and the Textual TUI.
@@ -26,7 +26,9 @@ Current release: **`v0.14.0`**. No phase is in progress right now.
 - **Phase 11 — sovereign rooms** ✅ complete: cryptographic chatrooms with no server-side representation — a room is a shared secret derived from its name, posted to rotating stealth addresses. Three tiers (open/invite/dark), optional federation shards (`crypto/rooms.py`, `transport/room_session.py`, `drift room …`). Encrypted but **not** forward-secret — see DESIGN.md §12.
 - **X3DH asynchronous key agreement** ✅ complete (`v0.14.0`): the Signal X3DH handshake replaces the deterministic ratchet bootstrap, closing the last H3 audit residual. Users publish a signed prekey + one-time prekeys to the relay (`/prekeys/*`, sealed at rest); the initiator fetches the bundle, runs `DH1..DH4 → HKDF`, and the recipient's signed prekey seeds the Double Ratchet. One-time prekeys are consumed once and deleted, so a later full key compromise can't decrypt past opening bursts. The relay-side one-time prekey pool **auto-replenishes mid-session** — a recipient who stays online while senders drain it tops the pool back up in the background once it dips below the low watermark, so it never silently falls back to weaker OTPK-less handshakes. The old deterministic bootstrap remains only as a visibly-warned fallback (`crypto/x3dh.py`, `transport/session.py`, `drift prekeys`).
 
-**Backlog (none currently active):** M1–M3 / M5 audit findings; L1–L4; Raspberry Pi image.
+- **Audit M1–M3, M5 + lows L1, L3** ✅ resolved (`v0.14.1`): scan/spend privilege separation (the stealth message key now folds in an `ECDH(spend, R)` so the private spend key is required to decrypt, not just the scan key — `crypto/stealth.py`); single-use burn tokens with nonce + timestamp and relay-side replay dedup (`crypto/burn.py`, `relay/server.py`); relay-specific beacon lookup hash bound to the relay pubkey via `GET /beacon/pubkey` (`crypto/beacon.py`); safety number now commits to both scan **and** spend keys, invalidating old numbers (`storage.py`); bounded seen-address dedup and `/send` size+addr validation. See `docs/audit-2026-06.md`. **L2** (wipe single-shot tell) and **L4** (spend key reused as Ed25519 seed) are documented in DESIGN.md and deferred — both need an on-disk format/migration change.
+
+**Backlog (none currently active):** L2 / L4 (deferred, need format migration); Raspberry Pi image.
 
 ## Development setup
 

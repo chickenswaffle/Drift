@@ -532,3 +532,33 @@ class TestFailover:
         # Discovered peers are normalised to ws(s) and appended for failover.
         assert "ws://r2:8765" in client.relays
         assert "wss://r3:8765" in client.relays
+
+
+# ---------------------------------------------------------------------------
+# Bounded seen-address dedup (audit L1)
+# ---------------------------------------------------------------------------
+
+def test_bounded_addr_set_evicts_oldest_over_capacity() -> None:
+    from drift.transport.session import _BoundedAddrSet
+
+    s = _BoundedAddrSet(capacity=3)
+    a, b, c, d = (bytes([i]) * 32 for i in range(4))
+    for addr in (a, b, c):
+        s.add(addr)
+    assert a in s and b in s and c in s
+    s.add(d)  # over capacity → oldest (a) evicted
+    assert len(s) == 3
+    assert a not in s
+    assert b in s and c in s and d in s
+
+
+def test_bounded_addr_set_membership_and_idempotent_add() -> None:
+    from drift.transport.session import _BoundedAddrSet
+
+    s = _BoundedAddrSet(capacity=2)
+    x = b"\x01" * 32
+    s.add(x)
+    s.add(x)  # re-adding an existing member must not grow the set
+    assert len(s) == 1
+    assert x in s
+    assert b"\x02" * 32 not in s

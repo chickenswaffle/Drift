@@ -11,6 +11,55 @@ DRIFT uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.14.1] — 2026-06-18
+
+**Audit findings M1–M3, M5 + lows L1, L3 — scan/spend privilege separation, burn
+token replay, beacon hash, safety number scope.** A correctness-and-honesty
+release closing the remaining medium audit findings and two straightforward lows.
+No new primitives (project iron rule). See `docs/audit-2026-06.md` (Resolution
+update — 2026-06-18) and the updated DESIGN.md.
+
+> **Breaking / migration.** Two changes are wire/format breaking and require both
+> peers on ≥ `0.14.1`:
+> - **M1** changes the stealth message-key derivation, so a `0.14.1` client and an
+>   older client can no longer exchange messages.
+> - **M5** changes every safety number — **re-verify your contacts out of band**.
+
+### Security
+- **M1 — scan/spend privilege separation.** The stealth message key is now
+  `HKDF(ECDH(scan, R) ‖ ECDH(spend, R))`. Detection (the one-time address) still
+  uses the scan key alone, but decryption now requires the private *spend* key:
+  `scan_for_message` returns a `ScanResult` (ownership confirmed + intermediate),
+  and `derive_message_key_with_spend` completes the key. A scan-only device can
+  filter mail without being able to read it. (`drift/crypto/stealth.py`,
+  `drift/transport/session.py`.)
+- **M2 — single-use burn tokens.** Tokens are now `nonce.timestamp.mac` with a
+  fresh `os.urandom(16)` nonce and a MAC-bound timestamp. The relay rejects replayed
+  nonces (bounded LRU) and tokens older than 300 s; clients re-verify the MAC and
+  freshness. Closes the replay hole and the stable per-conversation fingerprint.
+  (`drift/crypto/burn.py`, `relay/server.py`.)
+- **M3 — relay-specific beacon lookup hash.** `lookup_hash` now binds the relay's
+  long-term Ed25519 pubkey: `SHA256(prefix ‖ relay_pubkey ‖ handle)`. A table built
+  against one relay is useless against another. Clients fetch the key from the new
+  `GET /beacon/pubkey` (alias of `/witness/pubkey`). (`drift/crypto/beacon.py`,
+  `relay/server.py`, `drift/cli.py`, `drift/ui/app.py`.)
+- **M5 — safety number binds the spend key.** Now
+  `SHA256("drift-safety-v1" ‖ sorted([scan‖spend, …]))` — a spend-key swap no longer
+  passes `drift verify`. Invalidates existing safety numbers (re-verify).
+  (`drift/storage.py`, `drift/cli.py`, `drift/ui/app.py`.)
+
+### Changed
+- **L1** — the per-session seen-address dedup is now bounded (cap 4096, oldest
+  evicted) instead of an unbounded set. (`drift/transport/session.py`.)
+- **L3** — `/send` caps the sealed blob at 64 KiB base64 (`413`) and validates that
+  `addr` decodes to 32 bytes (`400`). (`relay/server.py`.)
+
+### Deferred (documented in DESIGN.md, not fixed — need a format/migration change)
+- **L2** — duress *wipe* is single-shot and distinguishable across repeated unlocks.
+- **L4** — the Ed25519 signing key is derived from the spend key (coupled compromise).
+
+---
+
 ## [0.14.0] — 2026-06-17
 
 **X3DH asynchronous key agreement — closes the H3 audit residual, retires the

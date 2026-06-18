@@ -51,6 +51,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+from collections import OrderedDict
 from collections.abc import AsyncGenerator, Callable, Coroutine
 from dataclasses import dataclass
 
@@ -73,7 +74,11 @@ from drift.crypto.ratchet import (
 from drift.crypto.sealed import open_header as open_sender_header
 from drift.crypto.sealed import parse as parse_sender
 from drift.crypto.sealed import seal as seal_sender
-from drift.crypto.stealth import derive_one_time_address, scan_for_message
+from drift.crypto.stealth import (
+    derive_message_key_with_spend,
+    derive_one_time_address,
+    scan_for_message,
+)
 from drift.crypto.x3dh import (
     ONE_TIME_LOW_WATERMARK,
     PreKeyBundle,
@@ -104,6 +109,41 @@ def _keypair_from_private(private_bytes: bytes) -> Keypair:
     """Reconstruct an X25519 Keypair from raw private key bytes."""
     priv = X25519PrivateKey.from_private_bytes(private_bytes)
     return Keypair(private_key=priv, public_key=priv.public_key())
+
+
+# Default cap for the per-session seen-address dedup window (audit L1). The relay
+# only replays a short, bounded buffer (≤30 s), so the dedup set only needs to
+# cover recent traffic — a few thousand addresses is far more than any replay
+# window holds.
+_SEEN_ADDRS_CAP = 4096
+
+
+class _BoundedAddrSet:
+    """A membership set with a hard size cap that evicts the oldest entries.
+
+    Replaces an unbounded ``set`` for the one-time-address dedup (audit L1): a
+    long-lived chat would otherwise accumulate every accepted address forever and
+    slowly leak memory. The dedup only needs to span the relay's replay window,
+    so dropping the oldest once over capacity is safe.
+    """
+
+    def __init__(self, capacity: int = _SEEN_ADDRS_CAP) -> None:
+        self._capacity = max(1, capacity)
+        self._items: OrderedDict[bytes, None] = OrderedDict()
+
+    def __contains__(self, addr: bytes) -> bool:
+        return addr in self._items
+
+    def add(self, addr: bytes) -> None:
+        if addr in self._items:
+            self._items.move_to_end(addr)
+            return
+        self._items[addr] = None
+        if len(self._items) > self._capacity:
+            self._items.popitem(last=False)
+
+    def __len__(self) -> int:
+        return len(self._items)
 
 
 # Inner sealed-payload framing. The bytes sealed under the per-message stealth
@@ -424,7 +464,7 @@ class PairwiseRatchet:
 
 
 def _scan_and_unseal(
-    envelope: Envelope, my_scan_priv: bytes, my_spend_pub: bytes
+    envelope: Envelope, my_scan_priv: bytes, my_spend_pub: bytes, my_spend_priv: bytes
 ) -> tuple[X3DHHeader | None, bytes | None, Header, bytes] | None:
     """
     Identity-level receive parsing shared by Session and GroupSession.
@@ -433,6 +473,10 @@ def _scan_and_unseal(
     well-formed stealth message addressed to *us*, else ``None`` (not ours /
     malformed). At most one of ``x3dh_header`` / ``fs_pub`` is set, on a
     bootstrap-chain message (X3DH vs legacy); both are None in the steady state.
+
+    Detection uses the scan key; deriving the seal key additionally requires the
+    private spend key (audit M1 — scan/spend privilege separation), so this seam
+    needs both halves.
 
     A scan match means the message really is addressed to us (the stealth address
     is bound to our scan + spend keys), so unsealing its header authenticates it:
@@ -447,11 +491,14 @@ def _scan_and_unseal(
         ephemeral_pub, sealed_header, ratchet_ct = parse_sender(envelope.ciphertext)
     except ValueError:
         return None
-    stealth_key = scan_for_message(
+    scan_result = scan_for_message(
         ephemeral_pub, envelope.one_time_addr, my_scan_priv, my_spend_pub
     )
-    if stealth_key is None:
+    if scan_result is None:
         return None
+    # Ownership confirmed by the scan key; the spend key is required to finish
+    # deriving the seal key and actually open the content (audit M1).
+    stealth_key = derive_message_key_with_spend(scan_result, my_spend_priv)
     inner_bytes = open_sender_header(
         stealth_key, sealed_header, address=envelope.one_time_addr
     )
@@ -554,7 +601,7 @@ class Session:
         # one-time address, so a repeat means a duplicate. We drop it before it
         # reaches the ratchet — a replayed, already-consumed message would
         # otherwise advance past its key and surface as a spurious InvalidTag.
-        self._seen_addrs: set[bytes] = set()
+        self._seen_addrs = _BoundedAddrSet()
 
         # Subscribe to the shared firehose; the relay routes by this key only.
         # When Tor is active, hand the transport the SOCKS5 endpoint so every
@@ -799,7 +846,9 @@ class Session:
             # Identity-level scan + unseal (shared with GroupSession). A genuine
             # tamper of a message addressed to us surfaces here as InvalidTag and
             # is allowed to propagate (iron rule).
-            parsed = _scan_and_unseal(item, self._my_scan_priv, self._my_spend_pub)
+            parsed = _scan_and_unseal(
+                item, self._my_scan_priv, self._my_spend_pub, self._my_spend_priv
+            )
             if parsed is None:
                 continue  # not addressed to us, or malformed
             assert item.one_time_addr is not None  # guaranteed by _scan_and_unseal
@@ -909,7 +958,7 @@ class GroupSession:
         }
         self._members: dict[str, ContactInfo] = {m.code: m for m in group.members}
         self._lock = asyncio.Lock()
-        self._seen_addrs: set[bytes] = set()
+        self._seen_addrs = _BoundedAddrSet()
         socks_proxy = tor_client.socks_proxy if tor_client is not None else None
         fmd_secret_keys = fmd_key.secret_keys if fmd_key and fmd_key.secret_keys else None
         self._client = RelayClient(
@@ -1086,7 +1135,9 @@ class GroupSession:
         async for item in self._client:
             if isinstance(item, BurnFrame):
                 continue  # group burn is out of scope for Phase 8
-            parsed = _scan_and_unseal(item, self._my_scan_priv, self._my_spend_pub)
+            parsed = _scan_and_unseal(
+                item, self._my_scan_priv, self._my_spend_pub, self._my_spend_priv
+            )
             if parsed is None:
                 continue
             assert item.one_time_addr is not None  # guaranteed by _scan_and_unseal

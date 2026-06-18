@@ -207,3 +207,50 @@ def test_decoy_unlock_shreds_real_prekeys(gstore) -> None:  # type: ignore[no-un
     on_disk = list((gstore / "prekeys").glob("*.json"))
     for path in on_disk:
         assert real_pub not in path.read_text()
+
+
+# ---------------------------------------------------------------------------
+# Safety number (audit M5 — binds scan AND spend keys)
+# ---------------------------------------------------------------------------
+
+def test_safety_number_is_symmetric() -> None:
+    """Both parties derive the same value from their two contact codes."""
+    alice = Identity.generate()
+    bob = Identity.generate()
+    assert storage.safety_number(alice, bob.contact_code()) == storage.safety_number(
+        bob, alice.contact_code()
+    )
+
+
+def test_safety_number_detects_spend_key_swap() -> None:
+    """Audit M5: a MITM keeping the real scan key but substituting the spend key
+    must now produce a *different* safety number (the v0 digest missed this)."""
+    from drift.crypto import b58encode
+
+    alice = Identity.generate()
+    bob = Identity.generate()
+    eve = Identity.generate()
+
+    real = storage.safety_number(alice, bob.contact_code())
+    mitm_code = (
+        f"drift:{b58encode(bob.scan_keypair.public_bytes())}"
+        f".{b58encode(eve.spend_keypair.public_bytes())}"
+    )
+    assert storage.safety_number(alice, mitm_code) != real
+
+
+def test_safety_number_detects_scan_key_swap() -> None:
+    """A scan-key substitution is still caught (regression guard for the old
+    behaviour, which only covered scan keys)."""
+    from drift.crypto import b58encode
+
+    alice = Identity.generate()
+    bob = Identity.generate()
+    eve = Identity.generate()
+
+    real = storage.safety_number(alice, bob.contact_code())
+    mitm_code = (
+        f"drift:{b58encode(eve.scan_keypair.public_bytes())}"
+        f".{b58encode(bob.spend_keypair.public_bytes())}"
+    )
+    assert storage.safety_number(alice, mitm_code) != real

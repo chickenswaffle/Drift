@@ -1,63 +1,53 @@
 """
-drift.crypto.stealth — rotating stealth addresses (Phase 1)
+drift.crypto.stealth — rotating stealth addresses (Phase 1, live)
 
-This file is a documented placeholder. The function signatures and
-docstrings define the exact interface Phase 1 will implement.
-The protocol math is described precisely so a contributor can build
-it without needing to re-read the design doc.
+A stealth address lets a sender post a message for a recipient without
+the relay ever learning which recipient it's for, and without any two
+messages being linkable to the same recipient. Every message lands at a
+unique, randomly-derived one-time address; only the recipient — scanning
+with their private scan key — can detect it.
 
-Background
-----------
-A stealth address lets a sender post a message for a recipient
-without the relay ever learning which recipient it's for, and
-without any two messages being linkable to the same recipient.
+The construction is adapted from Monero's stealth address scheme, using
+X25519 (Curve25519) DH plus libsodium's ed25519 group operations for the
+point arithmetic X25519 doesn't expose (the iron rule: no hand-rolled
+field math; see the "Curve helpers" note below).
 
-Every message lands at a unique, randomly-derived one-time address.
-Only the recipient — scanning with their private scan key — can
-detect it.
+Scan / spend privilege separation (audit M1)
+--------------------------------------------
+The scan and spend keys carry **different** privilege:
 
-The technique is adapted from Monero's stealth address scheme,
-using X25519 (Curve25519) instead of Monero's ed25519 variant.
+  * **scan key** — detection. The one-time address binds the *public*
+    spend key and is derived from ``ECDH(scan, R)`` only, so a device
+    holding just the private *scan* key can confirm a message is
+    addressed to the user (``scan_for_message`` → :class:`ScanResult`)
+    without being able to read it.
+  * **spend key** — decryption. The message key is
+    ``HKDF(ECDH(scan, R) ‖ ECDH(spend, R))`` — it folds in a second DH
+    against the *spend* key, so the private spend key is *required* to
+    finish the derivation (:func:`derive_message_key_with_spend`).
 
-Protocol (sender side)
------------------------
-Given:
-  scan_pub   = recipient's public scan key  (32 bytes, X25519)
-  spend_pub  = recipient's public spend key (32 bytes, X25519)
+A scan-only delegate therefore filters mail but cannot open it; the two
+secrets are not interchangeable. See DESIGN.md §2.
 
-1.  Generate a random ephemeral keypair: (r, R)  where R = r·G
-2.  Shared secret:  s = ECDH(r, scan_pub)
-         → 32-byte raw X25519 output
-3.  Derived scalar: h = SHA-256(s)
-         → interpreted as a big-endian integer mod l
-         (l = 2^252 + 27742317777372353535851937790883648493, the curve order)
-4.  One-time address (as a compressed point):
-         A_once = spend_pub + h·G
-         → 32-byte Ristretto255 or X25519 point
-5.  Message payload: { "R": b58(R), "addr": b58(A_once), "ct": b58(ciphertext) }
-         where ciphertext = XChaCha20Poly1305_encrypt(
-             key = HKDF(s, info=b"drift-v1-msg"),
-             plaintext = message_bytes
-         )
+Protocol
+--------
+Given the recipient's public ``scan_pub`` / ``spend_pub`` (32 bytes each):
 
-Protocol (receiver side)
-------------------------
-For each relay message { R, addr, ct }:
-1.  s' = ECDH(scan_priv, R)
-2.  h' = SHA-256(s')
-3.  Candidate: A' = spend_pub + h'·G
-4.  If b58(A') == addr  → message is ours
-5.  Decrypt with HKDF(s', info=b"drift-v1-msg")
+Sender (``derive_one_time_address``), with a fresh ephemeral ``(r, R=r·G)``:
+  s_scan   = ECDH(r, scan_pub)
+  s_spend  = ECDH(r, spend_pub)
+  A_once   = B + SHA256(s_scan)·G        # B = _spend_point(spend_pub)
+  msg_key  = HKDF(s_scan ‖ s_spend, info=b"drift-v2-msg")
 
-Implementation note
--------------------
-X25519 arithmetic is DH only; it doesn't expose point addition or
-scalar multiplication directly. Use the `cryptography` library's
-low-level Curve25519 bindings or the `pure25519` library which
-exposes the group operations needed for step 4 and step 3 above.
+Receiver, in two steps:
+  1. detect (scan key)  — s_scan = ECDH(scan_priv, R); ours iff
+       B + SHA256(s_scan)·G == A_once → :class:`ScanResult`
+  2. decrypt (spend key) — s_spend = ECDH(spend_priv, R);
+       msg_key = HKDF(s_scan ‖ s_spend, info=b"drift-v2-msg")
 
-Alternatively, implement on Ristretto255 via the `ristretto255`
-PyPI package which wraps libsodium's group operations cleanly.
+The ``drift-v1-msg`` (scan-only) message key from ``v0.14.0`` and earlier
+is intentionally incompatible: binding the spend key changes the derived
+key, so peers must both run the M1 fix to interoperate.
 """
 
 from __future__ import annotations
@@ -77,7 +67,9 @@ from drift.crypto import derive_message_key
 # Domain-separation tags. Changing any of these breaks address compatibility
 # with already-deployed clients, so they are versioned (v1).
 _SPEND_POINT_TAG = b"drift-stealth-v1-spend-point"
-_MSG_KEY_INFO = b"drift-v1-msg"
+# v2 (audit M1): the message key folds in a second DH against the spend key, so
+# it is deliberately incompatible with the scan-only v1 key (drift-v1-msg).
+_MSG_KEY_INFO = b"drift-v2-msg"
 
 
 # ---------------------------------------------------------------------------
@@ -155,10 +147,15 @@ def derive_one_time_address(
     """
     Sender: derive the one-time address and the encryption key.
 
-    Steps 2–5 of the protocol (the caller supplies the ephemeral keypair):
-        s        = ECDH(ephemeral_priv, scan_pub)
-        A_once   = spend_point(spend_pub) + SHA256(s)·G
-        msg_key  = HKDF(s, info="drift-v1-msg")
+    The caller supplies the ephemeral keypair (r, R):
+        s_scan   = ECDH(ephemeral_priv, scan_pub)
+        s_spend  = ECDH(ephemeral_priv, spend_pub)
+        A_once   = spend_point(spend_pub) + SHA256(s_scan)·G
+        msg_key  = HKDF(s_scan ‖ s_spend, info="drift-v2-msg")
+
+    The address is derived from the scan DH alone (so a scan-only receiver
+    can detect it), but the message key additionally folds in the spend DH,
+    so only the holder of the private *spend* key can decrypt (audit M1).
 
     Returns:
         (one_time_addr_bytes, message_key_bytes)
@@ -166,10 +163,24 @@ def derive_one_time_address(
     Both 32 bytes. `one_time_addr_bytes` goes in the envelope header;
     `message_key_bytes` is used directly with drift.crypto.encrypt().
     """
-    shared_secret = _ecdh(ephemeral_priv, recipient_scan_pub)
-    one_time_addr = _address_from_secret(shared_secret, recipient_spend_pub)
-    message_key = derive_message_key(shared_secret, info=_MSG_KEY_INFO)
+    s_scan = _ecdh(ephemeral_priv, recipient_scan_pub)
+    s_spend = _ecdh(ephemeral_priv, recipient_spend_pub)
+    one_time_addr = _address_from_secret(s_scan, recipient_spend_pub)
+    message_key = derive_message_key(s_scan + s_spend, info=_MSG_KEY_INFO)
     return one_time_addr, message_key
+
+
+class ScanResult(NamedTuple):
+    """Partial result of a scan-key-only detection (audit M1).
+
+    Returned by :func:`scan_for_message` when a message is addressed to us.
+    It *confirms ownership* but is deliberately insufficient to decrypt:
+    deriving the message key additionally requires the private *spend* key,
+    via :func:`derive_message_key_with_spend`. A scan-only device can produce
+    this result (filter mail) but cannot turn it into a message key.
+    """
+    ephemeral_pub: bytes   # R — needed for the spend-side ECDH in step 2
+    scan_secret: bytes     # s_scan = ECDH(scan_priv, R) — the intermediate
 
 
 def scan_for_message(
@@ -177,23 +188,45 @@ def scan_for_message(
     envelope_one_time_addr: bytes,
     my_scan_priv: bytes,
     my_spend_pub: bytes,
-) -> bytes | None:
+) -> ScanResult | None:
     """
-    Receiver: check if an envelope is addressed to us.
+    Receiver step 1 (scan key only): check if an envelope is addressed to us.
 
-        s'       = ECDH(scan_priv, R)
-        A'       = spend_point(my_spend_pub) + SHA256(s')·G
+        s_scan   = ECDH(scan_priv, R)
+        A'       = spend_point(my_spend_pub) + SHA256(s_scan)·G
         ours iff   A' == envelope_one_time_addr
-        msg_key  = HKDF(s', info="drift-v1-msg")
 
     Returns:
-        message_key_bytes (32 bytes) if the envelope is ours, else None.
+        A :class:`ScanResult` (confirmed ownership + the intermediate scan
+        secret) if the envelope is ours, else None.
 
-    The returned key can be passed directly to drift.crypto.decrypt().
+    This step needs only the private *scan* key and the public spend key, so
+    a scan-only delegate can run it. It does **not** yield a message key — pass
+    the result to :func:`derive_message_key_with_spend` with the private spend
+    key for that (audit M1).
     """
-    shared_secret = _ecdh(my_scan_priv, envelope_ephemeral_pub)
-    candidate = _address_from_secret(shared_secret, my_spend_pub)
+    s_scan = _ecdh(my_scan_priv, envelope_ephemeral_pub)
+    candidate = _address_from_secret(s_scan, my_spend_pub)
     # Constant-time compare so scanning doesn't leak via timing.
     if not hmac.compare_digest(candidate, envelope_one_time_addr):
         return None
-    return derive_message_key(shared_secret, info=_MSG_KEY_INFO)
+    return ScanResult(ephemeral_pub=envelope_ephemeral_pub, scan_secret=s_scan)
+
+
+def derive_message_key_with_spend(
+    scan_result: ScanResult,
+    my_spend_priv: bytes,
+) -> bytes:
+    """
+    Receiver step 2 (spend key required): turn a confirmed :class:`ScanResult`
+    into the message key.
+
+        s_spend  = ECDH(spend_priv, R)
+        msg_key  = HKDF(scan_secret ‖ s_spend, info="drift-v2-msg")
+
+    Only the holder of the private *spend* key can complete this — the scan
+    key alone cannot (audit M1). The returned key can be passed directly to
+    drift.crypto.decrypt().
+    """
+    s_spend = _ecdh(my_spend_priv, scan_result.ephemeral_pub)
+    return derive_message_key(scan_result.scan_secret + s_spend, info=_MSG_KEY_INFO)
