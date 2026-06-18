@@ -23,6 +23,7 @@ import sys
 from typing import Any
 
 import typer
+from rich import box
 from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
@@ -159,6 +160,23 @@ def init(
         title="[green]✓  Identity generated[/green]",
         subtitle="Share this contact code with people who want to message you",
         border_style="green",
+    ))
+    console.print()
+    next_steps = Text()
+    next_steps.append("  1   ", style="bold cyan")
+    next_steps.append("share your contact code with someone you trust", style="white")
+    next_steps.append("\n\n")
+    next_steps.append("  2   ", style="bold cyan")
+    next_steps.append("drift add <name> <their-code>", style="bold cyan")
+    next_steps.append("\n\n")
+    next_steps.append("  3   ", style="bold cyan")
+    next_steps.append("drift chat <name>", style="bold cyan")
+    console.print(Panel(
+        next_steps,
+        title="[dim]what to do next[/dim]",
+        title_align="left",
+        border_style="dim",
+        box=box.ROUNDED,
     ))
     console.print()
     if passphrase:

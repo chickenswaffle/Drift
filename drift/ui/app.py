@@ -53,6 +53,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
 import httpx
+from rich.align import Align
 from rich.console import Group, RenderableType
 from rich.rule import Rule as RichRule
 from rich.table import Table
@@ -947,7 +948,12 @@ class Sidebar(Vertical):
         listing = self.query_one("#contact-list", VerticalScroll)
         await listing.remove_children()
         if not contacts and not rooms:
-            await listing.mount(Static("[dim]no contacts yet[/]", classes="empty-hint"))
+            hint = (
+                f"[{_DM}]◈  no contacts yet[/]\n\n"
+                f"[{_S}]\\[A][/][{_DM}] add a contact · [/]"
+                f"[{_S}]\\[+][/][{_DM}] below[/]"
+            )
+            await listing.mount(Static(hint, classes="empty-hint"))
             return
         items = [
             ContactItem(
@@ -1043,6 +1049,32 @@ class MessagePane(VerticalScroll):
         """Briefly tint the border green when a new message lands."""
         self.add_class("flash")
         self.set_timer(0.35, lambda: self.remove_class("flash"))
+
+
+class _SplashPane(Static):
+    """Centered welcome splash for an empty chat pane (no conversation open).
+
+    Pure presentation — no state, no bindings. It is wiped automatically the
+    moment a conversation opens: every open path calls ``MessagePane.clear()``,
+    which removes all pane children including this splash.
+    """
+
+    def render(self) -> RenderableType:
+        body = Text(justify="center")
+        body.append("\n\n\n")
+        body.append("d r i f t\n\n", style=f"bold {_BD}")
+        body.append(
+            "metadata-private  ·  end-to-end encrypted  ·  no accounts\n\n\n",
+            style=_DM,
+        )
+        body.append("[C]", style=_S)
+        body.append(" contacts    ", style=_DM)
+        body.append("[A]", style=_S)
+        body.append(" add contact    ", style=_DM)
+        body.append("[?]", style=_S)
+        body.append(" help", style=_DM)
+        body.append("\n\n")
+        return Align.center(body)
 
 
 class InputBar(Vertical):
@@ -1766,7 +1798,7 @@ class DriftApp(App[None]):
         elif self._active is not None:
             await self._open_conversation(self._active)
         else:
-            self._pane.write_system("select a contact (press C) or add one (press A)")
+            self._pane.mount(_SplashPane())
 
     async def _bootstrap_tor(self) -> bool:
         """
