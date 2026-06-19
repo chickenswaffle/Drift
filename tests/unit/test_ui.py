@@ -975,7 +975,7 @@ def test_lockdown_input_buffer_vs_display() -> None:
     assert field._buf == list("world")
     # _noise mirrors its length but never matches the plaintext, slot for slot.
     assert len(field._noise) == len(field._buf) == 5
-    assert all(shown != real for shown, real in zip(field._noise, field._buf))
+    assert all(shown != real for shown, real in zip(field._noise, field._buf, strict=True))
     # The rendered line shows the noise, never the real text.
     rendered = str(field.render())
     assert "".join(field._noise) in rendered
