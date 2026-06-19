@@ -63,11 +63,13 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
 from textual.command import DiscoveryHit, Hit, Hits, Provider
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
-from textual.events import Key
+from textual.css.query import NoMatches
+from textual.events import Key, Paste
 from textual.message import Message
 from textual.reactive import reactive
 from textual.screen import ModalScreen
 from textual.timer import Timer
+from textual.widget import Widget
 from textual.widgets import Button, Input, Static
 
 from drift import __version__, storage
@@ -221,6 +223,7 @@ def _build_css(t: dict[str, str]) -> str:
     hbi = t["hover_bg_off"]
     dm  = t["dim"]
     sc  = t["scanlines"]
+    wn  = t["warning"]
     return f"""
     Screen {{ background: {bg}; }}
 
@@ -325,6 +328,14 @@ def _build_css(t: dict[str, str]) -> str:
     #msg-input:focus {{ border: none; }}
     #char-count {{ width: 6; content-align: right middle; color: {dm}; }}
     #input-hint {{ height: 1; color: {dm}; }}
+
+    /* ── Lockdown mode (Ctrl+K) ─────────────────────────────── */
+    _LockdownInput {{
+        height: 1; width: 1fr; background: {bg}; color: {wn}; padding: 0 1;
+    }}
+    _LockdownInput:focus {{ border: none; }}
+    .flash-red {{ border: tall red; }}
+    _LockdownPill {{ color: red; text-style: bold; padding: 0 1; }}
 
     /* ── Modals ─────────────────────────────────────────────── */
     _FadeModal {{ align: center middle; background: {bg} 75%; }}
@@ -770,6 +781,21 @@ class NodePill(Static):
         return f"[{colour}]⬡ {self.count} {word}{suffix}[/]"
 
 
+class _LockdownPill(Static):
+    """
+    The far-right header alarm: hidden until Lockdown mode is engaged, then it
+    flips on as a bold red ``🔒 LOCKDOWN`` so the high-paranoia state is
+    impossible to miss. Driven entirely by the app (``action_toggle_lockdown``);
+    it holds no logic of its own.
+    """
+
+    def on_mount(self) -> None:
+        self.display = False  # default hidden — only shown while locked down
+
+    def render(self) -> RenderableType:
+        return "[bold red]🔒 LOCKDOWN[/]"
+
+
 class HeaderBar(Static):
     """One line: active contact (left) · relay · version · connection (right)."""
 
@@ -1075,6 +1101,103 @@ class _SplashPane(Static):
         body.append(" help", style=_DM)
         body.append("\n\n")
         return Align.center(body)
+
+
+class _LockdownSubmit(Message):
+    """Lockdown composer → app: a message was submitted. ``text`` is the real
+    plaintext from the hidden buffer (never the noise display)."""
+
+    def __init__(self, text: str) -> None:
+        super().__init__()
+        self.text = text
+
+
+class _LockdownInput(Widget):
+    """
+    The high-paranoia composer that replaces the normal input while Lockdown
+    mode (Ctrl+K) is active. A keylogger watching the screen sees a blizzard.
+
+    Two parallel buffers:
+      · ``_buf``   — the REAL plaintext. It is never rendered, under any code
+                     path: ``render()`` only ever joins ``_noise``. (See the
+                     assertion in ``render``.)
+      · ``_noise`` — the display buffer, same length as ``_buf``; each slot is a
+                     random printable character deliberately *unrelated* to the
+                     real one in that slot.
+
+    On every printable keystroke the entire noise field is re-scrambled, so the
+    whole line churns with each character typed. The randomness here is purely
+    cosmetic obfuscation — it is NOT a crypto primitive (``random.randint`` feeds
+    the noise display and nothing else); the real message crypto path is
+    untouched.
+    """
+
+    can_focus = True
+
+    def __init__(self, id: str | None = None) -> None:  # noqa: A002 — Textual API
+        super().__init__(id=id)
+        self._buf: list[str] = []
+        self._noise: list[str] = []
+
+    @staticmethod
+    def _noise_char(real: str) -> str:
+        """A random printable ASCII char (0x21–0x7E) guaranteed ≠ ``real``."""
+        c = chr(random.randint(0x21, 0x7E))  # noqa: S311 — display noise, not crypto
+        while c == real:
+            c = chr(random.randint(0x21, 0x7E))  # noqa: S311 — display noise, not crypto
+        return c
+
+    def _scramble(self) -> None:
+        """Re-randomise every noise slot — the whole field churns each keystroke."""
+        self._noise = [self._noise_char(real) for real in self._buf]
+
+    def _refresh_view(self) -> None:
+        """Repaint and mirror the *real* char count into the shared counter."""
+        if not self.is_mounted:
+            return
+        self.refresh()
+        try:
+            counter = self.app.query_one("#char-count", Static)
+        except NoMatches:
+            return
+        n = len(self._buf)
+        colour = _WN if n > 1000 else "#ffaa00" if n > 800 else _DM
+        counter.update(f"[{colour}]{n}[/]")
+
+    def on_key(self, event: Key) -> None:
+        if event.key == "enter":
+            text = "".join(self._buf)
+            self._buf = []
+            self._noise = []
+            self.post_message(_LockdownSubmit(text))
+            self._refresh_view()
+            event.stop()
+            return
+        if event.key == "backspace":
+            if self._buf:
+                self._buf.pop()
+                self._noise.pop()
+            self._refresh_view()
+            event.stop()
+            return
+        if event.is_printable and event.character is not None:
+            self._buf.append(event.character)
+            # Fresh random slot for the new char, then churn the whole field.
+            self._noise.append(self._noise_char(event.character))
+            self._scramble()
+            self._refresh_view()
+            event.stop()
+
+    def on_paste(self, event: Paste) -> None:
+        # Paste is disabled in Lockdown — clipboard content must never enter the
+        # buffer (a paste could leak a real message past the keystroke churn).
+        event.stop()
+
+    def render(self) -> RenderableType:
+        # Iron rule: the real plaintext (_buf) must NEVER be rendered. Only the
+        # noise display is ever emitted.
+        assert len(self._noise) == len(self._buf)
+        return f"🔒  [{_WN}]{''.join(self._noise)}[/]"
 
 
 class InputBar(Vertical):
@@ -1670,6 +1793,7 @@ class DriftApp(App[None]):
         Binding("ctrl+l", "toggle_log", "Log", show=False),
         Binding("ctrl+n", "toggle_network", "Network", show=False),
         Binding("ctrl+p", "command_palette", "Palette", show=False),
+        Binding("ctrl+k", "toggle_lockdown", "Lockdown", show=False),
         Binding("escape", "blur_input", "Unfocus", show=False),
         # Numeric quick-jump to the Nth contact (Oxker-style), active when the
         # message input is unfocused (press Esc first), like the letter shortcuts.
@@ -1695,6 +1819,7 @@ class DriftApp(App[None]):
         tor_required: bool = False,
         fmd_key: Any = None,
         prekeys: Any = None,
+        lockdown: bool = False,
     ) -> None:
         super().__init__()
         self._identity = identity
@@ -1750,6 +1875,11 @@ class DriftApp(App[None]):
         self._session_start: float | None = None
         # Auto-burn timer (set by /burn Nm or /burn Ns).
         self._burn_timer: Timer | None = None
+        # Lockdown mode (Ctrl+K): obfuscated input + purged history. ``_lockdown``
+        # is the live toggle; ``_lockdown_on_mount`` (the --lockdown flag) engages
+        # it once the UI has settled.
+        self._lockdown = False
+        self._lockdown_on_mount = lockdown
 
     # ── Layout ────────────────────────────────────────────────────────────
 
@@ -1765,6 +1895,7 @@ class DriftApp(App[None]):
                     yield LatencyPill(_ws_to_http(self._primary_relay), id="latency")
                     yield RatchetPill(id="ratchet")
                     yield NodePill(id="nodes")
+                    yield _LockdownPill(id="lockdown-pill")
                 yield HeaderBar(id="headerinfo")
                 yield Static(RichRule(style=_BD, characters="─"), id="header-rule")
             yield CryptoTicker(id="ticker")
@@ -1802,6 +1933,9 @@ class DriftApp(App[None]):
             await self._open_conversation(self._active)
         else:
             self._pane.mount(_SplashPane())
+        # --lockdown: engage once the composer + panes have settled.
+        if self._lockdown_on_mount:
+            self.call_after_refresh(self.action_toggle_lockdown)
 
     async def _bootstrap_tor(self) -> bool:
         """
@@ -1898,6 +2032,20 @@ class DriftApp(App[None]):
     @property
     def _watermark(self) -> LockWatermark:
         return self.query_one("#watermark", LockWatermark)
+
+    @property
+    def _lockdown_pill(self) -> _LockdownPill:
+        return self.query_one("#lockdown-pill", _LockdownPill)
+
+    def _focus_composer(self) -> None:
+        """Focus whichever composer is live — the Lockdown field or the Input."""
+        try:
+            if self._lockdown:
+                self.query_one("#lockdown-input", _LockdownInput).focus()
+            else:
+                self._input.focus()
+        except NoMatches:
+            pass
 
     def _set_secure(self, secure: bool, *, maximum: bool = False) -> None:
         """Drive the header lock and the pane watermark from one place."""
@@ -2226,7 +2374,7 @@ class DriftApp(App[None]):
         room = self._rooms.get(event.label)
         if room is not None and event.label != self._conversation_name():
             await self._open_room(room)
-        self._input.focus()
+        self._focus_composer()
 
     @on(IncomingMessage)
     def _on_incoming(self, event: IncomingMessage) -> None:
@@ -2325,7 +2473,7 @@ class DriftApp(App[None]):
     async def _on_contact_selected(self, event: ContactSelected) -> None:
         if event.name != self._active:
             await self._open_conversation(event.name)
-        self._input.focus()
+        self._focus_composer()
 
     # ── Command dispatch ───────────────────────────────────────────────────
 
@@ -2687,11 +2835,78 @@ class DriftApp(App[None]):
 
     async def on_key(self, event: Key) -> None:
         """Shift+Enter inserts a newline into the draft instead of sending."""
+        # In Lockdown the _LockdownInput owns every key; there is no #msg-input to
+        # reach for, so don't touch it here.
+        if self._lockdown:
+            return
         if event.key in ("shift+enter", "shift+return"):
             field = self._input
             if field.has_focus:
                 field.value = field.value + "\n"
                 event.stop()
+
+    # ── Lockdown mode (Ctrl+K) ─────────────────────────────────────────────
+
+    async def action_toggle_lockdown(self) -> None:
+        """Flip the high-paranoia Lockdown state on or off (Ctrl+K)."""
+        if self._lockdown:
+            await self._disengage_lockdown()
+        else:
+            await self._engage_lockdown()
+
+    async def _engage_lockdown(self) -> None:
+        self._lockdown = True
+        # Purge all retained conversation history from memory.
+        self._history = {}
+        await self._pane.clear()
+        self._pane.write_system(
+            "🔒 lockdown engaged — display obfuscated · history purged from memory"
+        )
+        # Swap the plain Input for the obfuscating _LockdownInput, in place.
+        row = self.query_one("#input-row", Horizontal)
+        await self.query_one("#msg-input", Input).remove()
+        field = _LockdownInput(id="lockdown-input")
+        await row.mount(field, before="#char-count")
+        field.focus()
+        self.query_one("#input-hint", Static).update(
+            "[red]🔒 LOCKDOWN[/]  [dim]display noise · history gone · Ctrl+K to exit[/]"
+        )
+        self._lockdown_pill.display = True
+        # Flash the pane border red for 400 ms.
+        self._pane.add_class("flash-red")
+        self.set_timer(0.4, lambda: self._pane.remove_class("flash-red"))
+
+    async def _disengage_lockdown(self) -> None:
+        self._lockdown = False
+        row = self.query_one("#input-row", Horizontal)
+        await self.query_one("#lockdown-input", _LockdownInput).remove()
+        field = Input(
+            placeholder="type a message  ·  /help for commands  ·  /beacon to go discoverable",
+            id="msg-input",
+        )
+        await row.mount(field, before="#char-count")
+        field.focus()
+        self._pane.write_system("🔒 lockdown disengaged")
+        self.query_one("#input-hint", Static).update(InputBar.HINT)
+        self._lockdown_pill.display = False
+
+    @on(_LockdownSubmit)
+    async def _on_lockdown_submit(self, event: _LockdownSubmit) -> None:
+        """Send a Lockdown-composed message. Same path as a normal submit, minus
+        the encrypt animation (the noise churn already served that purpose)."""
+        text = event.text.strip()
+        if not text:
+            return
+        if text.startswith("/"):
+            await self._handle_slash(text)
+            return
+        if self._active is None and self._group is None and self._room is None:
+            self._pane.write_system("select a contact first (press C)")
+            return
+        try:
+            await self._send(text)
+        except Exception as exc:  # noqa: BLE001 — show send failures inline
+            self._pane.write_warning(f"send error: {exc}")
 
     # ── Misc actions ───────────────────────────────────────────────────────
 
