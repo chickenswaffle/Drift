@@ -1349,6 +1349,10 @@ def chat(
     tor_only: bool = typer.Option(
         False, "--tor-only", help="Refuse to connect at all if Tor fails to bootstrap"
     ),
+    lockdown: bool = typer.Option(
+        False, "--lockdown", "-L",
+        help="Start in Lockdown mode — obfuscated input, no history retained.",
+    ),
 ) -> None:
     """
     Open the DRIFT chat client.
@@ -1422,6 +1426,7 @@ def chat(
         rooms=dict(saved_rooms),
         room=room,
         use_tor=use_tor, tor_required=tor_only, fmd_key=fmd_key, prekeys=prekeys,
+        lockdown=lockdown,
     ).run()
 
 

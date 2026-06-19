@@ -34,6 +34,7 @@ from drift.ui.app import (
     LockWatermark,
     LogoBox,
     MessagePane,
+    MessageRecord,
     NetworkPane,
     NetworkState,
     NodeCountEvent,
@@ -47,6 +48,7 @@ from drift.ui.app import (
     TorActiveEvent,
     UptimePill,
     _build_css,
+    _LockdownInput,
 )
 
 
@@ -955,3 +957,50 @@ async def test_room_message_renders_anonymous_tag_and_signed_name() -> None:
             IncomingRoomMessage("cccc", "sus", display_name=None, authorized=False))
         await pilot.pause()
         assert len(pane.children) >= before + 3
+
+
+# ---------------------------------------------------------------------------
+# Lockdown mode (Ctrl+K)
+# ---------------------------------------------------------------------------
+
+def test_lockdown_input_buffer_vs_display() -> None:
+    """The real plaintext lives in _buf; the screen only ever shows _noise, and
+    the noise differs from the plaintext at every position."""
+    from textual.events import Key
+
+    field = _LockdownInput()
+    for ch in "world":
+        field.on_key(Key(ch, ch))
+    # _buf holds exactly the typed characters.
+    assert field._buf == list("world")
+    # _noise mirrors its length but never matches the plaintext, slot for slot.
+    assert len(field._noise) == len(field._buf) == 5
+    assert all(shown != real for shown, real in zip(field._noise, field._buf, strict=True))
+    # The rendered line shows the noise, never the real text.
+    rendered = str(field.render())
+    assert "".join(field._noise) in rendered
+    assert "world" not in rendered
+
+
+def test_lockdown_input_backspace() -> None:
+    """Backspace pops from both the real and the noise buffers in lockstep."""
+    from textual.events import Key
+
+    field = _LockdownInput()
+    for ch in "abc":
+        field.on_key(Key(ch, ch))
+    field.on_key(Key("backspace", None))
+    assert len(field._buf) == 2
+    assert len(field._noise) == 2
+
+
+@pytest.mark.asyncio
+async def test_lockdown_toggle_wipes_history() -> None:
+    """Engaging lockdown purges retained history and clears the pane."""
+    async with _app_active().run_test() as pilot:
+        app = pilot.app
+        app._history["alice"] = [MessageRecord("in", "alice", "secret", "12:00:00")]
+        await app.action_toggle_lockdown()
+        await pilot.pause()
+        assert app._lockdown is True
+        assert app._history == {}
