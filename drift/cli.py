@@ -178,6 +178,8 @@ def init(
         border_style="dim",
         box=box.ROUNDED,
     ))
+    # First run is exactly when you need to share your code — show the QR now.
+    _render_contact_qr(code)
     console.print()
     if passphrase:
         console.print("[dim]Keys are sealed in an encrypted vault:[/dim]", str(storage.VAULT_FILE))
@@ -372,13 +374,20 @@ def _my_contact_code(identity: Identity) -> str:
 
 
 @app.command()
-def whoami() -> None:
+def whoami(
+    qr: bool = typer.Option(
+        False, "--qr", help="Render your contact code as a scannable QR in the terminal."
+    ),
+) -> None:
     """Print your contact code (includes your FMD detection key when FMD is on)."""
     identity = _require_identity()
+    code = _my_contact_code(identity)
     # Plain print, not console.print: Rich hard-wraps at the terminal width
     # (80 when piped), and a ~95-char contact code would gain a newline mid-token
     # — corrupting it for copy-paste / capture. The code must come out as one line.
-    print(_my_contact_code(identity))
+    print(code)
+    if qr:
+        _render_contact_qr(code)
 
 
 @app.command()
@@ -460,7 +469,11 @@ def add(
     except StorageError as e:
         console.print(f"[red]Could not add contact:[/red] {e}")
         raise typer.Exit(1) from None
-    console.print(f"[green]✓[/green] Added contact [bold]{name}[/bold]")
+    # Echo a recognisable fragment of the code back — this is the moment to
+    # reinforce "you added the right person".
+    frag = f"{code[:8]}···{code[-4:]}" if len(code) > 12 else code
+    console.print(f"[green]✓[/green] added [bold]{name}[/bold]")
+    console.print(f"  [dim]{frag}[/dim]")
 
 
 @app.command()
@@ -805,6 +818,22 @@ _TIER_BLURB = {
     rooms_crypto.TIER_INVITE: "invite — anyone can read; posting needs an invite token",
     rooms_crypto.TIER_DARK: "dark — no name, joinable only via its QR/secret",
 }
+
+
+def _render_contact_qr(code: str) -> None:
+    """Print a scannable QR of a contact code to the terminal, or a graceful
+    fallback if segno is not installed."""
+    try:
+        import segno
+        console.print()
+        console.print("[dim]scan to add as a contact:[/dim]")
+        segno.make(code, error="l").terminal(compact=True)
+        console.print()
+    except Exception:  # noqa: BLE001 — QR rendering is best-effort, never fatal
+        # Escape the literal brackets so Rich doesn't parse [qr] as markup.
+        console.print(
+            r"[dim](install the 'qr' extra for a scannable QR: pip install -e '.\[qr]')[/dim]"
+        )
 
 
 def _render_room_qr(descriptor: str) -> None:
