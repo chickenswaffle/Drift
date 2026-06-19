@@ -33,6 +33,25 @@ You'll see something like:
 
 Keys are stored in: /home/you/.config/drift/identity.json
 They never leave this machine.
+
+What to do next:
+  1. drift add <name> <their-code>   — add someone who sent you their code
+  2. drift verify <name>             — confirm their keys out of band
+  3. drift chat <name>               — start talking
+
+█▀▀▀▀▀█ ▀▄ ▀█ █▀▀▀▀▀█
+█ ███ █ █▀▀▄▀ █ ███ █     ← a scannable QR of your contact code is
+█ ▀▀▀ █ ▀█ ▀▄ █ ▀▀▀ █       printed automatically on first run, so a
+▀▀▀▀▀▀▀ █▄▀▄█ ▀▀▀▀▀▀▀       phone can add you without copy-pasting 90 chars
+```
+
+The QR encodes the same contact code shown above. (QR rendering needs the
+optional `[qr]` extra — `pip install -e ".[qr]"`; without it `drift init`
+prints the code without a QR.) You can reprint your code and QR at any time:
+
+```bash
+drift whoami         # pipe-safe one-line contact code
+drift whoami --qr    # the same code, plus a scannable terminal QR
 ```
 
 ### 2. Add a contact
@@ -61,7 +80,20 @@ If they don't match, stop. Someone may be intercepting your key exchange.
 drift chat alice
 ```
 
-> **Phase 0 note:** The chat UI is not yet implemented. See `drift/ui/` to contribute.
+This opens the full terminal UI. A few keys worth knowing:
+
+- `?` — help / keybindings
+- `Ctrl+K` — toggle **Lockdown Mode** (see below)
+
+### Lockdown Mode
+
+For high-surveillance situations, press `Ctrl+K` in a chat (or start with
+`drift chat alice --lockdown`) to engage Lockdown Mode. While engaged, every
+keystroke re-scrambles the on-screen input into random noise so software
+keyloggers and screen scrapers see nothing usable, scrollback history is wiped
+from memory, and paste is ignored. Press `Ctrl+K` again to disengage. It
+defeats software keyloggers, screen scrapers, shoulder-surfing, and clipboard
+sniffers — hardware keyloggers and OS-level memory forensics are out of scope.
 
 ## Run a local relay (for testing)
 

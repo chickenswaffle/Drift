@@ -9,5 +9,5 @@ and X3DH asynchronous key agreement (the prekey handshake that closes the H3
 forward-secrecy residual and retires the deterministic ratchet bootstrap).
 """
 
-__version__ = "0.14.1"
+__version__ = "0.15.0"
 __author__ = "DRIFT contributors"

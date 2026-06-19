@@ -11,8 +11,8 @@
 # DRIFT
 
 [![CI](https://github.com/chickenswaffle/Drift/actions/workflows/ci.yml/badge.svg)](https://github.com/chickenswaffle/Drift/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-v0.14.1-blue)](https://github.com/chickenswaffle/Drift/releases/tag/v0.14.1)
-[![Phase](https://img.shields.io/badge/phase-11%20%E2%80%94%20Sovereign%20Rooms-brightgreen)](#project-status)
+[![Version](https://img.shields.io/badge/version-v0.15.0-blue)](https://github.com/chickenswaffle/Drift/releases/tag/v0.15.0)
+[![Phase](https://img.shields.io/badge/phase-12%20%E2%80%94%20Lockdown%20Mode-brightgreen)](#project-status)
 
 > A terminal-first, end-to-end encrypted messenger with rotating, unlinkable receiving addresses.
 
@@ -84,7 +84,7 @@ and how to verify with just `openssl`/`hashlib`: [`docs/witness.md`](docs/witnes
 - Passive network surveillance (ISP, nation-state wire-tapping)
 - A malicious, compromised, or subpoenaed relay server
 - Later device or key theft (forward secrecy + post-compromise security)
-- Traffic analysis — who talks to whom and when
+- Traffic analysis of *who talks to whom* — sealed sender + onion transport hide the social graph (timing- and volume-based analysis is **not** yet addressed: cover traffic is planned, not shipped)
 - Infrastructure takedown — no single server to kill
 
 ## What DRIFT does NOT defend against
@@ -99,7 +99,7 @@ Being precise here is what separates a serious tool from snake oil.
 
 ## Project status
 
-🧪 **Alpha — Phases 0–6, 8, the WITNESS proof layer, and Sovereign Rooms complete.** Usable end-to-end, but not yet independently audited; not ready for high-stakes production use.
+🧪 **Alpha — Phases 0–6, 8, the WITNESS proof layer, Sovereign Rooms, and Lockdown Mode complete.** Usable end-to-end, but not yet independently audited; not ready for high-stakes production use.
 
 | Phase | Goal | Status |
 |-------|------|--------|
@@ -113,10 +113,17 @@ Being precise here is what separates a serious tool from snake oil.
 | 8 | Group messaging (pairwise ratchets, ≤10 members) | ✅ Complete (`v0.11.0`) |
 | 10 | WITNESS — verifiable proof of relay blindness | ✅ Complete (`v0.12.0`) |
 | 11 | Sovereign Rooms — cryptographic chatrooms with no server-side representation, rotating stealth addresses, three security tiers (open/invite/dark), and optional federation sharding | ✅ Complete (`v0.13.0`) |
+| 12 | Lockdown Mode — endpoint hardening against software keyloggers, screen scrapers, and shoulder-surfing | ✅ Complete (`v0.15.0`) |
 
 **Protocol upgrades** — cryptographic hardening that spans the whole stack rather than a single phase:
 
 - **X3DH key agreement** ✅ `v0.14.0` — forward-secret handshake, eliminates deterministic bootstrap
+
+**Recent additions** (`v0.15.0`):
+
+- **Lockdown Mode** — a toggleable high-paranoia state (`Ctrl+K`, or `drift chat --lockdown`): every keystroke re-scrambles the on-screen input so keyloggers and screen scrapers see only noise, scrollback history is wiped from memory, and paste is ignored. Defeats software keyloggers, screen scrapers, shoulder-surfing, and clipboard sniffers; hardware keyloggers and OS-level memory forensics are out of scope.
+- **QR contact exchange** — `drift init` renders a scannable QR of your contact code automatically on first run, and `drift whoami --qr` prints one on demand.
+- **UX polish** — interactive arrow-key welcome screen, empty-state hints, chat splash, post-init onboarding, send-confirmation glyphs, and system-message styling.
 
 ---
 

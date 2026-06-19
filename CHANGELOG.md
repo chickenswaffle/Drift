@@ -11,6 +11,63 @@ DRIFT uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.15.0] — 2026-06-19
+
+**UX polish, Lockdown Mode, and QR contact exchange.** A feature-and-experience
+release — no protocol or wire changes, fully interoperable with `0.14.1`. Adds a
+high-paranoia endpoint-hardening mode, in-terminal QR codes for sharing contact
+codes, and a pass of first-run and in-chat UX improvements.
+
+### Added
+- **Lockdown Mode (Phase 12).** A toggleable high-paranoia TUI state — `Ctrl+K`
+  engages it; `drift chat --lockdown` / `-L` starts pre-engaged. While engaged,
+  every keystroke appends the real character to a private buffer and re-scrambles
+  the *entire* on-screen input with fresh random `0x21–0x7E` noise (none matching
+  the real character at any position), so a software keylogger or screen scraper
+  sees only noise; the real buffer is never rendered. Scrollback history is wiped
+  from memory and does not return on disengage, paste is ignored entirely, a bold-
+  red `🔒 LOCKDOWN` pill appears in the header, and the pane border flashes red on
+  engage. The crypto path is identical to normal mode. **Threat model:** defeats
+  software keyloggers, screen scrapers, shoulder-surfing, and clipboard sniffers;
+  hardware keyloggers and OS-level memory forensics are explicitly out of scope.
+  (`drift/ui/app.py`, `drift/cli.py`.)
+- **QR contact exchange.** `drift init` now renders a scannable QR of your contact
+  code automatically after the identity and "what to do next" panels — first run
+  is exactly when you need to share it. New `drift whoami --qr` flag appends a
+  terminal QR after the existing pipe-safe one-line output. `drift add` now prints
+  a styled confirmation echoing a recognisable code fragment (first 8 + last 4
+  chars) on success. QR rendering uses a lazy `segno` import with a graceful
+  fallback when the `[qr]` extra is not installed. (`drift/cli.py`,
+  `drift/ui/app.py`.)
+- **Interactive welcome screen.** The static Rich banner + `console.input` prompt
+  is replaced by a lightweight Textual app: arrow keys (↑/↓, wrapping) and number
+  keys (1–7) navigate, Enter or mouse click fires the selection, with a `▶` cursor
+  and primary-color highlight. Non-interactive/pipe paths are unchanged.
+- **Empty states, chat splash, and onboarding.** Richer sidebar empty-state hint
+  with `[A]`/`[+]` hotkeys; a `_SplashPane` (wordmark + tagline + `[C]`/`[A]`/`[?]`
+  action hints) on launch that clears when a conversation opens; and a numbered
+  "what to do next" panel printed after `drift init`.
+
+### Changed
+- **Input bar & contact list affordances.** Input placeholder now reads
+  `type a message · /help for commands · /beacon to go discoverable`; the active
+  contact gets a `▌` cyan left-edge accent and a `●` primary-green unread dot.
+- **System messages and send feedback.** `write_system` renders as a centered Rich
+  rule (`─── text ───`) in dim text so infrastructure events read as infrastructure;
+  sent-line glyphs now animate `⟳` (sending) → `✓` (ACK, primary green) / `✗`
+  (failed, red).
+
+### Fixed
+- Added an explicit `strict=True` to a `zip()` in the obfuscated-input test to
+  satisfy ruff `B905`. (`tests/unit/test_ui.py`.)
+
+### Documentation
+- Corrected the cover-traffic claims in `DESIGN.md` and the README defense list:
+  cover traffic is **planned (Phase 4), not yet implemented**, and is no longer
+  described as currently running.
+
+---
+
 ## [0.14.1] — 2026-06-18
 
 > ⚠ **v0.14.1 is a wire-breaking protocol change. Existing sessions with

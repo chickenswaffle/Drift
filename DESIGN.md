@@ -17,7 +17,7 @@ DRIFT is designed to defeat:
 - **Passive network surveillance** — an ISP or nation-state tapping the wire learns nothing about message content.
 - **A malicious, compromised, or subpoenaed relay** — the server has no plaintext, no contact graph, and no way to link addresses to people. If it's seized, there's nothing useful to seize.
 - **Later device or key theft** — past messages stay safe (forward secrecy), and the conversation self-heals after a compromise (post-compromise security).
-- **Traffic analysis** — who-talks-to-whom and when are obscured by sealed sender, onion transport, and cover traffic.
+- **Traffic analysis** — who-talks-to-whom is obscured by sealed sender and onion transport. Timing and volume would be covered by cover traffic, which is *planned but not yet implemented* (Phase 4 roadmap).
 - **Takedown attempts** — federation and a peer-to-peer fallback mean there is no single server to kill.
 
 DRIFT does **not** magically defeat (and you should say so loudly in the README):
@@ -146,7 +146,7 @@ Hiding *content* is solved. Hiding *who talks to whom* is where most messengers 
 
 - **Sealed sender** — sender-linkable metadata is encrypted *inside* the payload, so the relay sees only the recipient's one-time address and an opaque blob (see the subsection below).
 - **Onion transport over Tor by default** — the relay never sees your real IP. The client should bootstrap Tor automatically so the user never thinks about it. (A mixnet like Nym/Loopix is the stronger, heavier upgrade for defeating timing analysis — a later phase.)
-- **Cover traffic** — the client sends decoy messages on a randomized schedule so that *volume and timing* leak nothing. An observer can't tell a real conversation from silence.
+- **Cover traffic** *(planned — not yet implemented)* — the client *will* send decoy messages on a randomized schedule so that *volume and timing* leak nothing, so an observer can't tell a real conversation from silence. Targeted for Phase 4; not present in any shipped release.
 - **Dead-drop model** — combined with stealth addresses, the relay is a write-only, read-by-scanning bulletin board. There is no "inbox for Alice" to point at.
 
 ### Sealed sender (Phase 3b)
@@ -314,7 +314,7 @@ $ drift chat bob
   you › flawlessly
 ```
 
-Behind that: Tor bootstraps, keys generate, stealth addresses rotate every message, the ratchet turns, cover traffic hums in the background. The user never reads the word "Curve25519" unless they go looking.
+Behind that: Tor bootstraps, keys generate, stealth addresses rotate every message, the ratchet turns. The user never reads the word "Curve25519" unless they go looking.
 
 The word list shown by `drift verify` is the **safety number**: `SHA256("drift-safety-v1" ‖ sorted([my_scan‖my_spend, their_scan‖their_spend]))`, rendered as a short hex group. It commits to **both** public keys of **both** parties, sorted so each side computes the same value — a mismatch means a man-in-the-middle. It deliberately covers the spend key, not just the scan key (audit M5): the spend key is the X3DH identity key and the beacon-signing seed, so a contact code that kept the real scan key but swapped the spend key used to pass verification unchanged. It no longer does. **Migration:** this changes the value for every contact, so any verification done on `v0.14.0` or earlier is invalidated — re-verify your contacts out of band once both sides are on `v0.14.1+`.
 
@@ -328,7 +328,7 @@ These are the features that make DRIFT distinctive rather than "another Signal c
 - **Fuzzy Message Detection** — a literal privacy/efficiency dial the user can turn.
 - **Panic / duress passphrase** — a *second* passphrase that, when entered, silently wipes keys (or unlocks a believable decoy) instead of opening the real account. Protection against "unlock it or else" coercion. Real and duress passphrases go through the same Argon2id KDF, the same constant-work two-slot unlock, and produce no error or timing difference — and the on-disk vault always has exactly two padded, shuffled slots (the second is indistinguishable random bytes when no duress is set), so a single forced unlock or disk image cannot prove a duress passphrase exists. *Honest limit (audit L2):* the **wipe** variant is single-shot — it shreds the vault and materializes a fresh random identity, so a coercer who forces a *second* unlock afterwards sees no vault and a different identity than the first prompt. The indistinguishability guarantee covers one forced unlock, not repeated ones; the decoy variant (which keeps a plausible vault in place) is the better choice where a second unlock is plausible. Making wipe leave a convincing decoy vault behind is a larger change to the live panic vault and is **deferred** (it must not weaken the constant-work two-slot construction).
 - **Decoy contacts and hidden volumes** — a real set of chats behind your true passphrase, an innocuous set behind the duress one. The vault seals **the identity *and* its address book together** (audit H4), so a locked device holds no plaintext contact graph and a decoy unlock materializes only the decoy's contacts — the real contact list is shredded from disk and stays sealed. *Honest limits:* (1) while a session is unlocked, the identity and contacts are materialized in the clear (chmod 0600) — `drift lock`, which re-seals and shreds them, or closing the app is what restores the at-rest protection; the panic key defends the *locked* state. (2) `secure_overwrite` is best-effort on journaling/wear-levelled/snapshotted storage. (3) The vault hides a duress passphrase against a *single* image; an adversary who can diff *multiple* images across voluntary re-locks could spot which slot changed (the untouched duress slot's bytes are stable) — outside the single-image threat model, but stated plainly.
-- **Cover traffic on by default** — silence and conversation look identical on the wire.
+- **Cover traffic** *(planned)* — once shipped, silence and conversation will look identical on the wire.
 - **Serverless P2P mode** — for the truly paranoid or for two people on the same network.
 - **Ephemeral by default** — messages self-destruct unless a user opts into local-only history. Nothing is retained server-side, ever.
 - **Deniable authentication** — a property you get *for free* from the ratchet: a recipient knows a message is authentic, but can never *prove to a third party* who sent it. Everything is deniable after the fact.
