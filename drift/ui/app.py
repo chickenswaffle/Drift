@@ -53,6 +53,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
 import httpx
+from rich.align import Align
 from rich.console import Group, RenderableType
 from rich.rule import Rule as RichRule
 from rich.table import Table
@@ -899,10 +900,10 @@ class ContactItem(Static):
     def render(self) -> RenderableType:
         # Left accent bar marks the active row as a selected "card"; the leading
         # digit (1–9) is the quick-jump shortcut for that contact.
-        accent = f"[{_P}]▎[/]" if self.active else " "
+        accent = f"[{_S}]▌[/]" if self.active else " "
         num = f"[#555555]{self.index}[/] " if self.index else ""
         colour = _P if self.active else _DM
-        badge = f"  [{_S}]●{self.unread}[/]" if self.unread else ""
+        badge = f"  [{_P}]●[/]" if self.unread else ""
         if self.is_room:
             # ⬡ prefix, tinted by tier (yellow=open, cyan=invite, red=dark).
             tier_colour = {"open": "yellow", "invite": "cyan", "dark": "red"}.get(
@@ -947,7 +948,12 @@ class Sidebar(Vertical):
         listing = self.query_one("#contact-list", VerticalScroll)
         await listing.remove_children()
         if not contacts and not rooms:
-            await listing.mount(Static("[dim]no contacts yet[/]", classes="empty-hint"))
+            hint = (
+                f"[{_DM}]◈  no contacts yet[/]\n\n"
+                f"[{_S}]\\[A][/][{_DM}] add a contact · [/]"
+                f"[{_S}]\\[+][/][{_DM}] below[/]"
+            )
+            await listing.mount(Static(hint, classes="empty-hint"))
             return
         items = [
             ContactItem(
@@ -973,8 +979,8 @@ class _SentLine(Static):
     """An outgoing message line whose delivery-status glyph can update in place."""
 
     _GLYPH: ClassVar[dict[str, tuple[str, str]]] = {
-        "sending": ("◌", "#3a8a4a"),    # dim green
-        "sent": ("✓", "#3a8a4a"),       # delivered to relay
+        "sending": ("⟳", "#3a8a4a"),    # in flight — spinner until relay ACK
+        "sent": ("✓", _P),              # delivered to relay (ACK)
         "failed": ("✗", _WN),
     }
 
@@ -1034,7 +1040,7 @@ class MessagePane(VerticalScroll):
         return line
 
     def write_system(self, text: str) -> None:
-        self._add(Static(f"[{_DM} italic]· {text}[/]"))
+        self._add(Static(RichRule(title=f"[{_DM}]{text}[/]", style=_BD, characters="─")))
 
     def write_warning(self, text: str) -> None:
         self._add(Static(f"[bold red]⚠  {text}[/]"))
@@ -1043,6 +1049,32 @@ class MessagePane(VerticalScroll):
         """Briefly tint the border green when a new message lands."""
         self.add_class("flash")
         self.set_timer(0.35, lambda: self.remove_class("flash"))
+
+
+class _SplashPane(Static):
+    """Centered welcome splash for an empty chat pane (no conversation open).
+
+    Pure presentation — no state, no bindings. It is wiped automatically the
+    moment a conversation opens: every open path calls ``MessagePane.clear()``,
+    which removes all pane children including this splash.
+    """
+
+    def render(self) -> RenderableType:
+        body = Text(justify="center")
+        body.append("\n\n\n")
+        body.append("d r i f t\n\n", style=f"bold {_P}")
+        body.append(
+            "metadata-private  ·  end-to-end encrypted  ·  no accounts\n\n\n",
+            style=_DM,
+        )
+        body.append("[C]", style=_S)
+        body.append(" contacts    ", style=_DM)
+        body.append("[A]", style=_S)
+        body.append(" add contact    ", style=_DM)
+        body.append("[?]", style=_S)
+        body.append(" help", style=_DM)
+        body.append("\n\n")
+        return Align.center(body)
 
 
 class InputBar(Vertical):
@@ -1057,7 +1089,10 @@ class InputBar(Vertical):
         yield Static(RichRule(style=_BD, characters="─"), id="input-rule")
         with Horizontal(id="input-row"):
             yield Static("▶", id="prompt")
-            yield Input(placeholder="message — or /command", id="msg-input")
+            yield Input(
+                placeholder="type a message  ·  /help for commands  ·  /beacon to go discoverable",
+                id="msg-input",
+            )
             yield Static("0", id="char-count")
         yield Static(self.HINT, id="input-hint")
 
@@ -1766,7 +1801,7 @@ class DriftApp(App[None]):
         elif self._active is not None:
             await self._open_conversation(self._active)
         else:
-            self._pane.write_system("select a contact (press C) or add one (press A)")
+            self._pane.mount(_SplashPane())
 
     async def _bootstrap_tor(self) -> bool:
         """

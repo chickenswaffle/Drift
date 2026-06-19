@@ -14,9 +14,11 @@ Two beats:
    security pills, and a numbered menu. Then a prompt: type a number (or a full
    command) and go.
 
-This module imports **no Textual** — only Rich — so showing the banner stays
-cheap. It reads live state (is there an identity? is Tor available?) so the
-screen reflects reality rather than a mock-up. Colours follow the active theme
+The static banner imports **no Textual** — only Rich — so the non-interactive
+path (pipes/CI) stays cheap; the interactive arrow-key menu imports Textual
+lazily, only when a real terminal is driving (see ``_interactive_choice``). It
+reads live state (is there an identity? is Tor available?) so the screen
+reflects reality rather than a mock-up. Colours follow the active theme
 (``DRIFT_THEME``); ``DRIFT_THEME=redacted`` turns it classified-document red.
 """
 
@@ -357,13 +359,147 @@ def _dispatch(choice: str, has_identity: bool, console: Console) -> int:
     return 1  # unreachable
 
 
+def _interactive_choice(has_identity: bool, code: str | None, tor_on: bool) -> str | None:
+    """Drive the Textual welcome menu; return the chosen menu key ("1".."7") or
+    None to quit.
+
+    Textual is imported **here**, not at module top, so that merely importing
+    this module — or rendering the non-interactive banner — never drags Textual
+    into process (see ``test_welcome_pulls_in_no_textual``). The menu reuses the
+    same Rich renderables as the static banner (``_logo``/``_manifesto``/
+    ``_pills``/``_status``); only the numbered list becomes interactive.
+
+    The app fully exits (releasing the terminal) before the caller dispatches
+    the chosen command — important because that command may itself be a Textual
+    app (``drift chat``) and two cannot share the screen.
+    """
+    from textual.app import App, ComposeResult
+    from textual.binding import Binding
+    from textual.containers import Vertical, VerticalScroll
+    from textual.events import Click, Key
+    from textual.reactive import reactive
+    from textual.widgets import Static
+
+    theme = active_theme()
+    primary, secondary, dim = theme["primary"], theme["secondary"], theme["dim"]
+    scan, _ = _code_parts(code)
+
+    class _WelcomeMenu(Static):
+        """The numbered menu as a single focusable widget: a ``▶`` cursor moves
+        with the arrow keys (wrapping), digits 1–7 jump, enter / click fire."""
+
+        can_focus = True
+        selected: reactive[int] = reactive(0)
+
+        def __init__(self, *, id: str | None = None) -> None:
+            # Default cursor: "set up my identity" when fresh, else "start chatting".
+            super().__init__(id=id)
+            self.selected = 0 if not has_identity else 2
+
+        def render(self) -> Text:
+            body = Text()
+            for i, (num, glyph, label) in enumerate(_MENU):
+                if i:
+                    body.append("\n")
+                # Item 1 is always live; 2–7 need an identity first.
+                live = (num == "1") or has_identity
+                is_sel = i == self.selected
+                bright = is_sel and live
+                num_style = secondary if bright else dim
+                text_style = f"bold {primary}" if bright else dim
+                body.append("▶ " if is_sel else "  ",
+                            style=f"bold {primary}" if bright else dim)
+                body.append(f"[{num}]  ", style=f"bold {num_style}")
+                body.append(f"{glyph}  ", style=text_style)
+                if num == "1" and has_identity:
+                    body.append("my identity", style=text_style)
+                    if code:
+                        body.append("  ·  ", style=dim)
+                        body.append(f"drift:{scan[:4]}···", style=secondary)
+                else:
+                    body.append(label, style=text_style)
+                    if not live:
+                        body.append("   (setup required)", style=dim)
+            return body
+
+        def _fire(self, choice: str) -> None:
+            self.app.exit(choice)
+
+        def on_key(self, event: Key) -> None:
+            if event.key == "up":
+                self.selected = (self.selected - 1) % len(_MENU)
+                event.stop()
+            elif event.key == "down":
+                self.selected = (self.selected + 1) % len(_MENU)
+                event.stop()
+            elif event.key == "enter":
+                self._fire(_MENU[self.selected][0])
+                event.stop()
+            elif event.key in {m[0] for m in _MENU}:
+                self.selected = int(event.key) - 1
+                self._fire(event.key)
+                event.stop()
+
+        def on_click(self, event: Click) -> None:
+            # The widget has no border/padding of its own (the box around it
+            # does), so the click's y-offset is exactly the row index.
+            row = event.offset.y
+            if 0 <= row < len(_MENU):
+                self.selected = row
+                self._fire(_MENU[row][0])
+
+    class _WelcomeApp(App[str | None]):
+        CSS = f"""
+        Screen {{ background: {theme['bg']}; align: center top; }}
+        #welcome-body {{ width: auto; height: auto; padding: 1 2; }}
+        #w-menu-box {{
+            width: auto; height: auto; margin: 1 0; padding: 1 1;
+            border: round {theme['border']};
+            border-title-color: {secondary}; border-title-align: left;
+        }}
+        #w-menu {{ width: auto; height: auto; }}
+        #w-hint {{ color: {dim}; padding: 1 0 0 0; }}
+        """
+
+        BINDINGS = [
+            Binding("q", "quit_welcome", "quit", show=False),
+            Binding("escape", "quit_welcome", "quit", show=False),
+        ]
+
+        def compose(self) -> ComposeResult:
+            with VerticalScroll(id="welcome-body"):
+                yield Static(_logo(theme, code))
+                yield Static("")
+                yield Static(_manifesto(theme))
+                yield Static("")
+                yield Static(_pills(theme, tor_on))
+                with Vertical(id="w-menu-box"):
+                    yield _WelcomeMenu(id="w-menu")
+                yield Static(_status(theme, tor_on))
+                yield Static(
+                    f"[{dim}]↑/↓ move  ·  1–7 jump  ·  enter select  ·  q quit[/]",
+                    id="w-hint",
+                )
+
+        def on_mount(self) -> None:
+            self.query_one("#w-menu-box", Vertical).border_title = (
+                "what would you like to do?"
+            )
+            self.query_one(_WelcomeMenu).focus()
+
+        def action_quit_welcome(self) -> None:
+            self.exit(None)
+
+    return _WelcomeApp().run()
+
+
 def run(no_animation: bool = False) -> int:
     """Entry point for ``drift`` with no arguments.
 
-    Plays the boot sequence (TTY only), renders the interface, and — when
-    interactive — prompts for a choice and dispatches it. On non-interactive
-    output (pipes, CI) it renders once and returns without prompting, so
-    ``drift | cat`` never hangs.
+    Plays the boot sequence (TTY only), then — when interactive — launches the
+    Textual welcome menu and dispatches the chosen action. On non-interactive
+    output (pipes, CI) it renders the static banner once and returns without
+    prompting, so ``drift | cat`` never hangs.
     """
     console = Console()
     interactive = sys.stdin.isatty() and sys.stdout.isatty()
@@ -373,17 +509,13 @@ def run(no_animation: bool = False) -> int:
         play_boot_sequence(console)
         console.clear()
 
-    has_identity = render(console)
-
     if not interactive:
+        render(console)
         return 0
 
-    try:
-        choice = console.input(f"  [bold {active_theme()['secondary']}]→[/] ").strip()
-    except (EOFError, KeyboardInterrupt):
-        console.print()
-        return 0
-
-    if not choice or choice.lower() in {"q", "quit", "exit"}:
+    has_identity, code = _identity_state()
+    tor_on = _tor_available()
+    choice = _interactive_choice(has_identity, code, tor_on)
+    if not choice:
         return 0
     return _dispatch(choice, has_identity, console)
