@@ -93,7 +93,8 @@ python scripts/gauntlet.py
 - Passive network surveillance (ISP, nation-state wire-tapping)
 - A malicious, compromised, or subpoenaed relay server
 - Later device or key theft (forward secrecy + post-compromise security)
-- Traffic analysis of *who talks to whom* — sealed sender + onion transport hide the social graph (timing- and volume-based analysis is **not** yet addressed: cover traffic is planned, not shipped)
+- Traffic analysis of *who talks to whom* — sealed sender + onion transport hide the social graph
+- Traffic analysis of *when and how much you send* — as of v0.15.0 (PR #15), **cover traffic** masks activity with Poisson-scheduled dummy envelopes and a uniform on-the-wire message size, on an off/low/high dial (1:1 chats today; group/room cover is future work)
 - Infrastructure takedown — no single server to kill
 
 ## What DRIFT does NOT defend against
