@@ -31,6 +31,7 @@ from rich.text import Text
 from drift import __version__, storage
 from drift.crypto import Identity, b58decode, b58encode, groups, x3dh
 from drift.crypto import rooms as rooms_crypto
+from drift.crypto.cover import CoverLevel
 from drift.crypto.groups import ContactInfo, GroupError, create_group
 from drift.crypto.rooms import Room, RoomError
 from drift.storage import StorageError
@@ -1353,6 +1354,10 @@ def chat(
         False, "--lockdown", "-L",
         help="Start in Lockdown mode — obfuscated input, no history retained.",
     ),
+    cover: str = typer.Option(
+        "off", "--cover",
+        help="Cover traffic: off, low, or high — emit dummy envelopes to hide activity.",
+    ),
 ) -> None:
     """
     Open the DRIFT chat client.
@@ -1379,6 +1384,12 @@ def chat(
     if no_tor and tor_only:
         console.print("[red]--no-tor and --tor-only are mutually exclusive.[/red]")
         raise typer.Exit(1)
+
+    try:
+        cover_level = CoverLevel.parse(cover)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from None
 
     use_tor = not no_tor
     # FMD (audit M4): if the privacy dial is on, subscribe to the relay with our
@@ -1411,7 +1422,7 @@ def chat(
                 _chat_async(
                     name, identity, saved[name]["code"], relay,
                     use_tor=use_tor, tor_only=tor_only, fmd_key=fmd_key,
-                    prekeys=prekeys,
+                    prekeys=prekeys, cover=cover_level,
                 )
             )
         if not ok:
@@ -1426,7 +1437,7 @@ def chat(
         rooms=dict(saved_rooms),
         room=room,
         use_tor=use_tor, tor_required=tor_only, fmd_key=fmd_key, prekeys=prekeys,
-        lockdown=lockdown,
+        lockdown=lockdown, cover=cover_level,
     ).run()
 
 
@@ -1450,6 +1461,7 @@ async def _chat_async(
     tor_only: bool = False,
     fmd_key: Any = None,
     prekeys: Any = None,
+    cover: CoverLevel = CoverLevel.OFF,
 ) -> bool:
     """
     Headless chat loop. Returns True on a clean run, False if it could not start
@@ -1468,7 +1480,7 @@ async def _chat_async(
         async with Session(
             identity, contact_code, relay_url,
             tor_client=tor_client, fmd_key=fmd_key, prekeys=prekeys,
-            on_event=_print_transport_event,
+            on_event=_print_transport_event, cover=cover,
             on_prekeys_changed=lambda p: storage.save_prekey_privates(identity, p),
         ) as session:
             console.print(
