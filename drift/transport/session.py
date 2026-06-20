@@ -58,8 +58,9 @@ from dataclasses import dataclass
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
-from drift.crypto import Identity, Keypair, b58encode, derive_message_key, groups
+from drift.crypto import Identity, Keypair, b58encode, cover, derive_message_key, groups
 from drift.crypto.burn import generate_burn_token, verify_burn_token
+from drift.crypto.cover import CoverLevel
 from drift.crypto.fmd import FMDKeypair, fmd_flag
 from drift.crypto.groups import ContactInfo, GroupState, MembershipChange
 from drift.crypto.ratchet import (
@@ -546,6 +547,7 @@ class Session:
         fmd_key: FMDKeypair | None = None,
         prekeys: PreKeyPrivates | None = None,
         on_prekeys_changed: PreKeysHook | None = None,
+        cover: CoverLevel = CoverLevel.OFF,
     ) -> None:
         # Optional sink for observable (non-secret) transport events; the UI
         # passes a callback that re-emits them as typed messages. Never carries
@@ -588,6 +590,12 @@ class Session:
         # on close.
         self._replenishing = False
         self._bg_tasks: set[asyncio.Task[None]] = set()
+
+        # Phase 4 cover traffic: the live level dial + the dummy-emitter task. The
+        # loop is started on connect and respects the current level (idle when
+        # OFF), so ``/cover`` can flip it on or off mid-session.
+        self._cover = cover
+        self._cover_task: asyncio.Task[None] | None = None
 
         # All per-peer crypto — the Double Ratchet, its bootstrap material (X3DH
         # plus the legacy deterministic fallback), the peer's public keys and the
@@ -654,6 +662,9 @@ class Session:
         # consumed OTPKs while we were offline, or our persisted batch was low),
         # top it up now — in the background so connect() stays fast.
         self._spawn_bg(self._maybe_replenish_prekeys())
+        # Phase 4 cover traffic: start the dummy-emitter loop. It idles while the
+        # level is OFF, so it is always safe to run; ``/cover`` toggles it live.
+        self._cover_task = asyncio.create_task(self._cover_loop())
 
     async def _publish_prekeys(self) -> None:
         """Publish our public prekey bundle to the relay (best-effort, once)."""
@@ -718,6 +729,54 @@ class Session:
         finally:
             self._replenishing = False
 
+    # ------------------------------------------------------------------
+    # Cover traffic (Phase 4)
+    # ------------------------------------------------------------------
+
+    @property
+    def cover_level(self) -> CoverLevel:
+        """The current cover-traffic level."""
+        return self._cover
+
+    def set_cover_level(self, level: CoverLevel) -> None:
+        """Change the cover-traffic level live (the ``/cover`` command). The
+        running loop picks up the new level on its next tick — no restart."""
+        self._cover = level
+
+    async def _cover_loop(self) -> None:
+        """Emit dummy envelopes on a Poisson schedule so an observer watching wire
+        volume and timing sees noise even during silence.
+
+        Respects the live level (idle when OFF) and **never** surfaces an error —
+        cover traffic must never disturb or tear down a session, so every failure
+        is swallowed and only logged at debug.
+        """
+        try:
+            while True:
+                level = self._cover  # snapshot; /cover may change it across awaits
+                if level is CoverLevel.OFF:
+                    await asyncio.sleep(1.0)  # idle; re-check for a live "/cover on"
+                    continue
+                await asyncio.sleep(cover.next_interval(level))
+                if self._cover is CoverLevel.OFF:
+                    continue  # turned off while we were sleeping
+                try:
+                    dummy = cover.make_dummy_envelope()
+                    await self._client.send(
+                        Envelope(
+                            to=STEALTH_CHANNEL,
+                            ciphertext=dummy.ciphertext,
+                            one_time_addr=dummy.one_time_addr,
+                        )
+                    )
+                    self._emit("cover", _addr_digest(dummy.one_time_addr))
+                except Exception:
+                    logger.debug("cover: dummy send failed (ignored)", exc_info=True)
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.debug("cover: loop stopped on error (ignored)", exc_info=True)
+
     async def _ensure_peer_bundle(self) -> None:
         """Fetch the peer's prekey bundle once before our first send. On a 404 /
         verification failure we fall back to the legacy deterministic bootstrap
@@ -774,6 +833,8 @@ class Session:
         return self._client.is_onion
 
     async def close(self) -> None:
+        if self._cover_task is not None:
+            self._cover_task.cancel()
         for task in list(self._bg_tasks):
             task.cancel()
         await self._client.close()
@@ -805,10 +866,17 @@ class Session:
         # state; the channel only consults the cached bundle inside encrypt().
         if self._channel.needs_peer_bundle():
             await self._ensure_peer_bundle()
+        # Cover traffic (Phase 4): when on, pad the plaintext to a uniform size so
+        # the ciphertext length stops leaking the message length and real messages
+        # are wire-indistinguishable from dummies. Padding rides *inside* the AEAD,
+        # so the true length never reaches the wire; the receiver strips it.
+        payload = plaintext.encode()
+        if self._cover is not CoverLevel.OFF:
+            payload = cover.pad_to_cover_size(payload)
         async with self._lock:
             # The channel promotes to initiator on first send, ratchet-encrypts,
             # seals and stealth-addresses — all the per-peer crypto in one place.
-            one_time_addr, sealed_blob, fmd = self._channel.encrypt(plaintext.encode())
+            one_time_addr, sealed_blob, fmd = self._channel.encrypt(payload)
             self._emit("ratchet", f"sending chain step · msg #{self._channel.send_count}")
         self._emit("send", _addr_digest(one_time_addr))
         await self._client.send(
@@ -926,7 +994,10 @@ class Session:
             if consumed_otpk:
                 self._spawn_bg(self._maybe_replenish_prekeys())
             self._emit("erase", "message key erased")
-            yield plaintext.decode()
+            # Strip cover padding if present (Phase 4). unpad_from_cover is
+            # tolerant — a message that was never padded passes through unchanged,
+            # so this is safe to apply whatever the sender's cover setting was.
+            yield cover.unpad_from_cover(plaintext).decode()
         logger.debug("messages: firehose ended — relay connection closed")
 
 

@@ -73,6 +73,7 @@ from textual.widget import Widget
 from textual.widgets import Button, Input, Static
 
 from drift import __version__, storage
+from drift.crypto.cover import CoverLevel
 from drift.transport.session import Session
 from drift.transport.tor import TOR_DEFAULT_HOPS, TorClient
 
@@ -243,7 +244,7 @@ def _build_css(t: dict[str, str]) -> str:
     }}
     #header-spacer {{ width: 1fr; height: 3; }}
     #security {{ width: auto; height: 3; content-align: right middle; }}
-    UptimePill, LatencyPill, RatchetPill, NodePill {{
+    UptimePill, LatencyPill, RatchetPill, NodePill, CoverPill {{
         width: auto; height: 3; padding: 0 1; content-align: center middle;
     }}
     SecurityPill {{
@@ -794,6 +795,22 @@ class _LockdownPill(Static):
 
     def render(self) -> RenderableType:
         return "[bold red]🔒 LOCKDOWN[/]"
+
+
+class CoverPill(Static):
+    """Cover-traffic indicator (Phase 4): ``◌`` when off, ``◉ cover <level>`` when on.
+
+    A dim hollow circle while no cover traffic flows; a bright filled circle with
+    the level once dummy envelopes are masking activity. Driven by the app via
+    the ``/cover`` command — it holds no logic of its own.
+    """
+
+    level: reactive[str] = reactive("off")
+
+    def render(self) -> RenderableType:
+        if self.level == "off":
+            return "[#555555]◌ cover[/]"
+        return f"[{_P}]◉ cover {self.level}[/]"
 
 
 class HeaderBar(Static):
@@ -1820,6 +1837,7 @@ class DriftApp(App[None]):
         fmd_key: Any = None,
         prekeys: Any = None,
         lockdown: bool = False,
+        cover: CoverLevel = CoverLevel.OFF,
     ) -> None:
         super().__init__()
         self._identity = identity
@@ -1880,6 +1898,9 @@ class DriftApp(App[None]):
         # it once the UI has settled.
         self._lockdown = False
         self._lockdown_on_mount = lockdown
+        # Phase 4 cover-traffic level for 1:1 sessions; reflected by the header
+        # CoverPill and changeable live with /cover.
+        self._cover_level = cover
 
     # ── Layout ────────────────────────────────────────────────────────────
 
@@ -1895,6 +1916,7 @@ class DriftApp(App[None]):
                     yield LatencyPill(_ws_to_http(self._primary_relay), id="latency")
                     yield RatchetPill(id="ratchet")
                     yield NodePill(id="nodes")
+                    yield CoverPill(id="cover-pill")
                     yield _LockdownPill(id="lockdown-pill")
                 yield HeaderBar(id="headerinfo")
                 yield Static(RichRule(style=_BD, characters="─"), id="header-rule")
@@ -1915,6 +1937,7 @@ class DriftApp(App[None]):
 
     async def on_mount(self) -> None:
         self._header.relay_url = self._primary_relay
+        self.query_one(CoverPill).level = self._cover_level.value
         await self._sidebar.populate(self._contacts, self._active, self._unread, self._rooms)
         self._update_chat_title()
         self.set_interval(0.8, self._tick_pulse)
@@ -2088,6 +2111,7 @@ class DriftApp(App[None]):
             tor_client=self._tor_client,
             fmd_key=self._fmd_key,
             prekeys=self._prekeys,
+            cover=self._cover_level,
             on_prekeys_changed=lambda p: storage.save_prekey_privates(self._identity, p),
         )
         self._session = session
@@ -2638,6 +2662,8 @@ class DriftApp(App[None]):
                 await self._handle_burn_slash(args)
             case "privacy":
                 self._show_privacy()
+            case "cover":
+                self._handle_cover_slash(args)
             case "beacon":
                 self._handle_beacon_slash(args)
             case "find":
@@ -2646,6 +2672,38 @@ class DriftApp(App[None]):
                 self.exit()
             case _:
                 self._pane.write_system(f"unknown command: /{command}")
+
+    # -- Cover traffic (Phase 4) --------------------------------------------
+
+    def _handle_cover_slash(self, args: list[str]) -> None:
+        """``/cover off|low|high`` — set 1:1 cover traffic live (dummy envelopes)."""
+        if not args:
+            self._pane.write_system(
+                f"cover traffic is {self._cover_level.value} "
+                "(usage: /cover off|low|high)"
+            )
+            return
+        try:
+            level = CoverLevel.parse(args[0])
+        except ValueError as exc:
+            self._pane.write_warning(str(exc))
+            return
+        self._cover_level = level
+        self.query_one(CoverPill).level = level.value
+        if self._session is not None:
+            # A 1:1 session is live — apply it immediately.
+            self._session.set_cover_level(level)
+            self._pane.write_system(
+                "◌ cover traffic off" if level is CoverLevel.OFF
+                else f"◉ cover traffic on · {level.value}"
+            )
+        else:
+            # A group/room is open, or nothing yet: cover is 1:1-only, so just
+            # remember the level for the next 1:1 chat.
+            self._pane.write_system(
+                f"cover set to {level.value} — applies to 1:1 chats "
+                "(takes effect when you open one)"
+            )
 
     # -- Beacon (Phase 6) ---------------------------------------------------
 
