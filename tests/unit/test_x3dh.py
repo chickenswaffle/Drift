@@ -302,3 +302,56 @@ class TestSerialization:
     def test_malformed_header_rejected(self) -> None:
         with pytest.raises(X3DHError):
             X3DHHeader.from_bytes(b"too short")
+
+
+# ---------------------------------------------------------------------------
+# Bundle ↔ contact-code binding (audit §2 MEDIUM — relay substitution guard)
+# ---------------------------------------------------------------------------
+
+class TestBundleContactBinding:
+    """A fetched prekey bundle must match the spend key from the saved contact
+    code, even when its own self-signature is internally valid — a malicious
+    relay could otherwise serve a bundle it generated wholesale."""
+
+    async def test_mismatched_identity_dh_key_is_rejected(self) -> None:
+        from drift.transport.session import Session
+
+        me, peer = _pair()
+        attacker = Identity.generate()
+        # A bundle the relay claims is `peer`'s but built entirely by `attacker`:
+        # the self-signature verifies under the attacker's own identity key, yet
+        # its X3DH identity DH key is the attacker's spend pub, not peer's.
+        _, atk_privates = generate_prekey_bundle(attacker)
+        forged = PreKeyBundle(
+            identity_key=attacker.verify_key_bytes(),
+            identity_dh_key=attacker.spend_keypair.public_bytes(),
+            signed_prekey=atk_privates.signed_prekey.public_bytes(),
+            signed_prekey_sig=atk_privates.signed_prekey_sig,
+            signed_prekey_id=atk_privates.signed_prekey_id,
+        )
+        assert verify_prekey_bundle(forged)  # self-signature is internally valid
+
+        session = Session(me, peer.contact_code(), "ws://localhost:8765")
+
+        async def _fake_fetch(_addr: str) -> dict[str, object]:
+            return forged.to_dict()
+
+        session._client.fetch_prekey_bundle = _fake_fetch  # type: ignore[assignment]
+        with pytest.raises(X3DHError, match="does not match contact code"):
+            await session._ensure_peer_bundle()
+
+    async def test_matching_bundle_is_accepted(self) -> None:
+        # The honest case: peer's own bundle (identity_dh_key == peer's spend pub)
+        # passes the binding check and is adopted — the happy path is unchanged.
+        from drift.transport.session import Session
+
+        me, peer = _pair()
+        bundle, _ = generate_prekey_bundle(peer)
+        session = Session(me, peer.contact_code(), "ws://localhost:8765")
+
+        async def _fake_fetch(_addr: str) -> dict[str, object]:
+            return bundle.to_dict()
+
+        session._client.fetch_prekey_bundle = _fake_fetch  # type: ignore[assignment]
+        await session._ensure_peer_bundle()  # must not raise
+        assert session._channel._peer_bundle is not None  # bundle was adopted

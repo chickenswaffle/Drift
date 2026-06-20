@@ -224,6 +224,43 @@ class TestChainVerification:
 
 
 # --------------------------------------------------------------------------- #
+# Persistence across restart (the append-only chain log)
+# --------------------------------------------------------------------------- #
+
+
+class TestPersistence:
+    def test_chain_persists_across_restart(self, tmp_path: Any) -> None:
+        # The append-only log lets a restarted relay reload its chain instead of
+        # resetting to genesis — which a watcher cannot tell from going dark.
+        log = tmp_path / "witness_chain.jsonl"
+        sk = Ed25519PrivateKey.generate()
+
+        chain = WitnessChain(sk, start_time=BASE_TS, log_path=log)  # writes genesis
+        chain.generate(now=BASE_TS + PERIOD_SECONDS)
+        chain.generate(now=BASE_TS + 2 * PERIOD_SECONDS)
+        chain.generate(now=BASE_TS + 3 * PERIOD_SECONDS)
+        original = [c.cert_hash() for c in chain.chain()]
+        assert len(original) == 4  # genesis + 3 sealed periods
+
+        # "Restart": a new chain over the same log + key reloads the history
+        # rather than minting a fresh genesis.
+        reloaded = WitnessChain(sk, log_path=log)
+        assert [c.cert_hash() for c in reloaded.chain()] == original
+        assert verify_chain(reloaded.chain())
+
+    def test_corrupt_log_starts_fresh(self, tmp_path: Any) -> None:
+        # A persisted chain that fails verification is discarded (warn + fresh
+        # genesis), never served as a trusted history.
+        log = tmp_path / "witness_chain.jsonl"
+        log.write_text("not a certificate\n{}\n", encoding="utf-8")
+        chain = WitnessChain(
+            Ed25519PrivateKey.generate(), start_time=BASE_TS, log_path=log
+        )
+        assert len(chain.chain()) == 1
+        assert chain.current().previous_cert_hash == GENESIS_PREV_HASH
+
+
+# --------------------------------------------------------------------------- #
 # /cannot-see HTML endpoint
 # --------------------------------------------------------------------------- #
 

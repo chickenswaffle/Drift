@@ -562,3 +562,58 @@ def test_bounded_addr_set_membership_and_idempotent_add() -> None:
     assert len(s) == 1
     assert x in s
     assert b"\x02" * 32 not in s
+
+
+# ---------------------------------------------------------------------------
+# A forged inbound must not tear down a live session (audit §2 HIGH)
+# ---------------------------------------------------------------------------
+
+
+class _FakeFirehose:
+    """Async-iterable RelayClient stand-in: yield preloaded items, then stop."""
+
+    def __init__(self, items: list) -> None:
+        self._items = list(items)
+
+    def __aiter__(self) -> AsyncIterator:
+        async def _gen() -> AsyncIterator:
+            for item in self._items:
+                yield item
+        return _gen()
+
+
+@pytest.mark.asyncio
+async def test_forged_inbound_does_not_kill_session() -> None:
+    from drift.crypto import Identity
+    from drift.transport.session import STEALTH_CHANNEL, PairwiseRatchet, Session
+
+    alice = Identity.generate()
+    bob = Identity.generate()
+
+    # Alice → Bob: two genuine, sealed, stealth-addressed envelopes.
+    alice_ch = PairwiseRatchet(alice, bob.contact_code())
+    addr_a, blob_a, _ = alice_ch.encrypt(b"tampered-one")   # send #0
+    addr_b, blob_b, _ = alice_ch.encrypt(b"genuine-two")    # send #1
+
+    # A corrupted copy of #0: the front (ephemeral + addr) is intact so it still
+    # scan-matches Bob, but a flipped inner byte fails the sealed-header AEAD —
+    # exactly the replay a relay/wire attacker would use to force an InvalidTag.
+    corrupt = bytearray(blob_a)
+    corrupt[50] ^= 0x01
+
+    firehose = [
+        Envelope(to=STEALTH_CHANNEL, ciphertext=bytes(corrupt), one_time_addr=addr_a),
+        Envelope(to=STEALTH_CHANNEL, ciphertext=blob_b, one_time_addr=addr_b),
+        Envelope(to=STEALTH_CHANNEL, ciphertext=blob_a, one_time_addr=addr_a),
+    ]
+
+    bob_session = Session(bob, alice.contact_code(), "ws://localhost:8765")
+    bob_session._client = _FakeFirehose(firehose)  # type: ignore[assignment]
+
+    # InvalidTag must NOT escape the receive loop: the comprehension completes.
+    received = [text async for text in bob_session.messages()]
+
+    # The forged copy was dropped, the genuine follow-up decrypted, and the later
+    # genuine copy of #0 still decrypted — the corrupt copy never poisoned its
+    # one-time-address dedup slot. The session stayed alive throughout.
+    assert received == ["genuine-two", "tampered-one"]

@@ -223,6 +223,8 @@ def _parse_vault(vault: bytes) -> tuple[KDFParams, bytes, bytes]:
     if vault[: len(_MAGIC)] != _MAGIC:
         raise ValueError("not a DRIFT vault")
     off = len(_MAGIC)
+    if len(vault) < off + 1:
+        raise ValueError("truncated vault")
     version = vault[off]
     off += 1
     if version != _VERSION:

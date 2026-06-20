@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -48,6 +49,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 )
 
 from drift.crypto import b58decode, b58encode
+
+logger = logging.getLogger("drift.relay.witness")
 
 # ---------------------------------------------------------------------------
 # Protocol constants
@@ -350,15 +353,73 @@ class WitnessChain:
         period_seconds: int = PERIOD_SECONDS,
         max_certs: int = MAX_CERTS,
         start_time: int | None = None,
+        log_path: Path | str | None = None,
     ) -> None:
         self._sk = signing_key
         self._relay_id = signing_key.public_key().public_bytes_raw()
         self.period_seconds = period_seconds
         self._certs: deque[WitnessCertificate] = deque(maxlen=max_certs)
         self._window = _Window()
-        # Sign the genesis certificate up front.
+        # Optional append-only persistence (``DRIFT_WITNESS_LOG``). Without it the
+        # chain is in-memory only, so a restart resets to genesis — indistinguishable
+        # from the relay going dark, the canary the whole system exists to raise.
+        # With it, a restart reloads and continues the existing, verified history.
+        self._log_path = Path(log_path) if log_path is not None else None
+        if self._log_path is not None and self._load_log():
+            return  # restored a persisted, verified chain — keep its history
+        # No (usable) log: sign a fresh genesis certificate up front.
         now = int(time.time()) if start_time is None else int(start_time)
         self._seal(GENESIS_PREV_HASH, now)
+
+    # -- persistence ---------------------------------------------------------
+
+    def _load_log(self) -> bool:
+        """Restore the chain from the append-only log.
+
+        Returns ``True`` only if a non-empty chain was read *and* passed
+        :func:`verify_chain`; otherwise leaves the chain empty so ``__init__``
+        mints a fresh genesis. A persisted chain that fails verification (corrupt,
+        forged, or signed by a different key) is never trusted — we log a warning
+        and start over rather than serve a tampered history.
+        """
+        assert self._log_path is not None
+        if not self._log_path.exists():
+            return False
+        try:
+            certs = [
+                WitnessCertificate.from_dict(json.loads(line))
+                for line in self._log_path.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+        except (OSError, ValueError, KeyError) as exc:
+            logger.warning(
+                "witness: could not read chain log %s (%s); starting fresh",
+                self._log_path, exc,
+            )
+            return False
+        if not certs:
+            return False
+        if not verify_chain(certs):
+            logger.warning(
+                "witness: persisted chain at %s failed verification; starting fresh",
+                self._log_path,
+            )
+            return False
+        self._certs.extend(certs)  # deque maxlen keeps only the most recent
+        logger.info("witness: restored %d certificate(s) from %s", len(certs), self._log_path)
+        return True
+
+    def _append_log(self, cert: WitnessCertificate) -> None:
+        """Append one sealed certificate to the log (best-effort; a write failure
+        degrades to the in-memory chain, it never crashes sealing)."""
+        if self._log_path is None:
+            return
+        try:
+            with self._log_path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(cert.to_dict(), separators=(",", ":")) + "\n")
+                fh.flush()
+        except OSError as exc:
+            logger.warning("witness: could not append to chain log %s: %s", self._log_path, exc)
 
     @property
     def relay_id(self) -> bytes:
@@ -392,6 +453,7 @@ class WitnessChain:
         cert.relay_signature = self._sk.sign(cert.signing_payload())
         self._certs.append(cert)
         self._window = _Window()
+        self._append_log(cert)
         return cert
 
     def generate(self, now: int | None = None) -> WitnessCertificate:

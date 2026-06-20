@@ -38,7 +38,6 @@ dependencies = [
 relay = [
     "fastapi>=0.111",
     "uvicorn[standard]>=0.29",
-    "redis>=5.0",
 ]
 qr = [
     "segno>=1.6",

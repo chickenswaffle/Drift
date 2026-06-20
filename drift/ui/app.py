@@ -2399,6 +2399,10 @@ class DriftApp(App[None]):
             self._note_addr(event.detail)
         elif event.kind == "ratchet":
             self.query_one(RatchetPill).bump()
+        elif event.kind == "tamper":
+            # A forged/tampered inbound was dropped inside the session; the
+            # conversation stays live. Surface it without tearing anything down.
+            self._pane.write_warning("⚠ tamper detected — message dropped, session intact")
         # "burn" events are ticker-only; no counters needed.
         if self._infopanel.display:
             self._refresh_info()

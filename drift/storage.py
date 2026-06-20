@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 from typing import TypedDict
@@ -25,6 +26,8 @@ from drift.crypto import Identity, x3dh
 from drift.crypto.groups import GroupState
 from drift.crypto.rooms import Room
 from drift.crypto.x3dh import PreKeyPrivates
+
+logger = logging.getLogger("drift.storage")
 
 # Config directory: ~/.config/drift/ by default, overridable via $DRIFT_CONFIG.
 # The override lets two terminals run separate identities on one machine (each
@@ -119,7 +122,11 @@ def load_contacts(identity: Identity) -> Contacts:
     path = contacts_file(identity)
     if not path.exists():
         return {}
-    data: Contacts = json.loads(path.read_text())
+    try:
+        data: Contacts = json.loads(path.read_text())
+    except json.JSONDecodeError:
+        logger.warning("contacts file %s is corrupt; ignoring it", path)
+        return {}
     return data
 
 
@@ -173,7 +180,11 @@ def load_groups(identity: Identity) -> Groups:
     path = groups_file(identity)
     if not path.exists():
         return {}
-    raw: dict[str, dict[str, object]] = json.loads(path.read_text())
+    try:
+        raw: dict[str, dict[str, object]] = json.loads(path.read_text())
+    except json.JSONDecodeError:
+        logger.warning("groups file %s is corrupt; ignoring it", path)
+        return {}
     return {name: GroupState.from_dict(d) for name, d in raw.items()}
 
 
@@ -230,7 +241,11 @@ def load_rooms(identity: Identity) -> Rooms:
     path = rooms_file(identity)
     if not path.exists():
         return {}
-    raw: dict[str, dict[str, object]] = json.loads(path.read_text())
+    try:
+        raw: dict[str, dict[str, object]] = json.loads(path.read_text())
+    except json.JSONDecodeError:
+        logger.warning("rooms file %s is corrupt; ignoring it", path)
+        return {}
     return {label: Room.from_dict(d) for label, d in raw.items()}
 
 
@@ -356,7 +371,11 @@ def safety_number(identity: Identity, contact_code: str) -> str:
     theirs = their_scan + their_spend
     combined = b"drift-safety-v1" + b"".join(sorted([mine, theirs]))
     digest = hashlib.sha256(combined).digest()
-    return "-".join(f"{digest[i * 4]:02x}{digest[i * 4 + 1]:02x}" for i in range(4))
+    # 128-bit safety number: four contiguous 4-byte groups (16 bytes total).
+    # Earlier this was 64 bits over an interleaved byte selection; the wider,
+    # contiguous digest gives a far larger second-preimage margin for the
+    # out-of-band comparison while staying short enough to read aloud.
+    return "-".join(digest[i * 4:i * 4 + 4].hex() for i in range(4))
 
 
 # ---------------------------------------------------------------------------

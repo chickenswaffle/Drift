@@ -378,7 +378,12 @@ federation = Federation(
 # ---------------------------------------------------------------------------
 
 RELAY_IDENTITY_FILE = os.environ.get("DRIFT_RELAY_IDENTITY", "relay_identity.json")
-witness_chain = WitnessChain(load_or_create_relay_identity(RELAY_IDENTITY_FILE))
+# Append-only witness log so the chain (and its continuity proof) survives a
+# restart instead of resetting to genesis. Override with DRIFT_WITNESS_LOG.
+WITNESS_LOG_FILE = os.environ.get("DRIFT_WITNESS_LOG", "witness_chain.jsonl")
+witness_chain = WitnessChain(
+    load_or_create_relay_identity(RELAY_IDENTITY_FILE), log_path=WITNESS_LOG_FILE
+)
 
 
 # ---------------------------------------------------------------------------

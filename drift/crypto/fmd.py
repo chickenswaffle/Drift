@@ -247,12 +247,21 @@ def fmd_flag(message: bytes, detection_pub: list[bytes]) -> bytes:
     return u + y + bytes(bits)
 
 
-def _parse_flag(flag: bytes, n: int) -> tuple[bytes, bytes, bytes]:
-    """Split a flag into (u, y, flag_bits); raise ValueError if malformed."""
-    expected = 64 + (n + 7) // 8
-    if len(flag) < expected:
+def _parse_flag(flag: bytes, k: int) -> tuple[bytes, bytes, bytes]:
+    """Split a flag into ``(u, y, flag_bits)``; raise ValueError if too short.
+
+    ``k`` is how many sub-keys the detector will test, so the flag must carry at
+    least that many bits. ``flag_bits`` is returned **in full** — all
+    ``ceil(n/8)`` bytes the sender packed for its (possibly larger) ``n``
+    sub-keys — and is *never* truncated to ``k``. The scalar ``m`` binds the
+    *entire* flag-bit vector; truncating it would change the reconstructed ``m``
+    (and ``w``), so a genuine recipient tested with a *downgraded* key whose
+    ``k`` straddles a byte boundary would miss its own message — a false
+    negative, the bug this fixes. The caller checks only the first ``k`` bits.
+    """
+    if len(flag) < 64 + (k + 7) // 8:
         raise ValueError("FMD flag too short for the detection key")
-    return flag[:32], flag[32:64], flag[64:expected]
+    return flag[:32], flag[32:64], flag[64:]
 
 
 def fmd_test(flag: bytes, detection_key: FMDKeypair, message: bytes) -> bool:

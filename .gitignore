@@ -31,6 +31,7 @@ relay_identity.json
 # DRIFT — relay runtime artifacts
 peers.json
 node_address.txt
+witness_chain.jsonl
 
 # IDE
 .vscode/

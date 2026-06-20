@@ -311,6 +311,12 @@ class PairwiseRatchet:
         """The peer's base58 scan key — the relay's prekey index for this peer."""
         return b58encode(self._their_scan_pub)
 
+    @property
+    def their_spend_pub(self) -> bytes:
+        """The peer's X25519 spend public key, from the saved contact code — the
+        X3DH identity DH key (IK_B) a fetched prekey bundle must match."""
+        return self._their_spend_pub
+
     def is_bootstrapped(self) -> bool:
         """True once we have a sending chain (we promoted) — used to gate the
         one-shot peer-bundle fetch."""
@@ -723,12 +729,26 @@ class Session:
             logger.debug("prekey fetch failed (legacy fallback): %s", exc)
             data = None
         if data is not None:
+            candidate: PreKeyBundle | None
             try:
                 candidate = PreKeyBundle.from_dict(data)
-                if verify_prekey_bundle(candidate):
-                    bundle = candidate
             except X3DHError as exc:
                 logger.debug("peer prekey bundle malformed (legacy fallback): %s", exc)
+                candidate = None
+            if candidate is not None and verify_prekey_bundle(candidate):
+                # Bind the fetched bundle to the contact we actually know: its
+                # X3DH identity DH key (IK_B) must equal the spend pub from the
+                # saved contact code. A relay that substitutes a bundle it
+                # generated would still pass the self-signature check above but
+                # fails here — the relay-substitution guard. Honest operation
+                # always matches, since a recipient publishes its own spend pub as
+                # identity_dh_key.
+                if candidate.identity_dh_key != self._channel.their_spend_pub:
+                    raise X3DHError(
+                        "bundle identity key does not match contact code — "
+                        "possible relay substitution attack"
+                    )
+                bundle = candidate
         self._channel.set_peer_bundle(bundle)
         if bundle is None and not self._legacy_warned:
             self._legacy_warned = True
@@ -843,44 +863,64 @@ class Session:
                     logger.debug("messages: ignoring burn tombstone — token invalid or missing")
                 continue
 
-            # Identity-level scan + unseal (shared with GroupSession). A genuine
-            # tamper of a message addressed to us surfaces here as InvalidTag and
-            # is allowed to propagate (iron rule).
-            parsed = _scan_and_unseal(
-                item, self._my_scan_priv, self._my_spend_pub, self._my_spend_priv
-            )
-            if parsed is None:
-                continue  # not addressed to us, or malformed
-            assert item.one_time_addr is not None  # guaranteed by _scan_and_unseal
-            if item.one_time_addr in self._seen_addrs:
-                continue  # relay replayed a message we've already accepted
+            # Identity-level scan + unseal (shared with GroupSession), then
+            # decrypt. A message that scan-matched us but fails to authenticate is
+            # tamper or a corrupted replay; _scan_and_unseal and the ratchet
+            # decrypt raise InvalidTag (iron rule — never silently downgraded). We
+            # catch it *per envelope* and drop only that message, so a single
+            # forged inbound can no longer tear down a live conversation (a relay
+            # or wire attacker could otherwise resend any captured envelope with
+            # one flipped byte to kill the session). The dedup add is deferred
+            # until a successful decrypt, so a corrupted copy cannot poison the
+            # genuine message that shares its one-time address.
+            try:
+                parsed = _scan_and_unseal(
+                    item, self._my_scan_priv, self._my_spend_pub, self._my_spend_priv
+                )
+                if parsed is None:
+                    continue  # not addressed to us, or malformed
+                assert item.one_time_addr is not None  # guaranteed by _scan_and_unseal
+                if item.one_time_addr in self._seen_addrs:
+                    continue  # relay replayed a message we've already accepted
+
+                x3dh_header, fs_pub, header, ratchet_ct = parsed
+                consumed_otpk = False
+                async with self._lock:
+                    # 1:1: the peer is unambiguous, so an auth failure here is
+                    # tamper — both decrypt paths raise InvalidTag.
+                    if x3dh_header is not None:
+                        # X3DH bootstrap (audit H3): complete the handshake on
+                        # receipt; transactional, so a forged bootstrap can't burn
+                        # an OTPK.
+                        plaintext = self._channel.x3dh_bootstrap_decrypt(
+                            x3dh_header, header, ratchet_ct
+                        )
+                        consumed_otpk = self._channel.otpk_just_consumed
+                    else:
+                        # Legacy bootstrap forward-secrecy secret (audit H3),
+                        # recovered from the ephemeral's public half; applied only
+                        # before our first DH ratchet, on a trial state that rolls
+                        # back on failure. None for steady-state messages.
+                        root_mix = (
+                            _keypair_from_private(self._my_spend_priv).ecdh(fs_pub)
+                            if fs_pub is not None
+                            else None
+                        )
+                        plaintext = self._channel.decrypt_ratchet(header, ratchet_ct, root_mix)
+                    self._emit("ratchet", f"receiving chain step · msg #{self._channel.recv_count}")
+            except InvalidTag:
+                # Genuine tamper or a corrupted replay of a message addressed to
+                # us. Drop it, surface a warning, and keep the session alive.
+                addr = item.one_time_addr
+                self._emit("tamper", _addr_digest(addr) if addr is not None else "")
+                logger.warning(
+                    "messages: dropped a tampered/forged inbound (InvalidTag); "
+                    "session intact"
+                )
+                continue
+            # Authenticated: now it is safe to record the address and surface it.
             self._seen_addrs.add(item.one_time_addr)
             self._emit("recv", _addr_digest(item.one_time_addr))
-
-            x3dh_header, fs_pub, header, ratchet_ct = parsed
-            consumed_otpk = False
-            async with self._lock:
-                # 1:1: the peer is unambiguous, so an auth failure here is tamper —
-                # both decrypt paths let InvalidTag propagate.
-                if x3dh_header is not None:
-                    # X3DH bootstrap (audit H3): complete the handshake on receipt;
-                    # transactional, so a forged bootstrap can't burn an OTPK.
-                    plaintext = self._channel.x3dh_bootstrap_decrypt(
-                        x3dh_header, header, ratchet_ct
-                    )
-                    consumed_otpk = self._channel.otpk_just_consumed
-                else:
-                    # Legacy bootstrap forward-secrecy secret (audit H3): recovered
-                    # from the ephemeral's public half. ratchet_decrypt applies it
-                    # only before our first DH ratchet, on a trial state that rolls
-                    # back on failure. None for steady-state messages.
-                    root_mix = (
-                        _keypair_from_private(self._my_spend_priv).ecdh(fs_pub)
-                        if fs_pub is not None
-                        else None
-                    )
-                    plaintext = self._channel.decrypt_ratchet(header, ratchet_ct, root_mix)
-                self._emit("ratchet", f"receiving chain step · msg #{self._channel.recv_count}")
             # A sender just burned one of our OTPKs; top the relay pool back up in
             # the background so we never start serving weaker OTPK-less handshakes.
             if consumed_otpk:
@@ -1135,9 +1175,22 @@ class GroupSession:
         async for item in self._client:
             if isinstance(item, BurnFrame):
                 continue  # group burn is out of scope for Phase 8
-            parsed = _scan_and_unseal(
-                item, self._my_scan_priv, self._my_spend_pub, self._my_spend_priv
-            )
+            # Tamper of a message addressed to us surfaces here as InvalidTag
+            # (the per-member ratchet trial below swallows its own). Catch it per
+            # envelope and drop just that message, so one forged inbound can't
+            # tear down the whole group session (audit §2 HIGH).
+            try:
+                parsed = _scan_and_unseal(
+                    item, self._my_scan_priv, self._my_spend_pub, self._my_spend_priv
+                )
+            except InvalidTag:
+                addr = item.one_time_addr
+                self._emit("tamper", _addr_digest(addr) if addr is not None else "")
+                logger.warning(
+                    "group messages: dropped a tampered/forged inbound "
+                    "(InvalidTag); session intact"
+                )
+                continue
             if parsed is None:
                 continue
             assert item.one_time_addr is not None  # guaranteed by _scan_and_unseal

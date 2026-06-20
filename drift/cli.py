@@ -1468,6 +1468,7 @@ async def _chat_async(
         async with Session(
             identity, contact_code, relay_url,
             tor_client=tor_client, fmd_key=fmd_key, prekeys=prekeys,
+            on_event=_print_transport_event,
             on_prekeys_changed=lambda p: storage.save_prekey_privates(identity, p),
         ) as session:
             console.print(
@@ -1533,6 +1534,7 @@ async def _group_chat_async(
         async with GroupSession(
             identity, group, relay_url,
             tor_client=tor_client, on_membership=_on_membership, fmd_key=fmd_key,
+            on_event=_print_transport_event,
         ) as gs:
             console.print(
                 f"[green]Connected.[/green] Group [bold]{group.name}[/bold] "
@@ -1569,14 +1571,28 @@ async def _group_chat_async(
     return True
 
 
+def _print_transport_event(kind: str, detail: str) -> None:
+    """Headless ``on_event`` sink: surface a dropped tampered message, and ignore
+    the rest (those events drive the TUI ticker, not the plain-text client)."""
+    if kind == "tamper":
+        console.print(
+            "\n[yellow]⚠ tamper detected — message dropped, session intact[/yellow]"
+        )
+
+
 async def _group_receive_loop(gs: Any) -> None:
     from cryptography.exceptions import InvalidTag
 
-    try:
-        async for gm in gs.messages():
+    async for gm in gs.messages():
+        try:
             console.print(f"\n[bold cyan]{gm.sender_name}:[/bold cyan] {gm.text}")
-    except InvalidTag:
-        console.print("\n[red]Authentication failure — message rejected.[/red]")
+        except InvalidTag:
+            # Forged inbounds are dropped inside gs.messages(); this per-message
+            # guard ensures a stray auth failure drops one message, never the loop.
+            console.print(
+                "\n[yellow]⚠ tamper detected — message dropped, session intact[/yellow]"
+            )
+            continue
 
 
 async def _room_chat_async(
@@ -1689,14 +1705,17 @@ async def _bootstrap_tor_cli(*, use_tor: bool, tor_only: bool) -> Any:
 async def _receive_loop(session: Any, name: str) -> None:
     from cryptography.exceptions import InvalidTag
 
-    try:
-        async for msg in session.messages():
+    async for msg in session.messages():
+        try:
             console.print(f"\n[bold cyan]{name}:[/bold cyan] {msg}")
-    except InvalidTag:
-        console.print(
-            "\n[red]Authentication failure — message rejected "
-            "(tampered or wrong key).[/red]"
-        )
+        except InvalidTag:
+            # Forged inbounds are dropped inside session.messages(); this
+            # per-message guard ensures a stray auth failure drops one message
+            # rather than ending reception.
+            console.print(
+                "\n[yellow]⚠ tamper detected — message dropped, session intact[/yellow]"
+            )
+            continue
 
 
 if __name__ == "__main__":

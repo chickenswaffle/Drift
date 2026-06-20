@@ -116,6 +116,21 @@ class TestBinding:
         coarse = kp.downgrade(0.5)       # k=1 → FP 1/2
         assert coarse.false_positive_rate == pytest.approx(0.5)
 
+    def test_downgrade_across_byte_boundary_keeps_true_positives(self) -> None:
+        # Audit regression: a downgraded relay key whose k drops a whole flag
+        # byte (n=16 packs 2 bytes; k≤8 reads only 1) used to MISS the genuine
+        # recipient, because m was recomputed over a truncated bit-vector and so
+        # no longer matched the sender's. m binds the *full* flag, so detection
+        # must stay a guaranteed true positive at every downgrade.
+        kp = generate_fmd_key(2.0 ** -16)
+        assert kp.num_subkeys == 16
+        msg = b"detect me across the byte boundary"
+        flag = fmd_flag(msg, kp.public_keys)
+        for rate, k in ((2.0 ** -4, 4), (2.0 ** -8, 8)):
+            coarse = kp.downgrade(rate)
+            assert coarse.num_subkeys == k
+            assert fmd_test(flag, coarse, msg) is True
+
 
 # --------------------------------------------------------------------------- #
 # Robustness
