@@ -433,49 +433,57 @@ async def test_non_recipient_cannot_decrypt(relay_url: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_tampered_ciphertext_raises_invalid_tag(relay_url: str) -> None:
+async def test_tampered_message_is_dropped_and_session_survives(relay_url: str) -> None:
     """
-    Capture a real Alice→Bob envelope, corrupt its ciphertext, and deliver it
-    to Bob. His scan matches and his ratchet derives the right key, so the
-    corruption is caught — InvalidTag, never a silent drop.
+    A tampered envelope for a genuinely-ours message is dropped *per message* and
+    the session stays alive — InvalidTag is no longer propagated out of
+    ``session.messages()`` (audit §2 HIGH / FIX 1, commit 211f7e5). A relay or
+    wire attacker can therefore no longer kill a conversation by replaying one
+    bit-flipped envelope: the forged copy is silently dropped, and a subsequent
+    legitimate message still decrypts end to end.
     """
-    from cryptography.exceptions import InvalidTag
-
     alice, bob = _alice_and_bob()
 
-    # Alice + a passive observer are connected; Bob is not yet. We capture the
-    # real envelope, then clear the relay's replay buffer so a late-joining Bob
-    # won't be handed the genuine copy — leaving the corrupted copy as the only
-    # thing he scans.
+    # Alice (and a passive observer) connect; Bob is NOT live yet. We capture
+    # Alice's real envelope on the firehose, then clear the relay's replay buffer
+    # so a late-joining Bob is never handed the genuine copy — the corrupted
+    # injection below is the only thing he scans for that message.
     observer = RelayClient(relay_url, STEALTH_CHANNEL)
-    async with observer, Session(alice, bob.contact_code(), relay_url) as alice_session:
+    injector = RelayClient(relay_url, "injector")
+    async with (
+        observer,
+        injector,
+        Session(alice, bob.contact_code(), relay_url) as alice_session,
+    ):
         await alice_session.send("surprise")
         captured = await asyncio.wait_for(observer.receive(), timeout=5.0)
+        relay_module._recent.clear()
 
-    # Drop the genuine envelope from the replay buffer; only the corrupt
-    # injection below should reach Bob.
-    relay_module._recent.clear()
+        # Flip a bit in the trailing ratchet-content auth tag (R and the sealed
+        # header sit ahead of it, so the scan still matches and the header still
+        # unseals — the corruption only surfaces when the ratchet body is
+        # authenticated, which is exactly where the per-message drop kicks in).
+        corrupt = bytearray(captured.ciphertext)
+        corrupt[-1] ^= 0xFF
 
-    # Flip a bit in the trailing ratchet-content auth tag (the blob ends with
-    # the ratchet ciphertext; R and the sealed header sit ahead of it, so the
-    # scan still matches and the header still unseals — the corruption only
-    # surfaces when the ratchet body is authenticated).
-    corrupt = bytearray(captured.ciphertext)
-    corrupt[-1] ^= 0xFF
+        async with Session(bob, alice.contact_code(), relay_url) as bob_session:
+            bob_msgs = bob_session.messages()
 
-    injector = RelayClient(relay_url, "injector")
-    async with Session(bob, alice.contact_code(), relay_url) as bob_session, injector:
-        await injector.send(
-            Envelope(
-                to=STEALTH_CHANNEL,
-                ciphertext=bytes(corrupt),
-                one_time_addr=captured.one_time_addr,
+            # Deliver the tampered copy, then a genuine follow-up, in that order.
+            await injector.send(
+                Envelope(
+                    to=STEALTH_CHANNEL,
+                    ciphertext=bytes(corrupt),
+                    one_time_addr=captured.one_time_addr,
+                )
             )
-        )
+            await alice_session.send("all clear")
 
-        bob_msgs = bob_session.messages()
-        with pytest.raises(InvalidTag):
-            await asyncio.wait_for(bob_msgs.__anext__(), timeout=5.0)
+            # The forgery is silently dropped — never raised, never yielded — so
+            # the first (and only) message Bob's generator surfaces is the genuine
+            # follow-up. That it arrives at all proves the session survived the
+            # tampered envelope rather than tearing down on InvalidTag.
+            assert await asyncio.wait_for(bob_msgs.__anext__(), timeout=5.0) == "all clear"
 
 
 # ---------------------------------------------------------------------------

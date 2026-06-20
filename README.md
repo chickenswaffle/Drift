@@ -77,6 +77,15 @@ There's also a plain-English `/cannot-see` page rendering the current
 certificate — the page a surveillance request lands on. Full spec, threat model,
 and how to verify with just `openssl`/`hashlib`: [`docs/witness.md`](docs/witness.md).
 
+Want to attack it yourself? The **Gauntlet** spins up a relay in-process and
+fires 10 adversarial probes at DRIFT's privacy and crypto invariants (relay
+blindness, stealth unlinkability, forward secrecy, sealed sender, the WITNESS
+chain, panic isolation, …) with a live pass/fail report:
+
+```bash
+python scripts/gauntlet.py
+```
+
 ---
 
 ## What DRIFT defends against
