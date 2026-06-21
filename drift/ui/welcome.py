@@ -68,9 +68,10 @@ _MENU = [
     ("3", "▶", "start chatting"),
     ("4", "⬡", "join or create a room"),
     ("5", "⊞", "create or open a group"),
-    ("6", "◌", "light a beacon"),
-    ("7", "🔍", "verify relay blindness"),
-    ("8", "≡", "all commands"),
+    ("6", "📢", "create or open a channel"),
+    ("7", "◌", "light a beacon"),
+    ("8", "🔍", "verify relay blindness"),
+    ("9", "≡", "all commands"),
 ]
 
 # Menu choice → the argv (after the drift launcher) it runs. Entries set to None
@@ -81,9 +82,10 @@ _COMMAND_FOR_CHOICE: dict[str, list[str] | None] = {
     "3": ["chat"],
     "4": ["room"],
     "5": ["group"],
-    "6": None,            # beacon <handle>
-    "7": None,            # witness verify <relay>
-    "8": ["--help"],
+    "6": ["channel"],
+    "7": None,            # beacon <handle>
+    "8": None,            # witness verify <relay>
+    "9": ["--help"],
 }
 
 
@@ -349,20 +351,20 @@ def _dispatch(choice: str, has_identity: bool, console: Console) -> int:
             console.print("[dim]Cancelled — need both a nickname and a code.[/dim]")
             return 1
         return _run(argv + ["add", name, code])
-    if choice == "6":
+    if choice == "7":
         handle = console.input("  beacon handle: ").strip()
         if not handle:
             console.print("[dim]Cancelled.[/dim]")
             return 1
         return _run(argv + ["beacon", handle])
-    if choice == "7":
+    if choice == "8":
         relay = console.input(f"  relay url [{DEFAULT_RELAY}]: ").strip() or DEFAULT_RELAY
         return _run(argv + ["witness", "verify", relay])
     return 1  # unreachable
 
 
 def _interactive_choice(has_identity: bool, code: str | None, tor_on: bool) -> str | None:
-    """Drive the Textual welcome menu; return the chosen menu key ("1".."8") or
+    """Drive the Textual welcome menu; return the chosen menu key ("1".."9") or
     None to quit.
 
     Textual is imported **here**, not at module top, so that merely importing
@@ -388,7 +390,7 @@ def _interactive_choice(has_identity: bool, code: str | None, tor_on: bool) -> s
 
     class _WelcomeMenu(Static):
         """The numbered menu as a single focusable widget: a ``▶`` cursor moves
-        with the arrow keys (wrapping), digits 1–8 jump, enter / click fire."""
+        with the arrow keys (wrapping), digits 1–9 jump, enter / click fire."""
 
         can_focus = True
         selected: reactive[int] = reactive(0)
@@ -479,7 +481,7 @@ def _interactive_choice(has_identity: bool, code: str | None, tor_on: bool) -> s
                     yield _WelcomeMenu(id="w-menu")
                 yield Static(_status(theme, tor_on))
                 yield Static(
-                    f"[{dim}]↑/↓ move  ·  1–8 jump  ·  enter select  ·  q quit[/]",
+                    f"[{dim}]↑/↓ move  ·  1–9 jump  ·  enter select  ·  q quit[/]",
                     id="w-hint",
                 )
 

@@ -289,6 +289,34 @@ def is_room(identity: Identity, label: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Channels — a channel is a TIER_INVITE room with ``kind == "channel"``. They
+# live in the *rooms* store (one owner posts, N subscribers read) so the sealed
+# vault + decoy-shred pipeline (audit H4) covers them automatically; these
+# helpers are just kind-filtered views over ``load_rooms``/``add_room``.
+# ---------------------------------------------------------------------------
+
+def load_channels(identity: Identity) -> Rooms:
+    """``identity``'s saved channels (the ``kind == "channel"`` rooms)."""
+    return {label: r for label, r in load_rooms(identity).items() if r.is_channel}
+
+
+def plain_rooms(rooms: Rooms) -> Rooms:
+    """The non-channel rooms in ``rooms`` — for the ROOMS listing/section."""
+    return {label: r for label, r in rooms.items() if not r.is_channel}
+
+
+def add_channel(identity: Identity, channel: Room) -> Rooms:
+    """Save ``channel`` (a ``kind == "channel"`` room) under its label."""
+    return add_room(identity, channel)
+
+
+def get_channel(identity: Identity, label: str) -> Room | None:
+    """The channel labelled ``label`` (``None`` for a plain room or no match)."""
+    room = get_room(identity, label)
+    return room if room is not None and room.is_channel else None
+
+
+# ---------------------------------------------------------------------------
 # X3DH prekeys (audit H3) — per-identity private prekey store
 # ---------------------------------------------------------------------------
 

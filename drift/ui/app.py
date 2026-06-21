@@ -388,6 +388,13 @@ class GroupSelected(Message):
         self.name = name
 
 
+class ChannelSelected(Message):
+    """A sidebar 📢 channel row was clicked (Phase 12)."""
+    def __init__(self, label: str) -> None:
+        super().__init__()
+        self.label = label
+
+
 class SecurityPillClicked(Message):
     """A security indicator was clicked — show its one-line explanation."""
     def __init__(self, label: str, tooltip: str) -> None:
@@ -937,6 +944,7 @@ class ContactItem(Static):
         self, name: str, *, active: bool, unread: int, index: int = 0,
         is_room: bool = False, tier: str | None = None,
         is_group: bool = False, members: int = 0,
+        is_channel: bool = False, owner: bool = False,
     ) -> None:
         super().__init__()
         self.contact_name = name
@@ -947,6 +955,8 @@ class ContactItem(Static):
         self.tier = tier
         self.is_group = is_group
         self.members = members
+        self.is_channel = is_channel
+        self.owner = owner
         if active:
             self.add_class("active")
 
@@ -957,6 +967,12 @@ class ContactItem(Static):
         num = f"[#555555]{self.index}[/] " if self.index else ""
         colour = _P if self.active else _DM
         badge = f"  [{_P}]●[/]" if self.unread else ""
+        if self.is_channel:
+            # 📢 prefix; trailing owner / read-only role instead of an unread dot.
+            horn = f"[{_P}]📢[/]" if self.active else f"[{_DM}]📢[/]"
+            role = "owner" if self.owner else "read-only"
+            tag = f"  [{_DM}]{role}[/]"
+            return f"{accent}{num}{horn} [{colour}]{self.contact_name}[/]{tag}"
         if self.is_group:
             # ⊞ prefix; trailing member count instead of an unread dot.
             boxmark = f"[{_P}]⊞[/]" if self.active else f"[{_DM}]⊞[/]"
@@ -971,7 +987,9 @@ class ContactItem(Static):
         return f"{accent}{num}[{colour}]{self.contact_name}[/]{badge}"
 
     def _select(self) -> None:
-        if self.is_group:
+        if self.is_channel:
+            self.post_message(ChannelSelected(self.contact_name))
+        elif self.is_group:
             self.post_message(GroupSelected(self.contact_name))
         elif self.is_room:
             self.post_message(RoomSelected(self.contact_name))
@@ -999,8 +1017,9 @@ class Sidebar(Vertical):
 
     @staticmethod
     def _section(title: str, *, first: bool = False) -> Static:
-        """A dim section header (CONTACTS / GROUPS / ROOMS). The blank line above
-        each header but the first reads the three groups as separate shelves."""
+        """A dim section header (CONTACTS / GROUPS / ROOMS / CHANNELS). The blank
+        line above each header but the first reads the sections as separate
+        shelves."""
         lead = "" if first else "\n"
         return Static(f"{lead}[{_DM}]{title}[/]", classes="sidebar-section")
 
@@ -1008,14 +1027,17 @@ class Sidebar(Vertical):
         self, contacts: Contacts, active: str | None, unread: dict[str, int],
         rooms: dict[str, Room] | None = None,
         groups: dict[str, GroupState] | None = None,
+        channels: dict[str, Room] | None = None,
     ) -> None:
-        """Rebuild the sidebar's three labelled sections — direct CONTACTS, ⊞
-        GROUPS, and ⬡ ROOMS — each with its own empty-state hint."""
+        """Rebuild the sidebar's four labelled sections — direct CONTACTS, ⊞
+        GROUPS, ⬡ ROOMS, and 📢 CHANNELS — each with its own empty-state hint."""
         rooms = rooms or {}
         groups = groups or {}
-        total = len(contacts) + len(groups) + len(rooms)
+        channels = channels or {}
+        total = len(contacts) + len(groups) + len(rooms) + len(channels)
         self.border_title = (
-            f"CONTACTS+GROUPS+ROOMS · {total}" if total else "CONTACTS+GROUPS+ROOMS"
+            f"CONTACTS+GROUPS+ROOMS+CHANNELS · {total}"
+            if total else "CONTACTS+GROUPS+ROOMS+CHANNELS"
         )
         listing = self.query_one("#contact-list", VerticalScroll)
         await listing.remove_children()
@@ -1065,6 +1087,21 @@ class Sidebar(Vertical):
         else:
             children.append(Static(
                 f"[{_DM}]⬡  no rooms · [/][{_S}]drift room create[/]",
+                classes="empty-hint"))
+
+        # — CHANNELS (Phase 12 broadcast rooms, 📢 prefix + owner/read-only) —
+        children.append(self._section("CHANNELS"))
+        if channels:
+            children += [
+                ContactItem(
+                    label, active=(label == active), unread=unread.get(label, 0),
+                    is_channel=True, owner=channel.is_owner,
+                )
+                for label, channel in channels.items()
+            ]
+        else:
+            children.append(Static(
+                f"[{_DM}]📢  no channels · [/][{_S}]drift channel create[/]",
                 classes="empty-hint"))
 
         await listing.mount(*children)
@@ -1824,6 +1861,12 @@ class DriftCommandProvider(Provider):
              app._open_verify),
             ("Contacts", "Focus the contact list",
              lambda: app.action_command("contacts")),
+            ("Groups", "Show group commands (create / add / open)",
+             lambda: app.action_command("groups")),
+            ("Rooms", "Show sovereign-room commands (create / join / open)",
+             lambda: app.action_command("rooms")),
+            ("Channels", "Show broadcast-channel commands (create / join / open)",
+             lambda: app.action_command("channels")),
             ("Show Identity", "Show your own contact code and QR",
              lambda: app.action_command("init")),
             ("Toggle Network Topology", "Show or hide the network graph",
@@ -1890,6 +1933,7 @@ class DriftApp(App[None]):
         group: GroupState | None = None,
         groups: dict[str, GroupState] | None = None,
         rooms: dict[str, Room] | None = None,
+        channels: dict[str, Room] | None = None,
         room: Room | None = None,
         use_tor: bool = False,
         tor_required: bool = False,
@@ -1917,6 +1961,10 @@ class DriftApp(App[None]):
         # ``_room`` is the currently-open room (None unless one is active), driven
         # by a RoomSession worker mirroring the group path.
         self._rooms: dict[str, Room] = rooms or {}
+        # Phase 12 channels: broadcast rooms (kind="channel"), listed in their own
+        # CHANNELS sidebar section. A channel is a Room, so the open/session path
+        # is the room path; the active channel lives in `_room` like any room.
+        self._channels: dict[str, Room] = channels or {}
         self._room = room
         self._room_session: Any = None
         # FMD detection key (audit M4): when set, sessions subscribe to the relay
@@ -2001,7 +2049,7 @@ class DriftApp(App[None]):
         self._header.relay_url = self._primary_relay
         self.query_one(CoverPill).level = self._cover_level.value
         await self._sidebar.populate(
-            self._contacts, self._active, self._unread, self._rooms, self._groups)
+            self._contacts, self._active, self._unread, self._rooms, self._groups, self._channels)
         self._update_chat_title()
         self.set_interval(0.8, self._tick_pulse)
         self._input.focus()
@@ -2221,7 +2269,8 @@ class DriftApp(App[None]):
         self._session_start = time.monotonic()
         self.query_one(UptimePill).start(self._session_start)
         await self._sidebar.populate(
-            self._contacts, self._group.name, self._unread, self._rooms, self._groups)
+            self._contacts, self._group.name, self._unread,
+            self._rooms, self._groups, self._channels)
         await self._pane.clear()
         self._update_group_title()
         self._pane.write_separator(
@@ -2305,15 +2354,29 @@ class DriftApp(App[None]):
         self._session_start = time.monotonic()
         self.query_one(UptimePill).start(self._session_start)
         await self._sidebar.populate(
-            self._contacts, room.label, self._unread, self._rooms, self._groups)
+            self._contacts, room.label, self._unread, self._rooms, self._groups,
+            self._channels)
         await self._pane.clear()
         self._update_room_title()
         self._write_room_banner(room)
-        self._pane.write_separator(f"room · {room.label} · {_now()}")
+        kind_word = "channel" if room.is_channel else "room"
+        self._pane.write_separator(f"{kind_word} · {room.label} · {_now()}")
         self._run_room_session()
 
     def _write_room_banner(self, room: Room) -> None:
-        """The dim, tier-coloured ⚠ PUBLIC ROOM banner shown atop every room."""
+        """The dim ⚠ PUBLIC banner shown atop every room/channel."""
+        if room.is_channel:
+            # Broadcast channel: read by name, posting restricted to the owner.
+            post_note = (
+                "You own this channel — only you can post."
+                if room.is_owner else "Read-only — only the owner can post."
+            )
+            self._pane._add(Static(
+                f"[cyan]📢 PUBLIC CHANNEL[/] [dim]— anyone who knows the name can read "
+                f"this. {post_note} Encrypted, but [bold]not forward-secret[/]: anyone "
+                f"who ever learns the name can read all past posts.[/]"
+            ))
+            return
         colour = self._ROOM_TIER_COLOUR.get(room.tier, "yellow")
         self._pane._add(Static(
             f"[{colour}]⚠ PUBLIC ROOM[/] [dim]— everyone with this room "
@@ -2323,12 +2386,18 @@ class DriftApp(App[None]):
         ))
 
     def _update_room_title(self) -> None:
-        """Room equivalent of _update_chat_title: label + ⬡ ROOM (tier) pill."""
+        """Room equivalent of _update_chat_title: label + ⬡ ROOM (tier) pill, or
+        a 📢 CHANNEL pill for a broadcast channel."""
         if self._room is None:
             return
         pane = self._pane
-        pane.border_title = f" ⬡ {self._room.label} "
         state = "🔒 secure" if self._connected else "offline"
+        if self._room.is_channel:
+            pane.border_title = f" 📢 {self._room.label} "
+            role = "owner" if self._room.is_owner else "read-only"
+            pane.border_subtitle = f"📢 CHANNEL · {role} · {state}"
+            return
+        pane.border_title = f" ⬡ {self._room.label} "
         shard = f" · {self._room.shard_count} shards" if self._room.shard_count else ""
         # 🔒 (shared-key), deliberately NOT 🔒⁺ — rooms are not forward-secret.
         pane.border_subtitle = f"⬡ ROOM ({self._room.tier}){shard} · {state}"
@@ -2382,7 +2451,7 @@ class DriftApp(App[None]):
         self.query_one(UptimePill).start(self._session_start)
         self.query_one(RatchetPill).count = 0
         await self._sidebar.populate(
-            self._contacts, self._active, self._unread, self._rooms, self._groups)
+            self._contacts, self._active, self._unread, self._rooms, self._groups, self._channels)
 
         # Replay this contact's history into a fresh pane.
         await self._pane.clear()
@@ -2485,6 +2554,15 @@ class DriftApp(App[None]):
             await self._open_group(group)
         self._focus_composer()
 
+    @on(ChannelSelected)
+    async def _on_channel_selected(self, event: ChannelSelected) -> None:
+        # A channel is a Room, so it opens through the room path; presentation
+        # branches on room.kind == "channel".
+        channel = self._channels.get(event.label)
+        if channel is not None and event.label != self._conversation_name():
+            await self._open_room(channel)
+        self._focus_composer()
+
     @on(IncomingMessage)
     def _on_incoming(self, event: IncomingMessage) -> None:
         record = MessageRecord("in", event.contact, event.text, _now())
@@ -2495,7 +2573,8 @@ class DriftApp(App[None]):
             self._unread[event.contact] = self._unread.get(event.contact, 0) + 1
             self.call_later(
                 self._sidebar.populate,
-                self._contacts, self._active, self._unread, self._rooms, self._groups,
+                self._contacts, self._active, self._unread,
+                self._rooms, self._groups, self._channels,
             )
 
     @on(CryptoEvent)
@@ -2624,6 +2703,11 @@ class DriftApp(App[None]):
                     "rooms — drift room create <name> --tier open|invite|dark · "
                     "drift room join <name> [--token <t>] · drift chat <name>"
                 )
+            case "channels":
+                self._pane.write_system(
+                    "channels — drift channel create <name> (you broadcast) · "
+                    "drift channel join <name> (read-only) · drift chat <name>"
+                )
             case "command":
                 self._enter_command_mode()
             case "help":
@@ -2643,7 +2727,8 @@ class DriftApp(App[None]):
         self._pane.write_system(f"added contact {name}")
         self.call_later(
             self._sidebar.populate,
-            self._contacts, self._active, self._unread, self._rooms, self._groups,
+            self._contacts, self._active, self._unread,
+            self._rooms, self._groups, self._channels,
         )
 
     def _open_verify(self) -> None:
@@ -2905,7 +2990,7 @@ class DriftApp(App[None]):
             self._pane.write_warning(f"found beacon but could not add contact: {exc}")
             return
         await self._sidebar.populate(
-            self._contacts, self._active, self._unread, self._rooms, self._groups)
+            self._contacts, self._active, self._unread, self._rooms, self._groups, self._channels)
         self._pane.write_system(
             f"🔦 found {handle} → added as contact · run /verify after selecting them"
         )

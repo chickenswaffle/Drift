@@ -561,6 +561,11 @@ class Room:
     created_at: float = field(default_factory=time.time)
     last_window: int = 0
     message_count: int = 0
+    # "room" (default) or "channel". A channel is a TIER_INVITE room presented as
+    # a broadcast: the owner holds the post secret and never shares it, so anyone
+    # who knows the name can read but only the owner can post. Purely a
+    # presentation/storage marker — the crypto is identical to an invite room.
+    kind: str = "room"
 
     def __post_init__(self) -> None:
         if self.tier not in TIERS:
@@ -573,6 +578,16 @@ class Room:
     @property
     def shard_count(self) -> int:
         return len(self.shards)
+
+    @property
+    def is_channel(self) -> bool:
+        return self.kind == "channel"
+
+    @property
+    def is_owner(self) -> bool:
+        """Whether this holder can post — true for a channel's owner (and any
+        invite-room holder that kept a posting token)."""
+        return self.post_secret_b58 is not None
 
     def keys(self) -> RoomKeys:
         """Derive this room's live key material."""
@@ -597,6 +612,7 @@ class Room:
             "created_at": self.created_at,
             "last_window": self.last_window,
             "message_count": self.message_count,
+            "kind": self.kind,
         }
 
     @classmethod
@@ -612,6 +628,7 @@ class Room:
             created_at=float(cast("float", d.get("created_at", 0.0))),
             last_window=int(cast("int", d.get("last_window", 0))),
             message_count=int(cast("int", d.get("message_count", 0))),
+            kind=str(d.get("kind") or "room"),
         )
 
     # -- QR / descriptor (the joinable secret, NOT the local label/activity) --
@@ -631,6 +648,8 @@ class Room:
             body["name"] = self.name
         if self.post_secret_b58:
             body["post"] = self.post_secret_b58
+        if self.kind != "room":
+            body["kind"] = self.kind
         raw = json.dumps(body, separators=(",", ":")).encode("utf-8")
         return QR_PREFIX + b58encode(raw)
 
@@ -651,18 +670,22 @@ class Room:
             raise RoomError(f"unknown room tier {tier!r}")
         shards = [str(s) for s in (body.get("shards") or [])]
         post = str(body["post"]) if body.get("post") else None
+        kind = str(body.get("kind") or "room")
         if tier == TIER_DARK:
             secret = str(body.get("secret") or "")
             if not secret:
                 raise RoomError("dark room code is missing its secret")
             return cls(
                 label=label or _auto_dark_label(secret), tier=TIER_DARK,
-                secret_b58=secret, post_secret_b58=post, shards=shards,
+                secret_b58=secret, post_secret_b58=post, shards=shards, kind=kind,
             )
         name = str(body.get("name") or "")
         if not name:
             raise RoomError("room code is missing its name")
-        return cls(label=label or name, tier=tier, name=name, post_secret_b58=post, shards=shards)
+        return cls(
+            label=label or name, tier=tier, name=name,
+            post_secret_b58=post, shards=shards, kind=kind,
+        )
 
 
 def make_room(
@@ -671,6 +694,7 @@ def make_room(
     tier: str = TIER_OPEN,
     label: str | None = None,
     shards: list[str] | None = None,
+    kind: str = "room",
 ) -> Room:
     """Construct a new :class:`Room`, generating any secrets the tier needs.
 
@@ -688,14 +712,17 @@ def make_room(
         secret_b58 = b58encode(keys.room_secret)
         return Room(
             label=label or _auto_dark_label(secret_b58), tier=TIER_DARK,
-            secret_b58=secret_b58, shards=shards,
+            secret_b58=secret_b58, shards=shards, kind=kind,
         )
     if not name:
         raise RoomError("an open/invite room needs a name")
     post_b58 = None
     if tier == TIER_INVITE:
         post_b58 = b58encode(generate_post_secret())
-    return Room(label=label or name, tier=tier, name=name, post_secret_b58=post_b58, shards=shards)
+    return Room(
+        label=label or name, tier=tier, name=name,
+        post_secret_b58=post_b58, shards=shards, kind=kind,
+    )
 
 
 def _auto_dark_label(secret_b58: str) -> str:
