@@ -18,15 +18,6 @@
 
 No phone numbers. No accounts. No central authority that can read or hand over your messages.
 
-> ⚠ **v0.14.1 is a wire-breaking protocol change. Existing sessions with
-> pre-v0.14.1 clients will fail to decrypt. Both parties must upgrade.**
->
-> The M1 audit fix binds the message key to the spend key, changing the stealth
-> message-key derivation. A v0.14.1 client and a pre-v0.14.1 client can no longer
-> exchange messages in either direction. Separately, **safety numbers changed
-> (M5) — re-verify your contacts** with `drift verify` after upgrading. See the
-> [CHANGELOG](CHANGELOG.md#0141--2026-06-18).
-
 ## Try it in your browser
 
 [![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/chickenswaffle/Drift)
