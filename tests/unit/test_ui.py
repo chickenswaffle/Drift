@@ -1041,15 +1041,16 @@ async def test_groups_appear_in_sidebar_with_box_prefix() -> None:
 
 
 @pytest.mark.asyncio
-async def test_sidebar_shows_three_labelled_sections() -> None:
+async def test_sidebar_shows_four_labelled_sections() -> None:
     async with _groups_app().run_test() as pilot:
         app = pilot.app
         await pilot.pause()
         headers = [str(s.render()) for s in app.query(".sidebar-section")]
-        assert len(headers) == 3
+        assert len(headers) == 4
         assert any("CONTACTS" in h for h in headers)
         assert any("GROUPS" in h for h in headers)
         assert any("ROOMS" in h for h in headers)
+        assert any("CHANNELS" in h for h in headers)
 
 
 @pytest.mark.asyncio
@@ -1064,3 +1065,53 @@ async def test_clicking_group_row_opens_group_conversation() -> None:
         assert app._group is not None and app._group.name == "crew"
         pane = app.query_one("#pane", MessagePane)
         assert "GROUP" in (pane.border_subtitle or "")
+
+
+# ---------------------------------------------------------------------------
+# Phase 12 — channel discoverability in the sidebar
+# ---------------------------------------------------------------------------
+
+from drift.crypto.rooms import TIER_INVITE  # noqa: E402
+from drift.ui.app import ChannelSelected  # noqa: E402
+
+
+def _channels_app() -> DriftApp:
+    me = Identity.generate()
+    channels = {
+        # owner: created with a post secret; subscriber: token-less, read-only.
+        "news": make_room("news", tier=TIER_INVITE, kind="channel"),
+        "feed": Room(label="feed", tier=TIER_INVITE, name="feed", kind="channel"),
+    }
+    return DriftApp(
+        me, {"alice": {"code": Identity.generate().contact_code()}},
+        "ws://127.0.0.1:1", channels=channels,
+    )
+
+
+@pytest.mark.asyncio
+async def test_channels_appear_in_sidebar_with_horn_and_role() -> None:
+    async with _channels_app().run_test() as pilot:
+        app = pilot.app
+        await pilot.pause()
+        rows = {i.contact_name: i for i in app.query(ContactItem)}
+        assert rows["news"].is_channel is True and rows["news"].owner is True
+        assert rows["feed"].is_channel is True and rows["feed"].owner is False
+        news, feed = str(rows["news"].render()), str(rows["feed"].render())
+        assert "📢" in news and "owner" in news
+        assert "📢" in feed and "read-only" in feed
+
+
+@pytest.mark.asyncio
+async def test_clicking_channel_row_opens_channel_conversation() -> None:
+    """The sidebar ChannelSelected → _on_channel_selected → _open_room wiring,
+    with channel (not room) presentation."""
+    app = _channels_app()
+    async with app.run_test() as pilot:
+        app.post_message(ChannelSelected("news"))
+        await pilot.pause()
+        await pilot.pause()
+        assert app._conversation_name() == "news"
+        assert app._room is not None and app._room.is_channel
+        pane = app.query_one("#pane", MessagePane)
+        subtitle = pane.border_subtitle or ""
+        assert "CHANNEL" in subtitle and "owner" in subtitle

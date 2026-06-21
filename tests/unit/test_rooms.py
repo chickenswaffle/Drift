@@ -277,6 +277,45 @@ def test_from_qr_rejects_garbage() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Channels (Phase 12) — broadcast rooms: kind="channel", owner-only posting
+# ---------------------------------------------------------------------------
+
+def test_channel_owner_can_post_subscriber_cannot() -> None:
+    # An owner is created with make_room (gets the post secret); a subscriber
+    # joins token-less and is read-only — same crypto as an invite room.
+    owner = R.make_room("news", tier=R.TIER_INVITE, kind="channel")
+    sub = R.Room(label="news", tier=R.TIER_INVITE, name="news", kind="channel")
+    assert owner.is_channel and owner.is_owner
+    assert owner.keys().can_post() is True
+    assert sub.is_channel and not sub.is_owner
+    assert sub.keys().can_post() is False
+    # Same room secret → the subscriber can read what the owner posts.
+    assert owner.keys().room_secret == sub.keys().room_secret
+
+
+def test_channel_to_from_dict_round_trip() -> None:
+    ch = R.make_room("news", tier=R.TIER_INVITE, kind="channel")
+    again = R.Room.from_dict(ch.to_dict())
+    assert again.kind == "channel" and again.is_channel
+    assert again.post_secret_b58 == ch.post_secret_b58
+
+
+def test_room_dict_without_kind_defaults_to_room() -> None:
+    # Back-compat: rooms persisted before channels existed have no "kind" key.
+    d = R.make_room("cats", tier=R.TIER_OPEN).to_dict()
+    del d["kind"]
+    again = R.Room.from_dict(d)
+    assert again.kind == "room" and not again.is_channel
+
+
+def test_channel_kind_survives_qr_round_trip() -> None:
+    ch = R.make_room("news", tier=R.TIER_INVITE, kind="channel")
+    assert R.Room.from_qr(ch.to_qr()).kind == "channel"
+    # A plain room's QR omits "kind" entirely and still reads back as a room.
+    assert R.Room.from_qr(R.make_room("cats", tier=R.TIER_OPEN).to_qr()).kind == "room"
+
+
+# ---------------------------------------------------------------------------
 # WITNESS integration — routed, but zero identity attribution
 # ---------------------------------------------------------------------------
 
@@ -324,6 +363,28 @@ def test_storage_rooms_round_trip(tmp_path, monkeypatch) -> None:  # type: ignor
         assert "cats" in loaded and loaded["cats"].keys().room_secret == room.keys().room_secret
         storage.remove_room(idn, "cats")
         assert not storage.is_room(idn, "cats")
+    finally:
+        importlib.reload(storage)  # restore module state for other tests
+
+
+def test_storage_channels_are_kind_filtered_view(tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setenv("DRIFT_CONFIG", str(tmp_path))
+    import importlib
+
+    from drift import storage
+    importlib.reload(storage)
+    try:
+        idn = Identity.generate()
+        room = R.make_room("cats", tier=R.TIER_OPEN)
+        channel = R.make_room("news", tier=R.TIER_INVITE, kind="channel")
+        storage.add_room(idn, room)
+        storage.add_channel(idn, channel)
+        # Channels live in the rooms store but are surfaced as their own view.
+        chans = storage.load_channels(idn)
+        assert set(chans) == {"news"} and chans["news"].is_channel
+        assert set(storage.plain_rooms(storage.load_rooms(idn))) == {"cats"}
+        assert storage.get_channel(idn, "news") is not None
+        assert storage.get_channel(idn, "cats") is None  # a plain room isn't a channel
     finally:
         importlib.reload(storage)  # restore module state for other tests
 

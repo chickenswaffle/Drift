@@ -1086,7 +1086,8 @@ def _decode_qr_image(path: Any) -> str | None:
 def room_list() -> None:
     """List your joined rooms with their tier and recent activity."""
     identity = _require_identity()
-    saved = storage.load_rooms(identity)
+    # Channels live in the same store but are listed by `drift channel list`.
+    saved = storage.plain_rooms(storage.load_rooms(identity))
     if not saved:
         console.print("[dim]No rooms yet. Use [bold]drift room create[/bold] or "
                       "[bold]drift room join[/bold].[/dim]")
@@ -1144,6 +1145,125 @@ def room_leave(
         raise typer.Exit(1)
     storage.remove_room(identity, label)
     console.print(f"[green]✓[/green] Left [bold]⬡ {label}[/bold] (local state removed).")
+
+
+# ---------------------------------------------------------------------------
+# Channels — broadcast rooms: one owner posts, anyone with the name reads.
+# A channel is a TIER_INVITE room (kind="channel") whose owner keeps the single
+# posting key and never shares it, so the crypto is the invite-room crypto.
+# ---------------------------------------------------------------------------
+
+channel_app = typer.Typer(
+    name="channel",
+    help="Broadcast channels — one owner posts, anyone with the name reads.",
+    no_args_is_help=True,
+)
+app.add_typer(channel_app, name="channel")
+
+
+@channel_app.command("create")
+def channel_create(
+    name: str = typer.Argument(..., help="Channel name — acts as the read key"),
+    label: str = typer.Option(None, "--label", help="Local label (defaults to the name)"),
+) -> None:
+    """
+    Create a broadcast channel you own — you post, anyone with the name reads.
+
+    A channel is a sovereign room in broadcast form: you hold the single posting
+    key (kept private, never shared), so only you can post, while anyone who
+    knows the name can subscribe and read. Treat the name like a password — a
+    short or common name is a weak channel anyone can guess into.
+    """
+    identity = _require_identity()
+    try:
+        channel = rooms_crypto.make_room(
+            name, tier=rooms_crypto.TIER_INVITE, label=label, kind="channel")
+    except RoomError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from None
+    if storage.get_room(identity, channel.label) is not None:
+        console.print(f"[red]A room or channel labelled {channel.label!r} already exists.[/red]")
+        raise typer.Exit(1)
+    storage.add_channel(identity, channel)
+    console.print(
+        f"[green]✓[/green] Created [bold]📢 {channel.label}[/bold]  "
+        f"[dim](channel — you are the only poster)[/dim]"
+    )
+    console.print(Panel(
+        f"You [bold]own[/bold] this channel — you're the only one who can post.\n"
+        f"Anyone who knows the name can subscribe and read:\n"
+        f"[bold]drift channel join {name}[/bold]\n\n"
+        f"[dim]Keep the name unguessable: it is the read key. Your posting key stays "
+        f"private and is never shared.[/dim]",
+        border_style="green", title="[green]📢 your channel[/green]",
+    ))
+    console.print(f"\n[dim]Post to it with[/dim] [bold]drift chat {channel.label!r}[/bold]")
+
+
+@channel_app.command("join")
+def channel_join(
+    name: str = typer.Argument(..., help="Channel name to subscribe to"),
+    label: str = typer.Option(None, "--label", help="Local label (defaults to the name)"),
+) -> None:
+    """
+    Subscribe to a channel (read-only).
+
+    You derive the same read key everyone else derives from the name and save it
+    locally so you can `drift chat` it. You receive every post; only the owner,
+    who holds the private posting key, can post.
+    """
+    identity = _require_identity()
+    # No post secret → a read-only subscriber (the invite-room lurker path).
+    channel = Room(
+        label=label or name, tier=rooms_crypto.TIER_INVITE, name=name, kind="channel",
+    )
+    if storage.get_room(identity, channel.label) is not None:
+        console.print(f"[yellow]Already subscribed[/yellow] to [bold]📢 {channel.label}[/bold].")
+        return
+    storage.add_channel(identity, channel)
+    console.print(
+        f"[green]✓[/green] Subscribed to [bold]📢 {channel.label}[/bold]  "
+        f"[dim](read-only — only the owner posts)[/dim]"
+    )
+    console.print(Panel(
+        "[bold yellow]⚠ PUBLIC CHANNEL[/bold yellow] — anyone who knows the name can read "
+        "it.\nEncrypted, but [bold]not forward-secret[/bold]: whoever ever learns the name "
+        "can read all past posts.",
+        border_style="yellow",
+    ))
+    console.print(f"[dim]Open it with[/dim] [bold]drift chat {channel.label!r}[/bold]")
+
+
+@channel_app.command("list")
+def channel_list() -> None:
+    """List the channels you own or subscribe to."""
+    identity = _require_identity()
+    saved = storage.load_channels(identity)
+    if not saved:
+        console.print("[dim]No channels yet. Use [bold]drift channel create[/bold] or "
+                      "[bold]drift channel join[/bold].[/dim]")
+        return
+    for label, channel in saved.items():
+        role = "owner" if channel.is_owner else "read-only"
+        color = "green" if channel.is_owner else "cyan"
+        last = f"window {channel.last_window}" if channel.last_window else "never"
+        console.print(
+            f"  [bold]📢 {label}[/bold]  [{color}]{role}[/{color}]  "
+            f"[dim]{channel.message_count} msgs · last {last}[/dim]"
+        )
+
+
+@channel_app.command("leave")
+def channel_leave(
+    label: str = typer.Argument(..., help="The channel to leave (local only)"),
+) -> None:
+    """Unsubscribe from a channel locally. You can rejoin any time with the name."""
+    identity = _require_identity()
+    if storage.get_channel(identity, label) is None:
+        console.print(f"[red]Unknown channel:[/red] {label}")
+        raise typer.Exit(1)
+    storage.remove_room(identity, label)
+    console.print(f"[green]✓[/green] Left [bold]📢 {label}[/bold] (local state removed).")
 
 
 # ---------------------------------------------------------------------------
@@ -1369,17 +1489,29 @@ def chat(
     """
     identity = _require_identity()
     saved = storage.load_contacts(identity)
-    saved_rooms = storage.load_rooms(identity)
+    saved_rooms_all = storage.load_rooms(identity)
+    saved_channels = storage.load_channels(identity)
+    saved_rooms = storage.plain_rooms(saved_rooms_all)
     saved_groups = storage.load_groups(identity)
-    # A name may refer to a group, a room, or a contact; groups take precedence,
-    # then rooms, then 1:1 contacts.
+    # A name may refer to a group, a room, a channel, or a contact; precedence is
+    # group → room → channel → 1:1 contact.
     group = storage.get_group(identity, name) if name is not None else None
     room = (
         saved_rooms.get(name) if name is not None and group is None else None
     )
+    channel = (
+        saved_channels.get(name)
+        if name is not None and group is None and room is None else None
+    )
+    # A channel is a Room, so it reuses the room session/UI path; `active_room`
+    # is whichever of room/channel resolved.
+    active_room = room if room is not None else channel
 
-    if name is not None and group is None and room is None and name not in saved:
-        console.print(f"[red]Unknown contact, group, or room:[/red] {name}")
+    if (
+        name is not None and group is None and room is None and channel is None
+        and name not in saved
+    ):
+        console.print(f"[red]Unknown contact, group, room, or channel:[/red] {name}")
         raise typer.Exit(1)
 
     if no_tor and tor_only:
@@ -1403,7 +1535,7 @@ def chat(
 
     if no_tui:
         if name is None:
-            console.print("[red]--no-tui requires a contact, group, or room name.[/red]")
+            console.print("[red]--no-tui requires a contact, group, room, or channel name.[/red]")
             raise typer.Exit(1)
         if group is not None:
             ok = asyncio.run(
@@ -1412,10 +1544,11 @@ def chat(
                     use_tor=use_tor, tor_only=tor_only, fmd_key=fmd_key,
                 )
             )
-        elif room is not None:
+        elif active_room is not None:
+            # Rooms and channels share the RoomSession path.
             ok = asyncio.run(
                 _room_chat_async(
-                    identity, room, relay, use_tor=use_tor, tor_only=tor_only,
+                    identity, active_room, relay, use_tor=use_tor, tor_only=tor_only,
                 )
             )
         else:
@@ -1433,11 +1566,12 @@ def chat(
     from drift.ui.app import DriftApp
     DriftApp(
         identity, dict(saved), relay,
-        active=name if (group is None and room is None) else None,
+        active=name if (group is None and active_room is None) else None,
         group=group,
         groups=dict(saved_groups),
         rooms=dict(saved_rooms),
-        room=room,
+        channels=dict(saved_channels),
+        room=active_room,
         use_tor=use_tor, tor_required=tor_only, fmd_key=fmd_key, prekeys=prekeys,
         lockdown=lockdown, cover=cover_level,
     ).run()
