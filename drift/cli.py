@@ -1370,6 +1370,7 @@ def chat(
     identity = _require_identity()
     saved = storage.load_contacts(identity)
     saved_rooms = storage.load_rooms(identity)
+    saved_groups = storage.load_groups(identity)
     # A name may refer to a group, a room, or a contact; groups take precedence,
     # then rooms, then 1:1 contacts.
     group = storage.get_group(identity, name) if name is not None else None
@@ -1434,6 +1435,7 @@ def chat(
         identity, dict(saved), relay,
         active=name if (group is None and room is None) else None,
         group=group,
+        groups=dict(saved_groups),
         rooms=dict(saved_rooms),
         room=room,
         use_tor=use_tor, tor_required=tor_only, fmd_key=fmd_key, prekeys=prekeys,

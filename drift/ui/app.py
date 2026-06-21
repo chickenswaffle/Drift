@@ -381,6 +381,13 @@ class RoomSelected(Message):
         self.label = label
 
 
+class GroupSelected(Message):
+    """A sidebar ⊞ group row was clicked (Phase 8)."""
+    def __init__(self, name: str) -> None:
+        super().__init__()
+        self.name = name
+
+
 class SecurityPillClicked(Message):
     """A security indicator was clicked — show its one-line explanation."""
     def __init__(self, label: str, tooltip: str) -> None:
@@ -929,6 +936,7 @@ class ContactItem(Static):
     def __init__(
         self, name: str, *, active: bool, unread: int, index: int = 0,
         is_room: bool = False, tier: str | None = None,
+        is_group: bool = False, members: int = 0,
     ) -> None:
         super().__init__()
         self.contact_name = name
@@ -937,6 +945,8 @@ class ContactItem(Static):
         self.index = index
         self.is_room = is_room
         self.tier = tier
+        self.is_group = is_group
+        self.members = members
         if active:
             self.add_class("active")
 
@@ -947,6 +957,11 @@ class ContactItem(Static):
         num = f"[#555555]{self.index}[/] " if self.index else ""
         colour = _P if self.active else _DM
         badge = f"  [{_P}]●[/]" if self.unread else ""
+        if self.is_group:
+            # ⊞ prefix; trailing member count instead of an unread dot.
+            boxmark = f"[{_P}]⊞[/]" if self.active else f"[{_DM}]⊞[/]"
+            count = f"  [{_DM}]{self.members} members[/]" if self.members else ""
+            return f"{accent}{num}{boxmark} [{colour}]{self.contact_name}[/]{count}"
         if self.is_room:
             # ⬡ prefix, tinted by tier (yellow=open, cyan=invite, red=dark).
             tier_colour = {"open": "yellow", "invite": "cyan", "dark": "red"}.get(
@@ -956,7 +971,9 @@ class ContactItem(Static):
         return f"{accent}{num}[{colour}]{self.contact_name}[/]{badge}"
 
     def _select(self) -> None:
-        if self.is_room:
+        if self.is_group:
+            self.post_message(GroupSelected(self.contact_name))
+        elif self.is_room:
             self.post_message(RoomSelected(self.contact_name))
         else:
             self.post_message(ContactSelected(self.contact_name))
@@ -980,42 +997,77 @@ class Sidebar(Vertical):
     def on_mount(self) -> None:
         self.border_title = "CONTACTS"
 
+    @staticmethod
+    def _section(title: str, *, first: bool = False) -> Static:
+        """A dim section header (CONTACTS / GROUPS / ROOMS). The blank line above
+        each header but the first reads the three groups as separate shelves."""
+        lead = "" if first else "\n"
+        return Static(f"{lead}[{_DM}]{title}[/]", classes="sidebar-section")
+
     async def populate(
         self, contacts: Contacts, active: str | None, unread: dict[str, int],
         rooms: dict[str, Room] | None = None,
+        groups: dict[str, GroupState] | None = None,
     ) -> None:
-        """Rebuild the contact (and ⬡ room) rows from the current model state."""
+        """Rebuild the sidebar's three labelled sections — direct CONTACTS, ⊞
+        GROUPS, and ⬡ ROOMS — each with its own empty-state hint."""
         rooms = rooms or {}
-        total = len(contacts) + len(rooms)
-        self.border_title = f"CONTACTS · {total}" if total else "CONTACTS"
+        groups = groups or {}
+        total = len(contacts) + len(groups) + len(rooms)
+        self.border_title = (
+            f"CONTACTS+GROUPS+ROOMS · {total}" if total else "CONTACTS+GROUPS+ROOMS"
+        )
         listing = self.query_one("#contact-list", VerticalScroll)
         await listing.remove_children()
-        if not contacts and not rooms:
-            hint = (
-                f"[{_DM}]◈  no contacts yet[/]\n\n"
-                f"[{_S}]\\[A][/][{_DM}] add a contact · [/]"
-                f"[{_S}]\\[+][/][{_DM}] below[/]"
-            )
-            await listing.mount(Static(hint, classes="empty-hint"))
-            return
-        items = [
-            ContactItem(
-                name,
-                active=(name == active),
-                unread=unread.get(name, 0),
-                index=(i + 1 if i < 9 else 0),
-            )
-            for i, name in enumerate(contacts)
-        ]
-        # Rooms sit below contacts, each with a ⬡ prefix and tier tint.
-        items += [
-            ContactItem(
-                label, active=(label == active), unread=unread.get(label, 0),
-                is_room=True, tier=room.tier,
-            )
-            for label, room in rooms.items()
-        ]
-        await listing.mount(*items)
+
+        children: list[Widget] = []
+
+        # — CONTACTS (direct 1:1 chats) —
+        children.append(self._section("CONTACTS", first=True))
+        if contacts:
+            children += [
+                ContactItem(
+                    name, active=(name == active), unread=unread.get(name, 0),
+                    index=(i + 1 if i < 9 else 0),
+                )
+                for i, name in enumerate(contacts)
+            ]
+        else:
+            children.append(Static(
+                f"[{_DM}]◈  no contacts · [/][{_S}]\\[A][/][{_DM}] add[/]",
+                classes="empty-hint"))
+
+        # — GROUPS (Phase 8 pairwise-ratchet groups) —
+        children.append(self._section("GROUPS"))
+        if groups:
+            children += [
+                ContactItem(
+                    name, active=(name == active), unread=unread.get(name, 0),
+                    is_group=True, members=group.size,
+                )
+                for name, group in groups.items()
+            ]
+        else:
+            children.append(Static(
+                f"[{_DM}]⊞  no groups · [/][{_S}]drift group create[/]",
+                classes="empty-hint"))
+
+        # — ROOMS (Phase 11 sovereign rooms, ⬡ prefix + tier tint) —
+        children.append(self._section("ROOMS"))
+        if rooms:
+            children += [
+                ContactItem(
+                    label, active=(label == active), unread=unread.get(label, 0),
+                    is_room=True, tier=room.tier,
+                )
+                for label, room in rooms.items()
+            ]
+        else:
+            children.append(Static(
+                f"[{_DM}]⬡  no rooms · [/][{_S}]drift room create[/]",
+                classes="empty-hint"))
+
+        await listing.mount(*children)
 
 
 class _SentLine(Static):
@@ -1113,7 +1165,11 @@ class _SplashPane(Static):
         body.append("[C]", style=_S)
         body.append(" contacts    ", style=_DM)
         body.append("[A]", style=_S)
-        body.append(" add contact    ", style=_DM)
+        body.append(" add    ", style=_DM)
+        body.append("[G]", style=_S)
+        body.append(" groups    ", style=_DM)
+        body.append("[R]", style=_S)
+        body.append(" rooms    ", style=_DM)
         body.append("[?]", style=_S)
         body.append(" help", style=_DM)
         body.append("\n\n")
@@ -1804,6 +1860,8 @@ class DriftApp(App[None]):
         Binding("a", "command('add')", "Add", show=False),
         Binding("v", "command('verify')", "Verify", show=False),
         Binding("c", "command('contacts')", "Contacts", show=False),
+        Binding("g", "command('groups')", "Groups", show=False),
+        Binding("r", "command('rooms')", "Rooms", show=False),
         Binding("q", "command('quit')", "Quit", show=False),
         Binding("question_mark", "command('help')", "Help", show=False),
         Binding("ctrl+g", "toggle_info", "Info", show=False),
@@ -1830,6 +1888,7 @@ class DriftApp(App[None]):
         *,
         active: str | None = None,
         group: GroupState | None = None,
+        groups: dict[str, GroupState] | None = None,
         rooms: dict[str, Room] | None = None,
         room: Room | None = None,
         use_tor: bool = False,
@@ -1851,6 +1910,9 @@ class DriftApp(App[None]):
         # GroupSession instead of a 1:1 Session (everything else is shared).
         self._group = group
         self._group_session: Any = None
+        # Phase 8 sidebar list of saved groups (label → GroupState), parallel to
+        # `_rooms` below; `_group` above is the currently-open one (if any).
+        self._groups: dict[str, GroupState] = groups or {}
         # Phase 11: sovereign rooms. ``_rooms`` is the sidebar list (label → Room);
         # ``_room`` is the currently-open room (None unless one is active), driven
         # by a RoomSession worker mirroring the group path.
@@ -1938,7 +2000,8 @@ class DriftApp(App[None]):
     async def on_mount(self) -> None:
         self._header.relay_url = self._primary_relay
         self.query_one(CoverPill).level = self._cover_level.value
-        await self._sidebar.populate(self._contacts, self._active, self._unread, self._rooms)
+        await self._sidebar.populate(
+            self._contacts, self._active, self._unread, self._rooms, self._groups)
         self._update_chat_title()
         self.set_interval(0.8, self._tick_pulse)
         self._input.focus()
@@ -2135,9 +2198,20 @@ class DriftApp(App[None]):
 
     # ── Group conversation (Phase 8) ───────────────────────────────────────
 
-    async def _open_group(self) -> None:
-        """Open the group conversation and start its GroupSession worker."""
+    async def _open_group(self, group: GroupState | None = None) -> None:
+        """Open a group conversation and start its GroupSession worker.
+
+        ``group`` switches to a different saved group (sidebar click); omitted,
+        it (re)opens the already-active ``self._group`` (startup path)."""
+        if group is not None:
+            self._group = group
         assert self._group is not None
+        # Leaving any open room/1:1: drop their handles so routing is group-based
+        # (the exclusive group="session" worker cancels the previous worker).
+        self._room = None
+        self._room_session = None
+        self._session = None
+        self._active = None
         self._connected = False
         self._header.contact_name = self._group.name
         self._header.connected = False
@@ -2146,6 +2220,8 @@ class DriftApp(App[None]):
         self._stealth_recent = []
         self._session_start = time.monotonic()
         self.query_one(UptimePill).start(self._session_start)
+        await self._sidebar.populate(
+            self._contacts, self._group.name, self._unread, self._rooms, self._groups)
         await self._pane.clear()
         self._update_group_title()
         self._pane.write_separator(
@@ -2228,7 +2304,8 @@ class DriftApp(App[None]):
         self._stealth_recent = []
         self._session_start = time.monotonic()
         self.query_one(UptimePill).start(self._session_start)
-        await self._sidebar.populate(self._contacts, room.label, self._unread, self._rooms)
+        await self._sidebar.populate(
+            self._contacts, room.label, self._unread, self._rooms, self._groups)
         await self._pane.clear()
         self._update_room_title()
         self._write_room_banner(room)
@@ -2304,7 +2381,8 @@ class DriftApp(App[None]):
         self._session_start = time.monotonic()
         self.query_one(UptimePill).start(self._session_start)
         self.query_one(RatchetPill).count = 0
-        await self._sidebar.populate(self._contacts, self._active, self._unread, self._rooms)
+        await self._sidebar.populate(
+            self._contacts, self._active, self._unread, self._rooms, self._groups)
 
         # Replay this contact's history into a fresh pane.
         await self._pane.clear()
@@ -2400,6 +2478,13 @@ class DriftApp(App[None]):
             await self._open_room(room)
         self._focus_composer()
 
+    @on(GroupSelected)
+    async def _on_group_selected(self, event: GroupSelected) -> None:
+        group = self._groups.get(event.name)
+        if group is not None and event.name != self._conversation_name():
+            await self._open_group(group)
+        self._focus_composer()
+
     @on(IncomingMessage)
     def _on_incoming(self, event: IncomingMessage) -> None:
         record = MessageRecord("in", event.contact, event.text, _now())
@@ -2409,7 +2494,8 @@ class DriftApp(App[None]):
         else:
             self._unread[event.contact] = self._unread.get(event.contact, 0) + 1
             self.call_later(
-                self._sidebar.populate, self._contacts, self._active, self._unread, self._rooms
+                self._sidebar.populate,
+                self._contacts, self._active, self._unread, self._rooms, self._groups,
             )
 
     @on(CryptoEvent)
@@ -2528,6 +2614,16 @@ class DriftApp(App[None]):
                 self._open_verify()
             case "contacts":
                 self._focus_sidebar()
+            case "groups":
+                self._pane.write_system(
+                    "groups — drift group create <name> <members…> · "
+                    "drift group add <name> <member> · drift chat <name>"
+                )
+            case "rooms":
+                self._pane.write_system(
+                    "rooms — drift room create <name> --tier open|invite|dark · "
+                    "drift room join <name> [--token <t>] · drift chat <name>"
+                )
             case "command":
                 self._enter_command_mode()
             case "help":
@@ -2546,7 +2642,8 @@ class DriftApp(App[None]):
             return
         self._pane.write_system(f"added contact {name}")
         self.call_later(
-            self._sidebar.populate, self._contacts, self._active, self._unread
+            self._sidebar.populate,
+            self._contacts, self._active, self._unread, self._rooms, self._groups,
         )
 
     def _open_verify(self) -> None:
@@ -2807,7 +2904,8 @@ class DriftApp(App[None]):
         except storage.StorageError as exc:
             self._pane.write_warning(f"found beacon but could not add contact: {exc}")
             return
-        await self._sidebar.populate(self._contacts, self._active, self._unread, self._rooms)
+        await self._sidebar.populate(
+            self._contacts, self._active, self._unread, self._rooms, self._groups)
         self._pane.write_system(
             f"🔦 found {handle} → added as contact · run /verify after selecting them"
         )
