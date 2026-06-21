@@ -1004,3 +1004,63 @@ async def test_lockdown_toggle_wipes_history() -> None:
         await pilot.pause()
         assert app._lockdown is True
         assert app._history == {}
+
+
+# ---------------------------------------------------------------------------
+# Phase 8 — group discoverability in the sidebar
+# ---------------------------------------------------------------------------
+
+from drift.crypto.groups import create_group  # noqa: E402
+from drift.ui.app import GroupSelected  # noqa: E402
+
+
+def _groups_app() -> DriftApp:
+    me = Identity.generate()
+    member = ContactInfo(name="bob", code=Identity.generate().contact_code())
+    groups = {"crew": create_group("crew", [member])}
+    return DriftApp(
+        me, {"alice": {"code": Identity.generate().contact_code()}},
+        "ws://127.0.0.1:1", groups=groups,
+    )
+
+
+@pytest.mark.asyncio
+async def test_groups_appear_in_sidebar_with_box_prefix() -> None:
+    async with _groups_app().run_test() as pilot:
+        app = pilot.app
+        await pilot.pause()
+        rows = {i.contact_name: i for i in app.query(ContactItem)}
+        # 1:1 contact is neither a group nor a room.
+        assert rows["alice"].is_group is False
+        assert rows["crew"].is_group is True
+        # member count includes self: one other member + you = 2.
+        assert rows["crew"].members == 2
+        # The ⊞ box marks a group row and the member count is rendered.
+        rendered = str(rows["crew"].render())
+        assert "⊞" in rendered and "2 members" in rendered
+
+
+@pytest.mark.asyncio
+async def test_sidebar_shows_three_labelled_sections() -> None:
+    async with _groups_app().run_test() as pilot:
+        app = pilot.app
+        await pilot.pause()
+        headers = [str(s.render()) for s in app.query(".sidebar-section")]
+        assert len(headers) == 3
+        assert any("CONTACTS" in h for h in headers)
+        assert any("GROUPS" in h for h in headers)
+        assert any("ROOMS" in h for h in headers)
+
+
+@pytest.mark.asyncio
+async def test_clicking_group_row_opens_group_conversation() -> None:
+    """The sidebar GroupSelected → _on_group_selected → _open_group wiring."""
+    app = _groups_app()
+    async with app.run_test() as pilot:
+        app.post_message(GroupSelected("crew"))
+        await pilot.pause()
+        await pilot.pause()
+        assert app._conversation_name() == "crew"
+        assert app._group is not None and app._group.name == "crew"
+        pane = app.query_one("#pane", MessagePane)
+        assert "GROUP" in (pane.border_subtitle or "")
