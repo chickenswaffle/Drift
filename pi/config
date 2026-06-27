@@ -1,0 +1,35 @@
+# pi-gen configuration for the DRIFT mesh-node image.
+#
+# Sourced by pi-gen at build time (see pi/build.sh, which copies this to the
+# pi-gen checkout root). We build Raspberry Pi OS *Lite* (stage0→stage2) and
+# then layer our own `stage-drift` on top, which is the only stage that exports
+# an image.
+#
+# Base: Bookworm — it is the first Raspberry Pi OS release shipping Python 3.11
+# (DRIFT requires >=3.11) while still building the armhf userland for armv6, so
+# the original Pi Zero W stays in scope alongside Zero 2 W / Pi 3 / Pi 4 / Pi 5.
+
+IMG_NAME="drift-node"
+RELEASE="bookworm"
+
+# Lite rootfs (stage2) + our node stage. stage3/4/5 (desktop) are never built.
+STAGE_LIST="stage0 stage1 stage2 stage-drift"
+
+TARGET_HOSTNAME="drift-node"
+
+# Headless appliance. SSH is enabled for debugging, but NO default login
+# password is baked in — drop a `userconf.txt` on the boot partition (Raspberry
+# Pi Imager does this for you) to create a login. The node service itself runs
+# as a dedicated, login-less `drift` system account regardless.
+ENABLE_SSH=1
+FIRST_USER_NAME="drift"
+DISABLE_FIRST_BOOT_USER_RENAME=1
+
+LOCALE_DEFAULT="en_US.UTF-8"
+KEYBOARD_KEYMAP="us"
+KEYBOARD_LAYOUT="English (US)"
+TIMEZONE_DEFAULT="Etc/UTC"
+
+# Ship a compressed, ready-to-flash artifact in deploy/.
+DEPLOY_COMPRESSION="xz"
+COMPRESSION_LEVEL=6

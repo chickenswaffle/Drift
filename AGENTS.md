@@ -30,7 +30,7 @@ Current release: **`v0.15.0`**. No phase is in progress right now.
 
 - **Audit M1–M3, M5 + lows L1, L3** ✅ resolved (`v0.14.1`): scan/spend privilege separation (the stealth message key now folds in an `ECDH(spend, R)` so the private spend key is required to decrypt, not just the scan key — `crypto/stealth.py`); single-use burn tokens with nonce + timestamp and relay-side replay dedup (`crypto/burn.py`, `relay/server.py`); relay-specific beacon lookup hash bound to the relay pubkey via `GET /beacon/pubkey` (`crypto/beacon.py`); safety number now commits to both scan **and** spend keys, invalidating old numbers (`storage.py`); bounded seen-address dedup and `/send` size+addr validation. See `docs/audit-2026-06.md`. **L2** (wipe single-shot tell) and **L4** (spend key reused as Ed25519 seed) are documented in DESIGN.md and deferred — both need an on-disk format/migration change.
 
-**Backlog (none currently active):** L2 / L4 (deferred, need format migration); Raspberry Pi image.
+**Backlog:** L2 / L4 (deferred, need format migration). The **Raspberry Pi image** build pipeline now lives in `pi/` — a `pi-gen` stage (`pi/stage-drift/`) that layers the `relay.node` onion mesh node onto Raspberry Pi OS Lite (Bookworm/armhf), headless first-boot provisioning from a boot-partition `drift-node.conf`, a `build.sh` wrapper, and a `pi-image` CI workflow. It produces a flashable image but none has been cut to a release yet; see `pi/README.md`.
 
 ## Development setup
 

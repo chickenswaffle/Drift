@@ -33,6 +33,11 @@ peers.json
 node_address.txt
 witness_chain.jsonl
 
+# DRIFT — Pi image build (pi-gen checkout + generated artifacts)
+pi/.pi-gen/
+pi/deploy/
+pi/stage-drift/00-install-drift/files/drift-build.env
+
 # IDE
 .vscode/
 .idea/

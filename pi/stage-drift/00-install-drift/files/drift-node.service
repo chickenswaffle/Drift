@@ -1,0 +1,36 @@
+[Unit]
+Description=DRIFT mesh node (federated relay over Tor)
+Documentation=https://github.com/chickenswaffle/Drift
+After=network-online.target tor.service drift-firstboot.service
+Wants=network-online.target
+Requires=tor.service
+
+[Service]
+Type=simple
+User=drift-node
+Group=drift-node
+WorkingDirectory=/opt/drift-node/state
+# Written by drift-firstboot from /boot/firmware/drift-node.conf (optional).
+EnvironmentFile=-/etc/drift-node.env
+Environment=DRIFT_NODE_ADDRESS_FILE=/opt/drift-node/state/node_address.txt
+ExecStart=/opt/drift-node/.venv/bin/python -m relay.node
+Restart=on-failure
+RestartSec=5
+
+# --- hardening: the node needs only loopback + tor's control socket --------- #
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/opt/drift-node/state
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+# Sized for a Pi Zero-class device (512 MB).
+MemoryMax=256M
+
+[Install]
+WantedBy=multi-user.target

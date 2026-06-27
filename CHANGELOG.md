@@ -9,6 +9,21 @@ DRIFT uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Raspberry Pi node image (`pi/`).** A flashable Raspberry Pi OS image that
+  boots straight into a DRIFT mesh node (`relay.node`) reachable as a Tor onion
+  service — no screen, keyboard, or manual install. Built with the official
+  `pi-gen` builder: a custom `stage-drift` layers the node, an isolated venv,
+  Tor with its control port enabled, and a dedicated login-less `drift-node`
+  service account onto Raspberry Pi OS Lite (Bookworm/armhf — Pi Zero W through
+  Pi 5). Headless configuration is read once from a `drift-node.conf` on the
+  boot partition (bootstrap peer, port, optional Wi-Fi) by a one-shot
+  first-boot service that then disables itself. `pi/build.sh` runs the whole
+  build in Docker; a `pi-image` GitHub Actions workflow builds on demand and
+  attaches the image to releases. Complements the existing
+  `scripts/install-node.sh` (which sets a node up on an already-running Pi).
+  See `pi/README.md`.
+
 ---
 
 ## [0.15.0] — 2026-06-19

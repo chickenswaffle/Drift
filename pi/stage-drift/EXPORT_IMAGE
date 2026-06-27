@@ -1,0 +1,3 @@
+# Marks stage-drift as an image export point. pi-gen will turn this stage's
+# rootfs into a flashable image named "${IMG_NAME}" (see pi/config).
+IMG_SUFFIX=""
