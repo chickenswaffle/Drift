@@ -183,45 +183,41 @@ jobs:
           echo "x86 sidecar: $got2"
           echo "$got2" | grep -q "x86_64" || { echo "::error::sidecar slice is not x86_64"; exit 1; }
 
-      - name: Combine sidecars into a universal binary
-        run: |
-          cd apps/desktop/src-tauri/binaries
-          lipo -create \
-            drift-sidecar-x86_64-apple-darwin \
-            drift-sidecar-aarch64-apple-darwin \
-            -output drift-sidecar-universal-apple-darwin
-          echo "== universal sidecar =="
-          lipo -info drift-sidecar-universal-apple-darwin
-          file drift-sidecar-universal-apple-darwin
-
       - name: Install JS dependencies
         working-directory: apps/desktop
         run: npm ci || npm install
 
-      - name: Build the universal app
-        uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          projectPath: apps/desktop
-          args: --target universal-apple-darwin --config src-tauri/tauri.conf.release.json
-          releaseId: ${{ github.event.release.id }}
+      # Two native single-arch apps. PyInstaller --onefile binaries CANNOT be
+      # lipo-ed: the Python runtime archive is appended after the Mach-O, so a
+      # fused "universal" sidecar keeps only one arch's archive and the other arch
+      # loads the wrong-arch Python and dies (Broken pipe). Each dmg therefore
+      # bundles its own matching-arch sidecar via per-target builds.
+      - name: Build Apple Silicon app (arm64)
+        working-directory: apps/desktop
+        run: npm run tauri -- build --target aarch64-apple-darwin --config src-tauri/tauri.conf.release.json
 
-      - name: Upload dmg as workflow artifact
+      - name: Build Intel app (x86_64)
+        working-directory: apps/desktop
+        run: npm run tauri -- build --target x86_64-apple-darwin --config src-tauri/tauri.conf.release.json
+
+      - name: Upload dmgs as workflow artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: drift-desktop-macos-universal
-          path: apps/desktop/src-tauri/target/**/release/bundle/dmg/*.dmg
+          name: drift-desktop-macos
+          path: apps/desktop/src-tauri/target/*/release/bundle/dmg/*.dmg
           if-no-files-found: ignore
 
-      - name: Publish stable-named dmg
+      - name: Publish stable-named dmgs
         if: github.event_name == 'release'
         shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          dmg=$(find apps/desktop/src-tauri/target -path '*/release/bundle/dmg/*.dmg' | head -1)
-          echo "dmg: $dmg"
-          cp "$dmg" DRIFT-macOS.dmg
+          arm=$(find apps/desktop/src-tauri/target/aarch64-apple-darwin -path '*/release/bundle/dmg/*.dmg' | head -1)
+          intel=$(find apps/desktop/src-tauri/target/x86_64-apple-darwin -path '*/release/bundle/dmg/*.dmg' | head -1)
+          echo "arm:   $arm"
+          echo "intel: $intel"
+          cp "$arm" DRIFT-macOS-AppleSilicon.dmg
+          cp "$intel" DRIFT-macOS-Intel.dmg
           gh release upload "${{ github.event.release.tag_name }}" \
-            DRIFT-macOS.dmg --clobber
+            DRIFT-macOS-AppleSilicon.dmg DRIFT-macOS-Intel.dmg --clobber
