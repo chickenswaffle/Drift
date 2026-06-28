@@ -1,0 +1,54 @@
+name: Pi node image
+
+# Builds the flashable DRIFT mesh-node Raspberry Pi image with pi-gen.
+# Manual by default (the build takes ~30–60 min under emulation); also runs when
+# a GitHub release is published and attaches the image to that release.
+
+on:
+  workflow_dispatch:
+    inputs:
+      drift_ref:
+        description: DRIFT git ref to bake into the image
+        required: false
+        default: main
+  release:
+    types: [published]
+
+jobs:
+  build:
+    name: Build image
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: write   # attach the image to a release
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Enable ARM emulation (binfmt/qemu)
+        run: docker run --rm --privileged tonistiigi/binfmt --install arm,arm64
+
+      - name: Build the image
+        env:
+          DRIFT_REF: ${{ github.event.inputs.drift_ref || github.ref_name }}
+        run: bash pi/build.sh
+
+      - name: Collect artifact
+        id: collect
+        run: |
+          mkdir -p out
+          cp pi/deploy/* out/ 2>/dev/null || true
+          ls -lh out
+          test -n "$(ls -A out)" || { echo "no image produced"; exit 1; }
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: drift-node-image
+          path: out/*
+          if-no-files-found: error
+
+      - name: Attach to release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: out/*

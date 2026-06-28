@@ -1,0 +1,11 @@
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/
+*.log
+
+# Frozen sidecar binaries — large, per-OS, rebuilt by CI (see sidecar/build_sidecar.py)
+src-tauri/binaries/
+sidecar/build/
+sidecar/dist/
+sidecar/*.spec

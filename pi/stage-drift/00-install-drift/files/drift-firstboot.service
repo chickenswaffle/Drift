@@ -1,0 +1,14 @@
+[Unit]
+Description=DRIFT node first-boot provisioning
+Documentation=https://github.com/chickenswaffle/Drift
+After=local-fs.target
+Before=drift-node.service
+ConditionPathExists=/usr/local/sbin/drift-firstboot
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/drift-firstboot
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
