@@ -2,6 +2,22 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import { rpc, onSidecar } from "./rpc";
 import type { Status, Contacts, ChatMessage } from "./types";
 
+const VERSION = "v0.15.1";
+
+// Block-art wordmark shown on the boot screen.
+const WORDMARK = String.raw`
+ ██████╗ ██████╗ ██╗███████╗████████╗
+ ██╔══██╗██╔══██╗██║██╔════╝╚══██╔══╝
+ ██║  ██║██████╔╝██║█████╗     ██║
+ ██║  ██║██╔══██╗██║██╔══╝     ██║
+ ██████╔╝██║  ██║██║██║        ██║
+ ╚═════╝ ╚═╝  ╚═╝╚═╝╚═╝        ╚═╝`;
+
+/** Blinking terminal caret. */
+function Cursor() {
+  return <span className="cursor" aria-hidden />;
+}
+
 export function App() {
   const [status, setStatus] = useState<Status | null>(null);
   const [loading, setLoading] = useState(true);
@@ -21,18 +37,45 @@ export function App() {
     void refreshStatus();
   }, [refreshStatus]);
 
-  if (loading) return <Splash sub="connecting to local core…" />;
-  if (error) return <Splash sub={`sidecar error: ${error}`} />;
-  if (!status?.identity_exists)
-    return <Onboarding onDone={refreshStatus} />;
+  if (loading) return <Boot sub="connecting to local core" />;
+  if (error) return <Boot sub={`sidecar error: ${error}`} failed />;
+  if (!status?.identity_exists) return <Onboarding onDone={refreshStatus} />;
   return <Messenger status={status} />;
 }
 
-function Splash({ sub }: { sub: string }) {
+const BOOT_LINES = [
+  "drift core " + VERSION,
+  "spinning up local node",
+  "loading identity keyring",
+  "negotiating sealed transport",
+];
+
+function Boot({ sub, failed }: { sub: string; failed?: boolean }) {
   return (
-    <div className="splash">
-      <pre className="wordmark">{"D R I F T"}</pre>
-      <p className="muted">{sub}</p>
+    <div className="boot">
+      <pre className="ascii">{WORDMARK}</pre>
+      <div className="boot-log">
+        {BOOT_LINES.map((l, i) => (
+          <div key={i} className="boot-line" style={{ animationDelay: `${0.15 * i}s` }}>
+            <span className="ok">›</span> {l}…
+          </div>
+        ))}
+        <div
+          className={`boot-line status ${failed ? "err" : ""}`}
+          style={{ animationDelay: `${0.15 * BOOT_LINES.length}s` }}
+        >
+          {failed ? (
+            <>
+              <span className="bad">✗</span> {sub}
+            </>
+          ) : (
+            <>
+              <span className="dot-pulse" /> {sub}
+              <Cursor />
+            </>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
@@ -56,28 +99,31 @@ function Onboarding({ onDone }: { onDone: () => void }) {
   }
 
   return (
-    <div className="splash">
-      <pre className="wordmark">{"D R I F T"}</pre>
-      {!code ? (
-        <>
-          <p className="muted">
-            No accounts. No phone numbers. Your identity is a keypair generated
-            locally — it never leaves this machine.
-          </p>
-          <button className="primary" disabled={busy} onClick={generate}>
-            {busy ? "generating…" : "Generate my identity"}
-          </button>
-          {err && <p className="error">{err}</p>}
-        </>
-      ) : (
-        <>
-          <p className="muted">Your identity is ready. Share this contact code:</p>
-          <CodeBox code={code} />
-          <button className="primary" onClick={onDone}>
-            Continue
-          </button>
-        </>
-      )}
+    <div className="boot">
+      <pre className="ascii">{WORDMARK}</pre>
+      <div className="card">
+        {!code ? (
+          <>
+            <p className="muted">
+              No accounts. No phone numbers. Your identity is a keypair generated
+              locally — it never leaves this machine.
+            </p>
+            <button className="primary" disabled={busy} onClick={generate}>
+              {busy ? "generating…" : "› generate my identity"}
+            </button>
+            {err && <p className="error small">{err}</p>}
+          </>
+        ) : (
+          <>
+            <div className="label">identity ready — share this code</div>
+            <CodeBox code={code} />
+            <p />
+            <button className="primary" onClick={onDone}>
+              › continue
+            </button>
+          </>
+        )}
+      </div>
     </div>
   );
 }
@@ -142,7 +188,7 @@ function Messenger({ status }: { status: Status }) {
         append({
           convo: String(data.convo),
           dir: "sys",
-          text: `· ${data.kind}${data.detail ? ` ${data.detail}` : ""}`,
+          text: `${data.kind}${data.detail ? ` ${data.detail}` : ""}`,
           ts: Date.now(),
         });
       }
@@ -159,7 +205,7 @@ function Messenger({ status }: { status: Status }) {
       await rpc("chat_open", { contact: name, relay_url: status.relay_url });
       setOpenConvos((s) => new Set(s).add(name));
     } catch (e) {
-      append({ convo: name, dir: "sys", text: `· could not connect: ${e}`, ts: Date.now() });
+      append({ convo: name, dir: "sys", text: `could not connect: ${e}`, ts: Date.now() });
     }
   }
 
@@ -168,9 +214,14 @@ function Messenger({ status }: { status: Status }) {
     setContacts(res.contacts);
   }
 
+  const names = Object.keys(contacts);
+
   return (
     <div className="app">
       <aside className="sidebar">
+        <div className="brand">
+          DRIFT<span className="ver">{VERSION}</span>
+        </div>
         <div className="me">
           <div className="label">your contact code</div>
           <CodeBox code={myCode} />
@@ -178,13 +229,14 @@ function Messenger({ status }: { status: Status }) {
         <AddContact onAdd={addContact} />
         <div className="contacts">
           <div className="label">contacts</div>
-          {Object.keys(contacts).length === 0 && (
-            <p className="muted small">No contacts yet — add one above.</p>
+          {names.length === 0 && (
+            <p className="muted small">no contacts yet — add one above.</p>
           )}
-          {Object.keys(contacts).map((name) => (
+          {names.map((name, i) => (
             <button
               key={name}
               className={`contact ${active === name ? "active" : ""}`}
+              style={{ animationDelay: `${0.04 * i}s` }}
               onClick={() => void openChat(name)}
             >
               <span className="dot" data-on={openConvos.has(name)} />
@@ -192,7 +244,7 @@ function Messenger({ status }: { status: Status }) {
             </button>
           ))}
         </div>
-        <div className="footer muted small">relay {status.relay_url}</div>
+        <div className="footer muted">relay · {status.relay_url}</div>
       </aside>
       <main className="pane">
         {active ? (
@@ -202,7 +254,10 @@ function Messenger({ status }: { status: Status }) {
             connected={openConvos.has(active)}
           />
         ) : (
-          <div className="empty muted">Select a contact to start a conversation.</div>
+          <div className="empty">
+            <span className="blip">›</span> select a contact to open a channel
+            <Cursor />
+          </div>
         )}
       </main>
     </div>
@@ -235,7 +290,7 @@ function AddContact({ onAdd }: { onAdd: (name: string, code: string) => Promise<
         onChange={(e) => setCode(e.target.value)}
       />
       <button className="ghost" onClick={() => void submit()} disabled={!name || !code}>
-        add
+        + add
       </button>
       {err && <p className="error small">{err}</p>}
     </div>
@@ -271,22 +326,29 @@ function Chat({
     }
   }
 
+  const prefix = (dir: ChatMessage["dir"]) => (dir === "out" ? "›" : dir === "in" ? "‹" : "·");
+
   return (
     <div className="chat">
       <header className="chat-head">
-        <span className="dot" data-on={connected} /> {convo}
-        <span className="muted small">{connected ? "connected" : "connecting…"}</span>
+        <span className="dot" data-on={connected} />
+        <span className="who">{convo}</span>
+        <span className="muted small">
+          {connected ? "secure channel open" : "negotiating…"}
+        </span>
       </header>
       <div className="scroll" ref={scroller}>
         {messages.map((m, i) => (
-          <div key={i} className={`bubble ${m.dir}`}>
-            {m.text}
+          <div key={i} className={`line ${m.dir}`}>
+            <span className="pfx">{prefix(m.dir)}</span>
+            <span className="body">{m.text}</span>
           </div>
         ))}
       </div>
       <div className="composer">
+        <span className="prompt">›</span>
         <input
-          placeholder="message…"
+          placeholder="type a message…"
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
           onKeyDown={(e) => {

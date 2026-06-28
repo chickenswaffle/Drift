@@ -116,6 +116,16 @@ fn spawn_sidecar(app: &tauri::AppHandle) -> Result<Bridge, String> {
     if let Some(dir) = &cwd {
         command.current_dir(dir);
     }
+    // On Windows the sidecar is a console-subsystem executable; spawning it the
+    // normal way pops up a stray terminal window next to the app. We only ever
+    // talk to it over piped stdio, so launch it with CREATE_NO_WINDOW to keep it
+    // fully headless — no console flash, no spooky black box.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
     let mut child = command
         .spawn()
         .map_err(|e| format!("failed to spawn sidecar `{cmd}`: {e}"))?;
