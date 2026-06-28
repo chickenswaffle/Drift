@@ -35,12 +35,12 @@ jobs:
             label: windows
             stable_name: DRIFT-Setup-Windows-x64.exe
             bundle_glob: apps/desktop/src-tauri/target/release/bundle/nsis/*-setup.exe
-            updater_glob: apps/desktop/src-tauri/target/release/bundle/nsis/*-setup.nsis.zip
+            updater_find: "*-setup.nsis.zip"
             updater_stable: DRIFT-update-windows-x86_64.nsis.zip
             platform_key: windows-x86_64
           - os: ubuntu-22.04
             label: linux
-            updater_glob: apps/desktop/src-tauri/target/release/bundle/appimage/*.AppImage.tar.gz
+            updater_find: "*.AppImage.tar.gz"
             updater_stable: DRIFT-update-linux-x86_64.AppImage.tar.gz
             platform_key: linux-x86_64
     runs-on: ${{ matrix.os }}
@@ -129,7 +129,12 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          art=$(ls ${{ matrix.updater_glob }} | head -1)
+          art=$(find apps/desktop/src-tauri/target -name '${{ matrix.updater_find }}' -type f | head -1)
+          if [ -z "$art" ]; then
+            echo "::error::no updater artifact matching '${{ matrix.updater_find }}'"
+            find apps/desktop/src-tauri/target -path '*/bundle/*' -type f | sort
+            exit 1
+          fi
           echo "updater artifact: $art"
           mkdir -p sigs
           tr -d '\n' < "$art.sig" > "sigs/${{ matrix.platform_key }}.sig"
@@ -265,10 +270,15 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          arm=$(find apps/desktop/src-tauri/target/aarch64-apple-darwin -path '*/macos/*.app.tar.gz' | head -1)
-          intel=$(find apps/desktop/src-tauri/target/x86_64-apple-darwin -path '*/macos/*.app.tar.gz' | head -1)
+          arm=$(find apps/desktop/src-tauri/target/aarch64-apple-darwin -name '*.app.tar.gz' -type f | head -1)
+          intel=$(find apps/desktop/src-tauri/target/x86_64-apple-darwin -name '*.app.tar.gz' -type f | head -1)
           echo "arm updater:   $arm"
           echo "intel updater: $intel"
+          if [ -z "$arm" ] || [ -z "$intel" ]; then
+            echo "::error::missing macOS .app.tar.gz updater artifact"
+            find apps/desktop/src-tauri/target -path '*/bundle/*' -type f | sort
+            exit 1
+          fi
           mkdir -p sigs
           tr -d '\n' < "$arm.sig"   > sigs/darwin-aarch64.sig
           tr -d '\n' < "$intel.sig" > sigs/darwin-x86_64.sig
