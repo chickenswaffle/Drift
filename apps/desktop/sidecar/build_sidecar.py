@@ -37,25 +37,27 @@ def main() -> None:
     triple = os.environ.get("TARGET_TRIPLE") or host_triple()
     work = HERE / "build"
     dist = HERE / "dist"
-    subprocess.run(
-        [
-            sys.executable, "-m", "PyInstaller",
-            "--onefile", "--noconfirm", "--clean",
-            "--name", "drift-sidecar",
-            "--distpath", str(dist),
-            "--workpath", str(work),
-            "--specpath", str(HERE),
-            # drift imports several modules lazily (transport.session, crypto.panic);
-            # grab the whole package plus the websocket client so nothing is missed.
-            "--collect-submodules", "drift",
-            "--collect-submodules", "websockets",
-            "--hidden-import", "drift.transport.session",
-            "--hidden-import", "drift.crypto.panic",
-            str(ENTRY),
-        ],
-        cwd=str(REPO),
-        check=True,
-    )
+    args = [
+        sys.executable, "-m", "PyInstaller",
+        "--onefile", "--noconfirm", "--clean",
+        "--name", "drift-sidecar",
+        "--distpath", str(dist),
+        "--workpath", str(work),
+        "--specpath", str(HERE),
+        # drift imports several modules lazily (transport.session, crypto.panic);
+        # grab the whole package plus the websocket client so nothing is missed.
+        "--collect-submodules", "drift",
+        "--collect-submodules", "websockets",
+        "--hidden-import", "drift.transport.session",
+        "--hidden-import", "drift.crypto.panic",
+    ]
+    # macOS universal builds: emit a fat (x86_64 + arm64) binary in one pass.
+    # Requires every collected native lib to itself be universal2.
+    pyi_arch = os.environ.get("DRIFT_PYI_TARGET_ARCH")
+    if pyi_arch:
+        args += ["--target-arch", pyi_arch]
+    args.append(str(ENTRY))
+    subprocess.run(args, cwd=str(REPO), check=True)
     OUT.mkdir(parents=True, exist_ok=True)
     is_windows = "windows" in triple
     ext = ".exe" if is_windows else ""

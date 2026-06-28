@@ -1,14 +1,22 @@
 name: desktop-app
 
-# Builds the DRIFT desktop app installers (Windows .exe, macOS .dmg, Linux
-# .deb/.AppImage) on each OS's native runner — Windows binaries cannot be
-# cross-compiled from macOS/Linux, so this is the only path to a real installer.
+# Builds the DRIFT desktop app installers:
+#   - Windows .exe        (windows-latest)
+#   - Linux .deb/.AppImage (ubuntu-22.04)
+#   - macOS universal .dmg (macos-14 — one dmg that runs natively on both Intel
+#                           and Apple Silicon)
 #
-# On a published GitHub release the installers are attached to it, and the
-# Windows installer is *also* uploaded under a stable name
-# (DRIFT-Setup-Windows-x64.exe) so the website's download button can point at a
-# permanent URL:
-#   https://github.com/<owner>/<repo>/releases/latest/download/DRIFT-Setup-Windows-x64.exe
+# Windows binaries can't be cross-compiled, so they need a native Windows
+# runner. For macOS we build a single *universal2* app on the Apple Silicon
+# runner rather than depending on the scarce Intel (macos-13) runners: the Rust
+# side is built for both arches via `--target universal-apple-darwin`, and the
+# Python sidecar is frozen twice (arm64 natively, x86_64 under Rosetta) then
+# `lipo`-ed into a fat binary.
+#
+# On a published release each installer is also re-uploaded under a stable,
+# version-less name so the website download buttons can point at permanent URLs:
+#   /releases/latest/download/DRIFT-Setup-Windows-x64.exe
+#   /releases/latest/download/DRIFT-macOS.dmg
 
 on:
   workflow_dispatch: {}
@@ -19,6 +27,7 @@ permissions:
   contents: write
 
 jobs:
+  # ---- Windows + Linux (native, single-arch) -------------------------------
   build:
     strategy:
       fail-fast: false
@@ -28,14 +37,6 @@ jobs:
             label: windows
             stable_name: DRIFT-Setup-Windows-x64.exe
             bundle_glob: apps/desktop/src-tauri/target/release/bundle/nsis/*-setup.exe
-          - os: macos-14            # Apple Silicon (arm64)
-            label: macos-arm
-            stable_name: DRIFT-macOS-AppleSilicon.dmg
-            bundle_glob: apps/desktop/src-tauri/target/release/bundle/dmg/*.dmg
-          - os: macos-13            # Intel (x86_64)
-            label: macos-intel
-            stable_name: DRIFT-macOS-Intel.dmg
-            bundle_glob: apps/desktop/src-tauri/target/release/bundle/dmg/*.dmg
           - os: ubuntu-22.04
             label: linux
     runs-on: ${{ matrix.os }}
@@ -90,7 +91,6 @@ jobs:
         with:
           projectPath: apps/desktop
           args: --config src-tauri/tauri.conf.release.json
-          # On a release event, attach the versioned installers to it.
           releaseId: ${{ github.event.release.id }}
 
       - name: Upload installers as workflow artifacts
@@ -99,14 +99,10 @@ jobs:
           name: drift-desktop-${{ matrix.label }}
           path: |
             apps/desktop/src-tauri/target/release/bundle/nsis/*-setup.exe
-            apps/desktop/src-tauri/target/release/bundle/dmg/*.dmg
             apps/desktop/src-tauri/target/release/bundle/deb/*.deb
             apps/desktop/src-tauri/target/release/bundle/appimage/*.AppImage
           if-no-files-found: ignore
 
-      # Re-upload the platform installer under a stable, version-less name so the
-      # website download buttons can point at permanent /releases/latest/download
-      # URLs (Windows .exe, macOS Intel .dmg, macOS Apple Silicon .dmg).
       - name: Publish stable-named installer
         if: matrix.stable_name != '' && github.event_name == 'release'
         shell: bash
@@ -117,3 +113,115 @@ jobs:
           cp "$asset" "${{ matrix.stable_name }}"
           gh release upload "${{ github.event.release.tag_name }}" \
             "${{ matrix.stable_name }}" --clobber
+
+  # ---- macOS universal (Intel + Apple Silicon in one dmg) ------------------
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Rust + both Apple targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin,aarch64-apple-darwin
+
+      - name: Ensure Rosetta 2 (to run the x86_64 Python)
+        run: sudo softwareupdate --install-rosetta --agree-to-license || true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Freeze arm64 sidecar (native)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e . pyinstaller
+          TARGET_TRIPLE=aarch64-apple-darwin python apps/desktop/sidecar/build_sidecar.py
+
+      - name: Install uv (to provision an x86_64 interpreter)
+        uses: astral-sh/setup-uv@v5
+
+      - name: Freeze x86_64 sidecar (real x86_64 Python under Rosetta)
+        run: |
+          # uv provisions a genuine x86_64 python-build-standalone interpreter, but
+          # its resolver mis-tags x86_64-on-arm and tries to build deps from source
+          # (astral-sh/uv#17851). So provision with uv, then install with *plain
+          # pip* (--seed gives the venv a pip), which reads the real interpreter
+          # tags and pulls the prebuilt x86_64 wheels.
+          uv python install cpython-3.11-macos-x86_64-none
+          uv venv --seed --python cpython-3.11-macos-x86_64-none /tmp/venv-x86
+          got=$(/tmp/venv-x86/bin/python -c "import platform; print(platform.machine())")
+          echo "x86 venv arch: $got"
+          [ "$got" = "x86_64" ] || { echo "::error::venv is $got, expected x86_64"; exit 1; }
+          # cryptography & pynacl ship universal2-only macOS wheels that the x86_64
+          # standalone interpreter won't auto-match, so pip tries to source-build
+          # cryptography (needs OpenSSL, fails). Install those two explicitly by
+          # platform — the universal2 wheel carries the x86_64 slice PyInstaller
+          # thins out — then let everything else resolve to its native x86_64 wheel
+          # (already-satisfied crypto deps won't be source-built).
+          export SYSTEM_VERSION_COMPAT=0
+          SITE=$(/tmp/venv-x86/bin/python -c "import sysconfig; print(sysconfig.get_paths()['purelib'])")
+          echo "x86 site-packages: $SITE"
+          /tmp/venv-x86/bin/python -m pip install --upgrade pip
+          # --no-deps: only fetch these two universal2 abi3 wheels; their deps
+          # (notably cffi, which is not abi3) are installed natively in the next step.
+          /tmp/venv-x86/bin/python -m pip install --only-binary=:all: --no-deps \
+            --platform macosx_10_12_universal2 --implementation cp \
+            --python-version 3.11 --abi abi3 --target "$SITE" --upgrade \
+            cryptography PyNaCl
+          test -f "$SITE/cryptography/hazmat/bindings/_rust.abi3.so" \
+            || { echo "::error::universal2 cryptography wheel did not install"; exit 1; }
+          lipo -info "$SITE/cryptography/hazmat/bindings/_rust.abi3.so" || true
+          /tmp/venv-x86/bin/python -m pip install -e . pyinstaller
+          TARGET_TRIPLE=x86_64-apple-darwin \
+            /tmp/venv-x86/bin/python apps/desktop/sidecar/build_sidecar.py
+          got2=$(file -b apps/desktop/src-tauri/binaries/drift-sidecar-x86_64-apple-darwin)
+          echo "x86 sidecar: $got2"
+          echo "$got2" | grep -q "x86_64" || { echo "::error::sidecar slice is not x86_64"; exit 1; }
+
+      - name: Combine sidecars into a universal binary
+        run: |
+          cd apps/desktop/src-tauri/binaries
+          lipo -create \
+            drift-sidecar-x86_64-apple-darwin \
+            drift-sidecar-aarch64-apple-darwin \
+            -output drift-sidecar-universal-apple-darwin
+          echo "== universal sidecar =="
+          lipo -info drift-sidecar-universal-apple-darwin
+          file drift-sidecar-universal-apple-darwin
+
+      - name: Install JS dependencies
+        working-directory: apps/desktop
+        run: npm ci || npm install
+
+      - name: Build the universal app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: apps/desktop
+          args: --target universal-apple-darwin --config src-tauri/tauri.conf.release.json
+          releaseId: ${{ github.event.release.id }}
+
+      - name: Upload dmg as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: drift-desktop-macos-universal
+          path: apps/desktop/src-tauri/target/**/release/bundle/dmg/*.dmg
+          if-no-files-found: ignore
+
+      - name: Publish stable-named dmg
+        if: github.event_name == 'release'
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          dmg=$(find apps/desktop/src-tauri/target -path '*/release/bundle/dmg/*.dmg' | head -1)
+          echo "dmg: $dmg"
+          cp "$dmg" DRIFT-macOS.dmg
+          gh release upload "${{ github.event.release.tag_name }}" \
+            DRIFT-macOS.dmg --clobber
