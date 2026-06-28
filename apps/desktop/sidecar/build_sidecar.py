@@ -62,7 +62,7 @@ def main() -> None:
     src = dist / f"drift-sidecar{ext}"
     dst = OUT / f"drift-sidecar-{triple}{ext}"
     shutil.copy2(src, dst)
-    print(f"sidecar binary → {dst}")
+    print(f"sidecar binary -> {dst}")
 
 
 if __name__ == "__main__":
