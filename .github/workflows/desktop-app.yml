@@ -142,16 +142,23 @@ jobs:
           pip install -e . pyinstaller
           TARGET_TRIPLE=aarch64-apple-darwin python apps/desktop/sidecar/build_sidecar.py
 
-      - name: Freeze x86_64 sidecar (under Rosetta)
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Freeze x86_64 sidecar (real x86_64 Python under Rosetta)
         run: |
-          curl -sSL -o /tmp/python-x86.pkg https://www.python.org/ftp/python/3.11.9/python-3.11.9-macos11.pkg
-          sudo installer -pkg /tmp/python-x86.pkg -target /
-          PY=/Library/Frameworks/Python.framework/Versions/3.11/bin/python3
-          arch -x86_64 "$PY" -m venv /tmp/venv-x86
-          arch -x86_64 /tmp/venv-x86/bin/python -m pip install --upgrade pip
-          arch -x86_64 /tmp/venv-x86/bin/python -m pip install -e . pyinstaller
+          # Use a true x86_64-only interpreter (python-build-standalone via uv) so
+          # pip resolves x86_64 wheels. A universal2 python reports arm64 platform
+          # tags and pulls arm64 .so's, which PyInstaller can't retarget to x86_64.
+          uv python install cpython-3.11-macos-x86_64-none
+          uv venv --python cpython-3.11-macos-x86_64-none /tmp/venv-x86
+          got=$(/tmp/venv-x86/bin/python -c "import platform; print(platform.machine())")
+          echo "x86 venv arch: $got"
+          [ "$got" = "x86_64" ] || { echo "::error::venv is $got, expected x86_64"; exit 1; }
+          uv pip install --python /tmp/venv-x86/bin/python -e . pyinstaller
           arch -x86_64 env TARGET_TRIPLE=x86_64-apple-darwin \
             /tmp/venv-x86/bin/python apps/desktop/sidecar/build_sidecar.py
+          file apps/desktop/src-tauri/binaries/drift-sidecar-x86_64-apple-darwin
 
       - name: Combine sidecars into a universal binary
         run: |
