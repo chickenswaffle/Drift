@@ -167,7 +167,9 @@ jobs:
           SITE=$(/tmp/venv-x86/bin/python -c "import sysconfig; print(sysconfig.get_paths()['purelib'])")
           echo "x86 site-packages: $SITE"
           /tmp/venv-x86/bin/python -m pip install --upgrade pip
-          /tmp/venv-x86/bin/python -m pip install --only-binary=:all: \
+          # --no-deps: only fetch these two universal2 abi3 wheels; their deps
+          # (notably cffi, which is not abi3) are installed natively in the next step.
+          /tmp/venv-x86/bin/python -m pip install --only-binary=:all: --no-deps \
             --platform macosx_10_12_universal2 --implementation cp \
             --python-version 3.11 --abi abi3 --target "$SITE" --upgrade \
             cryptography PyNaCl
