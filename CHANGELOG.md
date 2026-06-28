@@ -9,7 +9,35 @@ DRIFT uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Planned
+- **Phase 13 — native mobile + shared Rust core (design).** The remaining
+  Phase 13 scope (`docs/app-plan.md`): native iOS/Android apps and a shared Rust
+  `drift-core` that the desktop app's Python sidecar is later swapped out for.
+  The plan confronts the mobile threat-model tensions head-on — notably
+  push-free-by-default delivery, to avoid leaking timing metadata to APNs/FCM.
+
 ### Added
+- **Desktop app (`apps/desktop/`) — Phase 13c, first cut.** A native desktop
+  client (Tauri + React) for people who don't live in a terminal. It adds **no
+  cryptography**: a new `drift.sidecar` module exposes the existing, audited
+  Python core (`drift.storage` + `drift.transport.Session`) over JSON-RPC on
+  stdio, and the Tauri shell spawns it as a child, bridging the UI's `rpc` calls
+  and streaming incoming messages back as events. Implemented end-to-end:
+  identity onboarding, contact add/list, and live 1:1 chat over the relay (full
+  X3DH + Double Ratchet + stealth addressing, verified by a two-party
+  round-trip). Per `docs/app-plan.md`, the Python sidecar is a deliberate bridge
+  — it reuses the proven crypto now and is later replaced by native `drift-core`
+  under the same UI. Tor, the vault/duress flow, and groups/rooms are not yet
+  wired into the GUI. See `apps/desktop/README.md`.
+- **Self-contained installers + one-click download.** The sidecar is frozen with
+  PyInstaller (`apps/desktop/sidecar/`) and bundled as a Tauri `externalBin`, so
+  the installer needs **no system Python**. A `desktop-app` GitHub Actions
+  workflow builds Windows `.exe`, macOS `.dmg` (unsigned), and Linux
+  `.deb`/`.AppImage` on native runners (Windows can't be cross-compiled), and on
+  a release uploads the Windows installer under a stable name
+  (`DRIFT-Setup-Windows-x64.exe`). The DRIFT website gains a **"download for
+  Windows"** button next to the Codespaces launcher pointing at the latest
+  release. App icons are generated from `assets/icon-source.png`.
 - **Raspberry Pi node image (`pi/`).** A flashable Raspberry Pi OS image that
   boots straight into a DRIFT mesh node (`relay.node`) reachable as a Tor onion
   service — no screen, keyboard, or manual install. Built with the official
