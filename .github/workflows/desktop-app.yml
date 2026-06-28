@@ -157,13 +157,23 @@ jobs:
           got=$(/tmp/venv-x86/bin/python -c "import platform; print(platform.machine())")
           echo "x86 venv arch: $got"
           [ "$got" = "x86_64" ] || { echo "::error::venv is $got, expected x86_64"; exit 1; }
-          # python-build-standalone reports a capped macOS version, so pip judged
-          # cryptography's macosx_10_12 universal2 wheel "too new" and source-built
-          # it (which needs OpenSSL and fails). SYSTEM_VERSION_COMPAT=0 surfaces the
-          # real OS version so the universal2 wheel matches; every other native dep
-          # (pydantic-core, cffi, argon2, websockets) has a prebuilt x86_64 wheel.
+          # cryptography & pynacl ship universal2-only macOS wheels that the x86_64
+          # standalone interpreter won't auto-match, so pip tries to source-build
+          # cryptography (needs OpenSSL, fails). Install those two explicitly by
+          # platform — the universal2 wheel carries the x86_64 slice PyInstaller
+          # thins out — then let everything else resolve to its native x86_64 wheel
+          # (already-satisfied crypto deps won't be source-built).
           export SYSTEM_VERSION_COMPAT=0
+          SITE=$(/tmp/venv-x86/bin/python -c "import sysconfig; print(sysconfig.get_paths()['purelib'])")
+          echo "x86 site-packages: $SITE"
           /tmp/venv-x86/bin/python -m pip install --upgrade pip
+          /tmp/venv-x86/bin/python -m pip install --only-binary=:all: \
+            --platform macosx_10_12_universal2 --implementation cp \
+            --python-version 3.11 --abi abi3 --target "$SITE" --upgrade \
+            cryptography PyNaCl
+          test -f "$SITE/cryptography/hazmat/bindings/_rust.abi3.so" \
+            || { echo "::error::universal2 cryptography wheel did not install"; exit 1; }
+          lipo -info "$SITE/cryptography/hazmat/bindings/_rust.abi3.so" || true
           /tmp/venv-x86/bin/python -m pip install -e . pyinstaller
           TARGET_TRIPLE=x86_64-apple-darwin \
             /tmp/venv-x86/bin/python apps/desktop/sidecar/build_sidecar.py
