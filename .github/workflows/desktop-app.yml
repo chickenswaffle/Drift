@@ -157,6 +157,12 @@ jobs:
           got=$(/tmp/venv-x86/bin/python -c "import platform; print(platform.machine())")
           echo "x86 venv arch: $got"
           [ "$got" = "x86_64" ] || { echo "::error::venv is $got, expected x86_64"; exit 1; }
+          # python-build-standalone reports a capped macOS version, so pip judged
+          # cryptography's macosx_10_12 universal2 wheel "too new" and source-built
+          # it (which needs OpenSSL and fails). SYSTEM_VERSION_COMPAT=0 surfaces the
+          # real OS version so the universal2 wheel matches; every other native dep
+          # (pydantic-core, cffi, argon2, websockets) has a prebuilt x86_64 wheel.
+          export SYSTEM_VERSION_COMPAT=0
           /tmp/venv-x86/bin/python -m pip install --upgrade pip
           /tmp/venv-x86/bin/python -m pip install -e . pyinstaller
           TARGET_TRIPLE=x86_64-apple-darwin \
