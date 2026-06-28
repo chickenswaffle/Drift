@@ -88,19 +88,15 @@ jobs:
         working-directory: apps/desktop
         run: npm ci || npm install
 
+      # Direct CLI build (not tauri-action): tauri-action removes the signed
+      # updater artifacts (.nsis.zip / .AppImage.tar.gz) after building, before
+      # our staging step can grab them. The CLI leaves them in the bundle dir.
       - name: Build the app (bundles the frozen sidecar)
-        uses: tauri-apps/tauri-action@v0
+        working-directory: apps/desktop
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        with:
-          projectPath: apps/desktop
-          args: --config src-tauri/tauri.conf.release.json
-          releaseId: ${{ github.event.release.id }}
-          # the `manifest` job builds the authoritative latest.json from all
-          # platforms — don't let each matrix job upload a partial one.
-          includeUpdaterJson: false
+        run: npm run tauri -- build --config src-tauri/tauri.conf.release.json
 
       - name: Upload installers as workflow artifacts
         uses: actions/upload-artifact@v4
