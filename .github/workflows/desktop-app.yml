@@ -26,8 +26,16 @@ jobs:
         include:
           - os: windows-latest
             label: windows
-          - os: macos-latest
-            label: macos
+            stable_name: DRIFT-Setup-Windows-x64.exe
+            bundle_glob: apps/desktop/src-tauri/target/release/bundle/nsis/*-setup.exe
+          - os: macos-14            # Apple Silicon (arm64)
+            label: macos-arm
+            stable_name: DRIFT-macOS-AppleSilicon.dmg
+            bundle_glob: apps/desktop/src-tauri/target/release/bundle/dmg/*.dmg
+          - os: macos-13            # Intel (x86_64)
+            label: macos-intel
+            stable_name: DRIFT-macOS-Intel.dmg
+            bundle_glob: apps/desktop/src-tauri/target/release/bundle/dmg/*.dmg
           - os: ubuntu-22.04
             label: linux
     runs-on: ${{ matrix.os }}
@@ -96,13 +104,16 @@ jobs:
             apps/desktop/src-tauri/target/release/bundle/appimage/*.AppImage
           if-no-files-found: ignore
 
-      - name: Publish stable-named Windows installer
-        if: matrix.label == 'windows' && github.event_name == 'release'
+      # Re-upload the platform installer under a stable, version-less name so the
+      # website download buttons can point at permanent /releases/latest/download
+      # URLs (Windows .exe, macOS Intel .dmg, macOS Apple Silicon .dmg).
+      - name: Publish stable-named installer
+        if: matrix.stable_name != '' && github.event_name == 'release'
         shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          exe=$(ls apps/desktop/src-tauri/target/release/bundle/nsis/*-setup.exe | head -1)
-          cp "$exe" DRIFT-Setup-Windows-x64.exe
+          asset=$(ls ${{ matrix.bundle_glob }} | head -1)
+          cp "$asset" "${{ matrix.stable_name }}"
           gh release upload "${{ github.event.release.tag_name }}" \
-            DRIFT-Setup-Windows-x64.exe --clobber
+            "${{ matrix.stable_name }}" --clobber
