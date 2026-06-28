@@ -1,22 +1,20 @@
 name: desktop-app
 
 # Builds the DRIFT desktop app installers:
-#   - Windows .exe        (windows-latest)
+#   - Windows .exe         (windows-latest)
 #   - Linux .deb/.AppImage (ubuntu-22.04)
-#   - macOS universal .dmg (macos-14 — one dmg that runs natively on both Intel
-#                           and Apple Silicon)
+#   - macOS .dmg ×2        (macos-14 — separate native Intel + Apple Silicon
+#                           builds; PyInstaller one-file sidecars can't be lipo-ed)
 #
-# Windows binaries can't be cross-compiled, so they need a native Windows
-# runner. For macOS we build a single *universal2* app on the Apple Silicon
-# runner rather than depending on the scarce Intel (macos-13) runners: the Rust
-# side is built for both arches via `--target universal-apple-darwin`, and the
-# Python sidecar is frozen twice (arm64 natively, x86_64 under Rosetta) then
-# `lipo`-ed into a fat binary.
-#
-# On a published release each installer is also re-uploaded under a stable,
-# version-less name so the website download buttons can point at permanent URLs:
+# On a published release each installer is re-uploaded under a stable,
+# version-less name for the website download buttons, e.g.:
 #   /releases/latest/download/DRIFT-Setup-Windows-x64.exe
-#   /releases/latest/download/DRIFT-macOS.dmg
+#   /releases/latest/download/DRIFT-macOS-AppleSilicon.dmg
+#   /releases/latest/download/DRIFT-macOS-Intel.dmg
+#
+# Auto-update: every build also emits a signed updater artifact (.sig); the
+# `manifest` job assembles them into a `latest.json` the in-app updater reads.
+# Signing uses the TAURI_SIGNING_PRIVATE_KEY/_PASSWORD repo secrets.
 
 on:
   workflow_dispatch: {}
@@ -37,8 +35,14 @@ jobs:
             label: windows
             stable_name: DRIFT-Setup-Windows-x64.exe
             bundle_glob: apps/desktop/src-tauri/target/release/bundle/nsis/*-setup.exe
+            updater_glob: apps/desktop/src-tauri/target/release/bundle/nsis/*-setup.nsis.zip
+            updater_stable: DRIFT-update-windows-x86_64.nsis.zip
+            platform_key: windows-x86_64
           - os: ubuntu-22.04
             label: linux
+            updater_glob: apps/desktop/src-tauri/target/release/bundle/appimage/*.AppImage.tar.gz
+            updater_stable: DRIFT-update-linux-x86_64.AppImage.tar.gz
+            platform_key: linux-x86_64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -88,10 +92,15 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: apps/desktop
           args: --config src-tauri/tauri.conf.release.json
           releaseId: ${{ github.event.release.id }}
+          # the `manifest` job builds the authoritative latest.json from all
+          # platforms — don't let each matrix job upload a partial one.
+          includeUpdaterJson: false
 
       - name: Upload installers as workflow artifacts
         uses: actions/upload-artifact@v4
@@ -114,7 +123,30 @@ jobs:
           gh release upload "${{ github.event.release.tag_name }}" \
             "${{ matrix.stable_name }}" --clobber
 
-  # ---- macOS universal (Intel + Apple Silicon in one dmg) ------------------
+      - name: Stage updater artifact + signature
+        if: matrix.platform_key != ''
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          art=$(ls ${{ matrix.updater_glob }} | head -1)
+          echo "updater artifact: $art"
+          mkdir -p sigs
+          tr -d '\n' < "$art.sig" > "sigs/${{ matrix.platform_key }}.sig"
+          if [ "${{ github.event_name }}" = "release" ]; then
+            cp "$art" "${{ matrix.updater_stable }}"
+            gh release upload "${{ github.event.release.tag_name }}" "${{ matrix.updater_stable }}" --clobber
+          fi
+
+      - name: Upload signature for the manifest job
+        if: matrix.platform_key != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: sig-${{ matrix.label }}
+          path: sigs/*.sig
+          if-no-files-found: error
+
+  # ---- macOS (separate native Intel + Apple Silicon builds) ----------------
   macos:
     runs-on: macos-14
     steps:
@@ -194,10 +226,16 @@ jobs:
       # bundles its own matching-arch sidecar via per-target builds.
       - name: Build Apple Silicon app (arm64)
         working-directory: apps/desktop
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npm run tauri -- build --target aarch64-apple-darwin --config src-tauri/tauri.conf.release.json
 
       - name: Build Intel app (x86_64)
         working-directory: apps/desktop
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npm run tauri -- build --target x86_64-apple-darwin --config src-tauri/tauri.conf.release.json
 
       - name: Upload dmgs as workflow artifacts
@@ -221,3 +259,67 @@ jobs:
           cp "$intel" DRIFT-macOS-Intel.dmg
           gh release upload "${{ github.event.release.tag_name }}" \
             DRIFT-macOS-AppleSilicon.dmg DRIFT-macOS-Intel.dmg --clobber
+
+      - name: Stage macOS updater artifacts + signatures
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          arm=$(find apps/desktop/src-tauri/target/aarch64-apple-darwin -path '*/macos/*.app.tar.gz' | head -1)
+          intel=$(find apps/desktop/src-tauri/target/x86_64-apple-darwin -path '*/macos/*.app.tar.gz' | head -1)
+          echo "arm updater:   $arm"
+          echo "intel updater: $intel"
+          mkdir -p sigs
+          tr -d '\n' < "$arm.sig"   > sigs/darwin-aarch64.sig
+          tr -d '\n' < "$intel.sig" > sigs/darwin-x86_64.sig
+          if [ "${{ github.event_name }}" = "release" ]; then
+            cp "$arm"   DRIFT-update-darwin-aarch64.app.tar.gz
+            cp "$intel" DRIFT-update-darwin-x86_64.app.tar.gz
+            gh release upload "${{ github.event.release.tag_name }}" \
+              DRIFT-update-darwin-aarch64.app.tar.gz DRIFT-update-darwin-x86_64.app.tar.gz --clobber
+          fi
+
+      - name: Upload macOS signatures for the manifest job
+        uses: actions/upload-artifact@v4
+        with:
+          name: sig-macos
+          path: sigs/*.sig
+          if-no-files-found: error
+
+  # ---- assemble the updater manifest from every platform's signature -------
+  manifest:
+    needs: [build, macos]
+    if: github.event_name == 'release'
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Download all signatures
+        uses: actions/download-artifact@v4
+        with:
+          pattern: sig-*
+          path: sigs
+          merge-multiple: true
+
+      - name: Assemble and upload latest.json
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.event.release.tag_name }}"
+          VER="${TAG#v}"
+          BASE="https://github.com/${{ github.repository }}/releases/latest/download"
+          sig() { cat "sigs/$1.sig"; }
+          cat > latest.json <<EOF
+          {
+            "version": "$VER",
+            "notes": "DRIFT $TAG — see the release page for details.",
+            "pub_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "platforms": {
+              "darwin-aarch64": { "signature": "$(sig darwin-aarch64)", "url": "$BASE/DRIFT-update-darwin-aarch64.app.tar.gz" },
+              "darwin-x86_64":  { "signature": "$(sig darwin-x86_64)",  "url": "$BASE/DRIFT-update-darwin-x86_64.app.tar.gz" },
+              "windows-x86_64": { "signature": "$(sig windows-x86_64)", "url": "$BASE/DRIFT-update-windows-x86_64.nsis.zip" },
+              "linux-x86_64":   { "signature": "$(sig linux-x86_64)",   "url": "$BASE/DRIFT-update-linux-x86_64.AppImage.tar.gz" }
+            }
+          }
+          EOF
+          echo "=== latest.json ===" ; cat latest.json
+          python3 -c "import json; json.load(open('latest.json')); print('valid json')"
+          gh release upload "$TAG" latest.json --clobber -R "${{ github.repository }}"

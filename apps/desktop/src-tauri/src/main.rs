@@ -172,6 +172,10 @@ fn spawn_sidecar(app: &tauri::AppHandle) -> Result<Bridge, String> {
 
 fn main() {
     tauri::Builder::default()
+        // Opt-in auto-update: the UI drives the check/download/install flow; these
+        // plugins expose it and let us relaunch into the new version.
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .setup(|app| {
             let bridge = spawn_sidecar(&app.handle())?;
             app.manage(bridge);

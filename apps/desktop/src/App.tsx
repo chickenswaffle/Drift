@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { rpc, onSidecar } from "./rpc";
+import { Updater } from "./Updater";
 import type { Status, Contacts, ChatMessage } from "./types";
 
-const VERSION = "v0.15.4";
+const VERSION = "v0.15.5";
 
 // Block-art wordmark shown on the boot screen.
 const WORDMARK = String.raw`
@@ -244,6 +245,7 @@ function Messenger({ status }: { status: Status }) {
             </button>
           ))}
         </div>
+        <Updater current={VERSION} />
         <div className="footer muted">relay · {status.relay_url}</div>
       </aside>
       <main className="pane">

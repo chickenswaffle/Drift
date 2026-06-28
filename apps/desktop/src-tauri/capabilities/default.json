@@ -3,5 +3,9 @@
   "identifier": "default",
   "description": "Core permissions for the main DRIFT window (events + the rpc bridge).",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": [
+    "core:default",
+    "updater:default",
+    "process:default"
+  ]
 }
