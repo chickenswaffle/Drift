@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import { rpc, onSidecar } from "./rpc";
 import type { Status, Contacts, ChatMessage } from "./types";
 
-const VERSION = "v0.15.2";
+const VERSION = "v0.15.3";
 
 // Block-art wordmark shown on the boot screen.
 const WORDMARK = String.raw`
