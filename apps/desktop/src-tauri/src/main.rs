@@ -6,10 +6,10 @@
 // Unsolicited sidecar events (incoming messages, transport status) are
 // forwarded to the UI as a Tauri `"sidecar"` event.
 //
-// The whole point of the Phase 13 plan: one audited crypto implementation. The
-// desktop app is a *view* over the existing Python core, exactly like the CLI
-// and TUI — later the sidecar is swapped for a native Rust `drift-core` under
-// the same UI, with no UI rewrite.
+// The whole point of the Phase 13 plan: one internally reviewed crypto
+// implementation. The desktop app is a *view* over the existing Python core,
+// exactly like the CLI and TUI — later the sidecar is swapped for a native
+// Rust `drift-core` under the same UI, with no UI rewrite.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -66,14 +66,59 @@ impl Bridge {
     }
 }
 
-/// The single command the web UI calls. `method`/`params` are forwarded
-/// verbatim to the sidecar; `result` (or `error`) comes straight back.
+/// Every sidecar method the web UI may call. Anything else is rejected here in
+/// the shell, so even a compromised webview cannot probe the sidecar surface
+/// beyond what the UI legitimately uses.
+const ALLOWED_METHODS: &[&str] = &[
+    "ping",
+    "status",
+    "init",
+    "whoami",
+    "contacts_list",
+    "contacts_add",
+    "contacts_remove",
+    "safety_number",
+    "fmd_get",
+    "fmd_set",
+    "cover_get",
+    "cover_set",
+    "lock",
+    "unlock",
+    "vault_create",
+    "panic_lock",
+    "chat_open",
+    "chat_send",
+    "chat_close",
+    "chat_burn",
+    "channels_list",
+    "channel_create",
+    "channel_join",
+    "room_create",
+    "room_join",
+    "room_invite",
+    "room_rotate",
+    "room_leave",
+    "groups_list",
+    "group_create",
+    "group_add",
+    "group_remove",
+    "invite_create",
+    "invite_resolve",
+    "invite_extinguish",
+];
+
+/// The single command the web UI calls. `method` is checked against the
+/// allowlist above; `params` are forwarded to the sidecar and `result` (or
+/// `error`) comes straight back.
 #[tauri::command]
 async fn rpc(
     state: tauri::State<'_, Bridge>,
     method: String,
     params: Value,
 ) -> Result<Value, String> {
+    if !ALLOWED_METHODS.contains(&method.as_str()) {
+        return Err(format!("method not allowed: {method}"));
+    }
     state.call(method, params).await
 }
 
@@ -190,8 +235,9 @@ fn toggle_main(app: &tauri::AppHandle) {
 fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     let show = MenuItem::with_id(app, "show", "Show / Hide", true, None::<&str>)?;
     let lock = MenuItem::with_id(app, "lock", "Lock vault", true, None::<&str>)?;
+    let panic = MenuItem::with_id(app, "panic", "Panic lock", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit DRIFT", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&show, &lock, &quit])?;
+    let menu = Menu::with_items(app, &[&show, &lock, &panic, &quit])?;
 
     let mut builder = TrayIconBuilder::new()
         .menu(&menu)
@@ -201,6 +247,9 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
             "show" => toggle_main(app),
             "lock" => {
                 let _ = app.emit("menu:lock", ());
+            }
+            "panic" => {
+                let _ = app.emit("menu:panic", ());
             }
             "quit" => app.exit(0),
             _ => {}
@@ -231,6 +280,20 @@ fn main() {
         .plugin(tauri_plugin_process::init())
         // Native notifications for incoming messages (fired from the UI).
         .plugin(tauri_plugin_notification::init())
+        // Global panic shortcut: works even when the window is hidden/unfocused.
+        // The UI owns the actual lock (it calls the sidecar's `panic_lock`);
+        // this only emits the event, mirroring the tray's division of labor.
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_shortcuts(["CmdOrCtrl+Shift+L"])
+                .expect("valid panic shortcut")
+                .with_handler(|app, _shortcut, event| {
+                    if event.state == tauri_plugin_global_shortcut::ShortcutState::Pressed {
+                        let _ = app.emit("menu:panic", ());
+                    }
+                })
+                .build(),
+        )
         .setup(|app| {
             let bridge = spawn_sidecar(&app.handle())?;
             app.manage(bridge);

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { rpc } from "./rpc";
 import { Updater } from "./Updater";
+import { copyText } from "./util";
 import type { Contacts, Status } from "./types";
 
 // Native notifications are opt-*out* — on unless the user turns them off. The
@@ -80,6 +81,7 @@ export function Settings({
         <VerifySection contacts={contacts} />
         <FmdSection currentRate={status.fmd_rate} />
         <NotifySection />
+        <ClipboardSection />
 
         <section className="setting">
           <div className="label">updates</div>
@@ -250,7 +252,7 @@ function SafetyNumber({ value }: { value: string }) {
       className="codebox safety"
       title="click to copy"
       onClick={() => {
-        void navigator.clipboard.writeText(value);
+        void copyText(value);
         setCopied(true);
         setTimeout(() => setCopied(false), 1200);
       }}
@@ -301,6 +303,38 @@ function FmdSection({ currentRate }: { currentRate: number }) {
       </div>
       <p className="muted small">{note}</p>
       {err && <p className="error small">{err}</p>}
+    </section>
+  );
+}
+
+// Clipboard clearing is opt-*in*: silently blanking the clipboard surprises
+// people, but codes and safety numbers sitting in an OS clipboard forever is
+// its own leak. The actual timer lives in util.copyText.
+const CLIPBOARD_CLEAR_KEY = "drift.clipboard_clear";
+
+function ClipboardSection() {
+  const [on, setOn] = useState<boolean>(
+    () => localStorage.getItem(CLIPBOARD_CLEAR_KEY) === "1",
+  );
+  return (
+    <section className="setting">
+      <div className="label">clipboard</div>
+      <label className="toggle">
+        <input
+          type="checkbox"
+          checked={on}
+          onChange={() => {
+            const next = !on;
+            setOn(next);
+            localStorage.setItem(CLIPBOARD_CLEAR_KEY, next ? "1" : "0");
+          }}
+        />
+        clear copied codes from the clipboard after 30 seconds
+      </label>
+      <p className="muted small">
+        Best-effort: only clears if the clipboard still holds what DRIFT copied,
+        and some OS clipboard managers keep history DRIFT can&apos;t reach.
+      </p>
     </section>
   );
 }

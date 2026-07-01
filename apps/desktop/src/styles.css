@@ -496,8 +496,26 @@ input::placeholder { color: var(--muted); }
 }
 ::-webkit-scrollbar-thumb:hover { background: var(--green-dim); }
 
+/* ---------- per-line copy (explicit — a whole-line click never touches the
+   clipboard; plaintext only leaves the app when the user aims at this) ------ */
+.line .line-copy {
+  flex: none;
+  align-self: center;
+  margin-left: 10px;
+  padding: 0 6px;
+  background: none;
+  border: 1px solid var(--line-soft);
+  border-radius: 3px;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 10px;
+  cursor: pointer;
+  visibility: hidden;
+}
+.line:hover .line-copy { visibility: visible; }
+.line .line-copy:hover { color: var(--text); border-color: var(--line); }
+
 /* ---------- message timestamp ---------- */
-.line { cursor: pointer; }
 .line .ts {
   margin-left: auto;
   padding-left: 10px;

@@ -17,7 +17,7 @@ import type {
   Status,
 } from "./types";
 
-const VERSION = "v0.17.0";
+const VERSION = "v0.18.0";
 
 // Block-art wordmark shown on the boot screen.
 const WORDMARK = String.raw`

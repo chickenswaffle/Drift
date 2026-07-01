@@ -4,10 +4,10 @@ drift.sidecar — a JSON-RPC-over-stdio bridge for GUI front-ends.
 This is the seam the desktop app (``apps/desktop/``, Tauri + React) talks to.
 The Tauri shell spawns ``python -m drift.sidecar`` as a child process and
 exchanges newline-delimited JSON over its stdin/stdout. The sidecar wraps the
-*existing, audited* Python core (``drift.storage`` + ``drift.transport``) — it
-adds **no** cryptography of its own. Per AGENTS.md this keeps a single crypto
-implementation: the GUI is just another "view" over ``drift.storage``, exactly
-like the CLI and the TUI.
+*existing, internally reviewed* Python core (``drift.storage`` +
+``drift.transport``) — it adds **no** cryptography of its own. Per AGENTS.md
+this keeps a single crypto implementation: the GUI is just another "view" over
+``drift.storage``, exactly like the CLI and the TUI.
 
 Wire protocol (one JSON object per line, UTF-8):
 
@@ -28,9 +28,9 @@ console stdin pipe) and lines are handed to the loop via a thread-safe queue.
 never interleave.
 
 This module exposes 1:1 chat, sovereign rooms, broadcast channels and groups,
-plus identity/contact/vault management — all as thin wrappers over the *existing,
-audited* core (``drift.crypto.*``, ``drift.storage``, ``drift.transport``). It
-still adds no cryptography of its own. Beacon is wired in a later sub-phase.
+plus identity/contact/vault management — all as thin wrappers over the
+*existing, internally reviewed* core (``drift.crypto.*``, ``drift.storage``,
+``drift.transport``). It still adds no cryptography of its own.
 """
 
 from __future__ import annotations
@@ -112,7 +112,9 @@ class _Conversation:
         except asyncio.CancelledError:  # normal on close
             raise
         except Exception as exc:  # surface, don't crash the whole bridge
-            logger.exception("chat reader for %s failed", self.convo)
+            # No convo name in the log line: stderr is inherited by the shell
+            # process and may land in terminal scrollback or system logs.
+            logger.exception("chat reader failed")
             _emit_event("chat_event", {"convo": self.convo, "kind": "error", "detail": str(exc)})
 
     async def send(self, text: str) -> None:
@@ -130,7 +132,7 @@ class _Conversation:
         try:
             await self.session.__aexit__(None, None, None)
         except Exception:
-            logger.exception("error closing session for %s", self.convo)
+            logger.exception("error closing session")
 
 
 class _RoomConversation:
@@ -163,7 +165,7 @@ class _RoomConversation:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            logger.exception("room reader for %s failed", self.convo)
+            logger.exception("room reader failed")
             _emit_event("chat_event", {"convo": self.convo, "kind": "error", "detail": str(exc)})
 
     async def send(self, text: str) -> None:
@@ -183,7 +185,7 @@ class _RoomConversation:
         try:
             await self.session.__aexit__(None, None, None)
         except Exception:
-            logger.exception("error closing room %s", self.convo)
+            logger.exception("error closing room")
 
 
 class _GroupConversation:
@@ -213,7 +215,7 @@ class _GroupConversation:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            logger.exception("group reader for %s failed", self.convo)
+            logger.exception("group reader failed")
             _emit_event("chat_event", {"convo": self.convo, "kind": "error", "detail": str(exc)})
 
     async def send(self, text: str) -> None:
@@ -230,7 +232,7 @@ class _GroupConversation:
         try:
             await self.session.__aexit__(None, None, None)
         except Exception:
-            logger.exception("error closing group %s", self.convo)
+            logger.exception("error closing group")
 
 
 class Sidecar:
@@ -239,6 +241,10 @@ class Sidecar:
     def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
         self._loop = loop
         self._convos: dict[str, _Conversation] = {}
+        # One lock per conversation key. Requests are dispatched as independent
+        # tasks (see _serve), so without this a close/rotate/leave could pop a
+        # conversation out from under an in-flight send on the same key.
+        self._convo_locks: dict[str, asyncio.Lock] = {}
         self._handlers: dict[str, Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]] = {
             "ping": self._ping,
             "status": self._status,
@@ -288,9 +294,14 @@ class Sidecar:
             _write_frame({"id": req_id, "ok": False, "error": str(exc)})
         except storage.StorageError as exc:
             _write_frame({"id": req_id, "ok": False, "error": str(exc)})
-        except Exception as exc:  # last-resort guard — never kill the bridge
+        except Exception:  # last-resort guard — never kill the bridge
             logger.exception("handler %s failed", method)
-            _write_frame({"id": req_id, "ok": False, "error": f"{type(exc).__name__}: {exc}"})
+            # Deliberately generic: an unexpected exception's repr can carry
+            # paths or internal detail that doesn't belong in the UI.
+            _write_frame({"id": req_id, "ok": False, "error": "internal error — see sidecar log"})
+
+    def _convo_lock(self, key: str) -> asyncio.Lock:
+        return self._convo_locks.setdefault(key, asyncio.Lock())
 
     # -- identity / model (synchronous core, awaited trivially) ------------
 
@@ -308,6 +319,9 @@ class Sidecar:
     async def _init(self, params: dict[str, Any]) -> dict[str, Any]:
         if storage.identity_exists():
             raise RpcError("identity already exists")
+        duress_mode = params.get("duress_mode") or "wipe"
+        if duress_mode not in ("wipe", "decoy"):
+            raise RpcError("duress_mode must be 'wipe' or 'decoy'")
         identity = Identity.generate()
         passphrase = params.get("passphrase")
         if passphrase:
@@ -315,7 +329,7 @@ class Sidecar:
                 identity,
                 passphrase,
                 duress_passphrase=params.get("duress_passphrase") or None,
-                duress_mode=params.get("duress_mode") or "wipe",
+                duress_mode=duress_mode,
                 materialize=True,
             )
         else:
@@ -357,7 +371,13 @@ class Sidecar:
         return {"fmd_rate": storage.get_fmd_rate()}
 
     async def _fmd_set(self, params: dict[str, Any]) -> dict[str, Any]:
-        return {"fmd_rate": storage.set_fmd_rate(float(params.get("rate", 0.0)))}
+        try:
+            rate = float(params.get("rate", 0.0))
+        except (TypeError, ValueError):
+            raise RpcError("fmd rate must be a number") from None
+        if not (0.0 <= rate <= 1.0):  # also rejects NaN
+            raise RpcError("fmd rate must be between 0 and 1")
+        return {"fmd_rate": storage.set_fmd_rate(rate)}
 
     async def _lock(self, params: dict[str, Any]) -> dict[str, Any]:
         passphrase = params.get("passphrase")
@@ -398,93 +418,98 @@ class Sidecar:
             convo = str(params.get("contact", ""))
             if not convo:
                 raise RpcError("chat_open requires a contact name")
-            if convo in self._convos:
-                return {"convo": convo, "already_open": True}
-            contacts = storage.load_contacts(identity)
-            entry = contacts.get(convo)
-            if entry is None:
-                raise RpcError(f"no such contact: {convo}")
+            async with self._convo_lock(convo):
+                if convo in self._convos:
+                    return {"convo": convo, "already_open": True}
+                contacts = storage.load_contacts(identity)
+                entry = contacts.get(convo)
+                if entry is None:
+                    raise RpcError(f"no such contact: {convo}")
 
-            def on_event(k: str, d: str) -> None:
-                _emit_event("chat_event", {"convo": convo, "kind": k, "detail": d})
+                def on_event(k: str, d: str) -> None:
+                    _emit_event("chat_event", {"convo": convo, "kind": k, "detail": d})
 
-            session: Any = Session(
-                identity, entry["code"], relay_url,
-                on_event=on_event, prekeys=storage.ensure_prekeys(identity),
-            )
-            conversation: Any = _Conversation(convo, session, self._loop)
-            await conversation.start()
-            self._convos[convo] = conversation
-            return {"convo": convo, "kind": "contact", "relay_url": relay_url}
+                session: Any = Session(
+                    identity, entry["code"], relay_url,
+                    on_event=on_event, prekeys=storage.ensure_prekeys(identity),
+                )
+                conversation: Any = _Conversation(convo, session, self._loop)
+                await conversation.start()
+                self._convos[convo] = conversation
+                return {"convo": convo, "kind": "contact", "relay_url": relay_url}
 
         label = str(params.get("label", ""))
         if not label:
             raise RpcError("chat_open requires a label")
-        if label in self._convos:
-            return {"convo": label, "already_open": True}
+        async with self._convo_lock(label):
+            if label in self._convos:
+                return {"convo": label, "already_open": True}
 
-        if kind in ("room", "channel"):
-            from drift.transport.room_session import RoomSession
+            if kind in ("room", "channel"):
+                from drift.transport.room_session import RoomSession
 
-            room = storage.get_room(identity, label)  # channels share the rooms store
-            if room is None:
-                raise RpcError(f"no such room or channel: {label}")
+                room = storage.get_room(identity, label)  # channels share the rooms store
+                if room is None:
+                    raise RpcError(f"no such room or channel: {label}")
 
-            def on_event(k: str, d: str) -> None:
-                _emit_event("chat_event", {"convo": label, "kind": k, "detail": d})
+                def on_event(k: str, d: str) -> None:
+                    _emit_event("chat_event", {"convo": label, "kind": k, "detail": d})
 
-            session = RoomSession(identity, room, relay_url, on_event=on_event)
-            conversation = _RoomConversation(label, session, self._loop)
-            await conversation.start()
-            self._convos[label] = conversation
-            return {
-                "convo": label, "kind": room.kind, "tier": room.tier,
-                "can_post": session.can_post(), "session_tag": session.session_tag,
-                "relay_url": relay_url,
-            }
+                session = RoomSession(identity, room, relay_url, on_event=on_event)
+                conversation = _RoomConversation(label, session, self._loop)
+                await conversation.start()
+                self._convos[label] = conversation
+                return {
+                    "convo": label, "kind": room.kind, "tier": room.tier,
+                    "can_post": session.can_post(), "session_tag": session.session_tag,
+                    "relay_url": relay_url,
+                }
 
-        if kind == "group":
-            from drift.transport.session import GroupSession
+            if kind == "group":
+                from drift.transport.session import GroupSession
 
-            group = storage.get_group(identity, label)
-            if group is None:
-                raise RpcError(f"no such group: {label}")
+                group = storage.get_group(identity, label)
+                if group is None:
+                    raise RpcError(f"no such group: {label}")
 
-            def on_event(k: str, d: str) -> None:
-                _emit_event("chat_event", {"convo": label, "kind": k, "detail": d})
+                def on_event(k: str, d: str) -> None:
+                    _emit_event("chat_event", {"convo": label, "kind": k, "detail": d})
 
-            def on_membership(change: Any) -> None:
-                verb = "added" if change.action == "add" else "removed"
-                _emit_event("chat_event", {
-                    "convo": label, "kind": "membership",
-                    "detail": f"{change.target.name} {verb}",
-                })
+                def on_membership(change: Any) -> None:
+                    verb = "added" if change.action == "add" else "removed"
+                    _emit_event("chat_event", {
+                        "convo": label, "kind": "membership",
+                        "detail": f"{change.target.name} {verb}",
+                    })
 
-            session = GroupSession(
-                identity, group, relay_url,
-                on_event=on_event, on_membership=on_membership,
-            )
-            conversation = _GroupConversation(label, session, self._loop)
-            await conversation.start()
-            self._convos[label] = conversation
-            return {"convo": label, "kind": "group", "size": group.size, "relay_url": relay_url}
+                session = GroupSession(
+                    identity, group, relay_url,
+                    on_event=on_event, on_membership=on_membership,
+                )
+                conversation = _GroupConversation(label, session, self._loop)
+                await conversation.start()
+                self._convos[label] = conversation
+                return {"convo": label, "kind": "group", "size": group.size, "relay_url": relay_url}
 
         raise RpcError(f"unknown chat kind: {kind!r}")
 
     async def _chat_send(self, params: dict[str, Any]) -> dict[str, Any]:
         convo = str(params.get("convo", ""))
         text = str(params.get("text", ""))
-        conversation = self._convos.get(convo)
-        if conversation is None:
-            raise RpcError(f"no open conversation: {convo}")
-        await conversation.send(text)
+        async with self._convo_lock(convo):
+            conversation = self._convos.get(convo)
+            if conversation is None:
+                raise RpcError(f"no open conversation: {convo}")
+            await conversation.send(text)
         return {"sent": True}
 
     async def _chat_close(self, params: dict[str, Any]) -> dict[str, Any]:
         convo = str(params.get("convo", ""))
-        conversation = self._convos.pop(convo, None)
-        if conversation is not None:
-            await conversation.close()
+        async with self._convo_lock(convo):
+            conversation = self._convos.pop(convo, None)
+            if conversation is not None:
+                await conversation.close()
+        self._convo_locks.pop(convo, None)
         return {"closed": True}
 
     # -- vault -------------------------------------------------------------
@@ -622,30 +647,33 @@ class Sidecar:
         until they get the new code — the honest 'revoke' on a blind relay."""
         identity = storage.load_identity()
         label = str(params.get("label", ""))
-        room = storage.get_room(identity, label)
-        if room is None:
-            raise RpcError(f"unknown room or channel: {label}")
-        if room.tier == rooms_crypto.TIER_DARK:
-            raise RpcError("dark rooms can't roll by name — create a new one")
-        room.name = f"{room.label}~{secrets.token_urlsafe(6)}"
-        if room.tier == rooms_crypto.TIER_INVITE:
-            room.post_secret_b58 = b58encode(rooms_crypto.generate_post_secret())
-        storage.add_room(identity, room)
-        conv = self._convos.pop(label, None)  # drop the live session bound to the old address
-        if conv is not None:
-            await conv.close()
-        result: dict[str, Any] = {"label": label, "share_code": room.name}
-        if room.tier == rooms_crypto.TIER_INVITE and not room.is_channel:
-            result["token"] = self._room_token(room)
-        return result
+        async with self._convo_lock(label):
+            room = storage.get_room(identity, label)
+            if room is None:
+                raise RpcError(f"unknown room or channel: {label}")
+            if room.tier == rooms_crypto.TIER_DARK:
+                raise RpcError("dark rooms can't roll by name — create a new one")
+            room.name = f"{room.label}~{secrets.token_urlsafe(6)}"
+            if room.tier == rooms_crypto.TIER_INVITE:
+                room.post_secret_b58 = b58encode(rooms_crypto.generate_post_secret())
+            storage.add_room(identity, room)
+            conv = self._convos.pop(label, None)  # drop the live session bound to the old address
+            if conv is not None:
+                await conv.close()
+            result: dict[str, Any] = {"label": label, "share_code": room.name}
+            if room.tier == rooms_crypto.TIER_INVITE and not room.is_channel:
+                result["token"] = self._room_token(room)
+            return result
 
     async def _room_leave(self, params: dict[str, Any]) -> dict[str, Any]:
         identity = storage.load_identity()
         label = str(params.get("label", ""))
-        conv = self._convos.pop(label, None)
-        if conv is not None:
-            await conv.close()
-        storage.remove_room(identity, label)
+        async with self._convo_lock(label):
+            conv = self._convos.pop(label, None)
+            if conv is not None:
+                await conv.close()
+            storage.remove_room(identity, label)
+        self._convo_locks.pop(label, None)
         return {"left": True}
 
     # -- groups ------------------------------------------------------------
@@ -666,13 +694,18 @@ class Sidecar:
         name = str(params.get("name", "")).strip()
         if not name:
             raise RpcError("group name required")
+        members = params.get("members") or []
+        if not isinstance(members, list) or not all(isinstance(m, str) for m in members):
+            raise RpcError("members must be a list of contact names")
+        if len(members) > groups.GROUP_MAX_MEMBERS:
+            raise RpcError(f"groups hold at most {groups.GROUP_MAX_MEMBERS} members")
         contacts = storage.load_contacts(identity)
         infos: list[ContactInfo] = []
-        for member_name in params.get("members") or []:
-            entry = contacts.get(str(member_name))
+        for member_name in members:
+            entry = contacts.get(member_name)
             if entry is None:
                 raise RpcError(f"no such contact: {member_name}")
-            infos.append(ContactInfo(name=str(member_name), code=entry["code"]))
+            infos.append(ContactInfo(name=member_name, code=entry["code"]))
         try:
             group = groups.create_group(name, infos)
         except groups.GroupError as exc:
@@ -688,45 +721,49 @@ class Sidecar:
         if entry is None:
             raise RpcError(f"no such contact: {member_name}")
         info = ContactInfo(name=member_name, code=entry["code"])
-        conv = self._convos.get(label)
-        try:
-            if isinstance(conv, _GroupConversation):
-                await conv.session.add_member(info)  # announces pairwise to live members
-                storage.add_group(identity, conv.session.group)
-            else:
-                group = storage.get_group(identity, label)
-                if group is None:
-                    raise RpcError(f"no such group: {label}")
-                groups.add_member(group, info)
-                storage.add_group(identity, group)
-        except groups.GroupError as exc:
-            raise RpcError(str(exc)) from None
+        async with self._convo_lock(label):
+            conv = self._convos.get(label)
+            try:
+                if isinstance(conv, _GroupConversation):
+                    await conv.session.add_member(info)  # announces pairwise to live members
+                    storage.add_group(identity, conv.session.group)
+                else:
+                    group = storage.get_group(identity, label)
+                    if group is None:
+                        raise RpcError(f"no such group: {label}")
+                    groups.add_member(group, info)
+                    storage.add_group(identity, group)
+            except groups.GroupError as exc:
+                raise RpcError(str(exc)) from None
         return {"added": member_name}
 
     async def _group_remove(self, params: dict[str, Any]) -> dict[str, Any]:
         identity = storage.load_identity()
         label = str(params.get("group", ""))
         code = str(params.get("code", ""))
-        conv = self._convos.get(label)
-        try:
-            if isinstance(conv, _GroupConversation):
-                await conv.session.remove_member(code)
-                storage.add_group(identity, conv.session.group)
-            else:
-                group = storage.get_group(identity, label)
-                if group is None:
-                    raise RpcError(f"no such group: {label}")
-                groups.remove_member(group, code)
-                storage.add_group(identity, group)
-        except groups.GroupError as exc:
-            raise RpcError(str(exc)) from None
+        async with self._convo_lock(label):
+            conv = self._convos.get(label)
+            try:
+                if isinstance(conv, _GroupConversation):
+                    await conv.session.remove_member(code)
+                    storage.add_group(identity, conv.session.group)
+                else:
+                    group = storage.get_group(identity, label)
+                    if group is None:
+                        raise RpcError(f"no such group: {label}")
+                    groups.remove_member(group, code)
+                    storage.add_group(identity, group)
+            except groups.GroupError as exc:
+                raise RpcError(str(exc)) from None
         return {"removed": code}
 
     async def _close_all_convos(self) -> None:
         for convo in list(self._convos):
-            conversation = self._convos.pop(convo, None)
-            if conversation is not None:
-                await conversation.close()
+            async with self._convo_lock(convo):
+                conversation = self._convos.pop(convo, None)
+                if conversation is not None:
+                    await conversation.close()
+            self._convo_locks.pop(convo, None)
 
 
 # ---------------------------------------------------------------------------

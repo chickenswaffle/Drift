@@ -11,7 +11,7 @@
 # DRIFT
 
 [![CI](https://github.com/chickenswaffle/Drift/actions/workflows/ci.yml/badge.svg)](https://github.com/chickenswaffle/Drift/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-v0.15.0-blue)](https://github.com/chickenswaffle/Drift/releases/tag/v0.15.0)
+[![Version](https://img.shields.io/badge/version-v0.18.0-blue)](https://github.com/chickenswaffle/Drift/releases/tag/v0.18.0)
 [![Phase](https://img.shields.io/badge/phase-12%20%E2%80%94%20Lockdown%20Mode-brightgreen)](#project-status) [![Site](https://img.shields.io/badge/site-driftmsg.io-00aa2a?style=flat&labelColor=0a0a0a)](https://chickenswaffle.github.io/DRIFT-Site/)
 
 > A terminal-first, end-to-end encrypted messenger with rotating, unlinkable receiving addresses.

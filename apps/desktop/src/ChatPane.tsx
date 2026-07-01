@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { ChatMessage, Conversation } from "./types";
-import { accentFor, fmtTime, glyphFor } from "./util";
+import { accentFor, copyText, fmtTime, glyphFor } from "./util";
 
 /** One conversation surface for every kind. A 1:1 chat, a room/channel (public
  *  banner, sender pseudonyms, read-only when you hold no posting token), and a
@@ -79,12 +79,7 @@ export function ChatPane({
 
       <div className="scroll" ref={scroller}>
         {messages.map((m, i) => (
-          <div
-            key={i}
-            className={`line ${m.dir}`}
-            title="click to copy"
-            onClick={() => void navigator.clipboard.writeText(m.text)}
-          >
+          <div key={i} className={`line ${m.dir}`}>
             <span className="pfx">{prefix(m)}</span>
             {m.dir === "in" && m.who && (
               <span className="who-tag" style={{ color: accentFor(m.who) }}>
@@ -93,6 +88,15 @@ export function ChatPane({
               </span>
             )}
             <span className="body">{m.text}</span>
+            {m.dir !== "sys" && (
+              <button
+                className="line-copy"
+                title="copy this line to the clipboard"
+                onClick={() => void copyText(m.text)}
+              >
+                copy
+              </button>
+            )}
             <span className="ts muted">{fmtTime(m.ts)}</span>
           </div>
         ))}

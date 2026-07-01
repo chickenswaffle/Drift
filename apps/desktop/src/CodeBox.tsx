@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { copyText } from "./util";
 
 /** A click-to-copy box for a contact code, invite code, or room descriptor. */
 export function CodeBox({ code, dashed }: { code: string; dashed?: boolean }) {
@@ -8,7 +9,7 @@ export function CodeBox({ code, dashed }: { code: string; dashed?: boolean }) {
       className={`codebox${dashed ? " dashed" : ""}`}
       title="click to copy"
       onClick={() => {
-        void navigator.clipboard.writeText(code);
+        void copyText(code);
         setCopied(true);
         setTimeout(() => setCopied(false), 1200);
       }}

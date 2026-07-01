@@ -35,6 +35,26 @@ export function glyphFor(kind: ConvoKind): string {
   }
 }
 
+// The one clipboard writer. If the user has opted into clipboard clearing
+// (Settings), the copied text is blanked after 30 s — but only if the clipboard
+// still holds *that* text, so we never stomp something copied since. Best
+// effort by design: if the platform denies clipboard reads, we skip silently,
+// and some OS clipboard managers keep history DRIFT can't reach.
+const CLIPBOARD_CLEAR_MS = 30_000;
+
+export async function copyText(text: string): Promise<void> {
+  await navigator.clipboard.writeText(text);
+  if (localStorage.getItem("drift.clipboard_clear") !== "1") return;
+  setTimeout(() => {
+    navigator.clipboard
+      .readText()
+      .then((current) => {
+        if (current === text) return navigator.clipboard.writeText("");
+      })
+      .catch(() => undefined);
+  }, CLIPBOARD_CLEAR_MS);
+}
+
 export function fmtTime(ts: number): string {
   const d = new Date(ts);
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;

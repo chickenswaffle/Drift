@@ -28,6 +28,12 @@ within **14 days** for critical issues.
 
 Results will be published in full in this repository.
 
+## Desktop app signing
+
+- macOS `.dmg` builds are **unsigned and un-notarized** — Gatekeeper will warn
+  on first open. Verify the download's SHA-256 against the release page before
+  opening. In-app updates are minisign-verified regardless.
+
 ## Scope
 
 We consider the following in scope:

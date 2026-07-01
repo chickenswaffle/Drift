@@ -90,6 +90,11 @@ Output: `.dmg` (macOS, unsigned), `.deb`/`.AppImage` (Linux), `.exe` (Windows).
 **Windows binaries can't be cross-compiled from macOS/Linux** — each target
 builds on its own OS.
 
+**macOS builds are unsigned and un-notarized** (no Apple Developer certificate
+yet): Gatekeeper will warn on first open. Verify the download's SHA-256 against
+the checksum on the release page before opening. Updater artifacts are still
+minisign-verified by the app itself once installed.
+
 ### CI / releases
 
 `.github/workflows/desktop-app.yml` builds all three on native runners. On a
