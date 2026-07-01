@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Update } from "@tauri-apps/plugin-updater";
 
-// Opt-in auto-update. Nothing is downloaded or installed without a click; the
-// only automatic behaviour is a *quiet check* on launch, and only if the user
-// turned it on. The flow: check() → (if newer) downloadAndInstall() → relaunch().
+// Auto-update, on by default. Nothing is downloaded or installed without a
+// click; the only automatic behaviour is a *quiet check* on launch. It is opt-
+// *out* — the check runs unless the user unticks it — so a fresh install
+// actually learns about updates instead of sitting silent forever.
+// The flow: check() → (if newer) downloadAndInstall() → relaunch().
 
 type State =
   | { k: "idle" }
@@ -18,7 +20,8 @@ const AUTO_KEY = "drift.autoUpdate";
 
 export function Updater({ current }: { current: string }) {
   const [state, setState] = useState<State>({ k: "idle" });
-  const [auto, setAuto] = useState<boolean>(() => localStorage.getItem(AUTO_KEY) === "1");
+  // Default ON: only an explicit "0" (the user opting out) disables the launch check.
+  const [auto, setAuto] = useState<boolean>(() => localStorage.getItem(AUTO_KEY) !== "0");
   const update = useRef<Update | null>(null);
 
   const check = useCallback(async (quiet = false) => {

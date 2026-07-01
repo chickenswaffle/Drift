@@ -1,9 +1,23 @@
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { rpc, onSidecar } from "./rpc";
-import { Updater } from "./Updater";
-import type { Status, Contacts, ChatMessage } from "./types";
+import { Settings, notificationsEnabled } from "./Settings";
+import { notify } from "./notify";
+import { Sidebar } from "./Sidebar";
+import { ChatPane } from "./ChatPane";
+import { CommandPalette, type Command } from "./CommandPalette";
+import { NewChannelModal, JoinRoomModal, NewGroupModal, ManageModal } from "./modals";
+import { CodeBox } from "./CodeBox";
+import type {
+  ChatMessage,
+  Contacts,
+  Conversation,
+  ConvoKind,
+  GroupInfo,
+  RoomInfo,
+  Status,
+} from "./types";
 
-const VERSION = "v0.15.5";
+const VERSION = "v0.17.0";
 
 // Block-art wordmark shown on the boot screen.
 const WORDMARK = String.raw`
@@ -23,6 +37,11 @@ export function App() {
   const [status, setStatus] = useState<Status | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [locked, setLocked] = useState(false);
+  const [lockPrompt, setLockPrompt] = useState(false);
+
+  const hasVault = useRef(false);
+  hasVault.current = !!status?.vault_exists;
 
   const refreshStatus = useCallback(async () => {
     try {
@@ -38,10 +57,63 @@ export function App() {
     void refreshStatus();
   }, [refreshStatus]);
 
-  if (loading) return <Boot sub="connecting to local core" />;
-  if (error) return <Boot sub={`sidecar error: ${error}`} failed />;
-  if (!status?.identity_exists) return <Onboarding onDone={refreshStatus} />;
-  return <Messenger status={status} />;
+  // Tray "lock vault" → open the lock prompt (only when there's a vault to seal).
+  useEffect(() => {
+    let un: (() => void) | undefined;
+    void (async () => {
+      try {
+        const { listen } = await import("@tauri-apps/api/event");
+        un = await listen("menu:lock", () => {
+          if (hasVault.current) setLockPrompt(true);
+        });
+      } catch {
+        /* no Tauri in dev */
+      }
+    })();
+    return () => un?.();
+  }, []);
+
+  let content: JSX.Element;
+  if (locked) {
+    content = (
+      <LockScreen
+        onUnlock={() => {
+          setLocked(false);
+          void refreshStatus();
+        }}
+      />
+    );
+  } else if (loading) {
+    content = <Boot sub="connecting to local core" />;
+  } else if (error) {
+    content = <Boot sub={`sidecar error: ${error}`} failed />;
+  } else if (!status?.identity_exists) {
+    content = <Onboarding onDone={refreshStatus} />;
+  } else {
+    content = (
+      <Messenger
+        status={status}
+        onLock={() => setLockPrompt(true)}
+        onRefreshStatus={refreshStatus}
+      />
+    );
+  }
+
+  return (
+    <>
+      <div className="scanbar" aria-hidden />
+      {content}
+      {lockPrompt && (
+        <LockPrompt
+          onLocked={() => {
+            setLockPrompt(false);
+            setLocked(true);
+          }}
+          onCancel={() => setLockPrompt(false)}
+        />
+      )}
+    </>
+  );
 }
 
 const BOOT_LINES = [
@@ -129,32 +201,148 @@ function Onboarding({ onDone }: { onDone: () => void }) {
   );
 }
 
-function CodeBox({ code }: { code: string }) {
-  const [copied, setCopied] = useState(false);
+/** Full-screen vault gate shown after locking. */
+function LockScreen({ onUnlock }: { onUnlock: () => void }) {
+  const [pass, setPass] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  async function unlock() {
+    if (!pass || busy) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      // Indistinguishable by design: real, decoy, and wipe passphrases all return
+      // ok=true and take this exact same path — same text, timing, transition.
+      // Only a passphrase that opens neither slot returns ok=false.
+      const res = await rpc<{ ok: boolean }>("unlock", { passphrase: pass });
+      if (res.ok) {
+        onUnlock();
+      } else {
+        setPass("");
+        setErr("incorrect passphrase");
+      }
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
-    <div
-      className="codebox"
-      onClick={() => {
-        void navigator.clipboard.writeText(code);
-        setCopied(true);
-        setTimeout(() => setCopied(false), 1200);
-      }}
-      title="click to copy"
-    >
-      <code>{code}</code>
-      <span className="copy">{copied ? "copied ✓" : "copy"}</span>
+    <div className="boot">
+      <pre className="ascii">{WORDMARK}</pre>
+      <div className="card lock">
+        <div className="label">vault locked</div>
+        <p className="muted small">Enter your passphrase to unseal your identity.</p>
+        <input
+          className="lock-input"
+          type="password"
+          placeholder="passphrase"
+          value={pass}
+          autoFocus
+          onChange={(e) => setPass(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") void unlock();
+          }}
+        />
+        <button className="primary" onClick={() => void unlock()} disabled={busy || !pass}>
+          {busy ? "…" : "› unlock"}
+        </button>
+        {err && <p className="error small">{err}</p>}
+      </div>
     </div>
   );
 }
 
-function Messenger({ status }: { status: Status }) {
+/** Passphrase prompt to seal the vault. */
+function LockPrompt({ onLocked, onCancel }: { onLocked: () => void; onCancel: () => void }) {
+  const [pass, setPass] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  async function lock() {
+    if (!pass || busy) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      const res = await rpc<{ locked: boolean }>("lock", { passphrase: pass });
+      if (res.locked) onLocked();
+      else setErr("that passphrase doesn't open the vault");
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="modal-backdrop" onClick={onCancel}>
+      <div
+        className="modal card"
+        role="dialog"
+        aria-modal="true"
+        aria-label="lock vault"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <header className="modal-head">
+          <span className="modal-title">lock vault</span>
+          <button className="modal-x" onClick={onCancel} aria-label="cancel">
+            ✗
+          </button>
+        </header>
+        <p className="muted small">
+          Seal your identity and close every open channel. Unlock again with your
+          passphrase.
+        </p>
+        <input
+          className="lock-input"
+          type="password"
+          placeholder="passphrase"
+          value={pass}
+          autoFocus
+          onChange={(e) => setPass(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") void lock();
+          }}
+        />
+        <button className="primary" onClick={() => void lock()} disabled={busy || !pass}>
+          {busy ? "sealing…" : "› lock now"}
+        </button>
+        {err && <p className="error small">{err}</p>}
+      </div>
+    </div>
+  );
+}
+
+type Modal = "channel" | "room" | "group" | "manage" | null;
+
+function Messenger({
+  status,
+  onLock,
+  onRefreshStatus,
+}: {
+  status: Status;
+  onLock: () => void;
+  onRefreshStatus: () => void;
+}) {
+  const relayUrl = status.relay_url;
   const [myCode, setMyCode] = useState("");
   const [contacts, setContacts] = useState<Contacts>({});
-  const [active, setActive] = useState<string | null>(null);
-  const [openConvos, setOpenConvos] = useState<Set<string>>(new Set());
+  const [channels, setChannels] = useState<RoomInfo[]>([]);
+  const [rooms, setRooms] = useState<RoomInfo[]>([]);
+  const [groups, setGroups] = useState<GroupInfo[]>([]);
+  const [active, setActive] = useState<Conversation | null>(null);
+  const [open, setOpen] = useState<Record<string, Conversation>>({});
   const [threads, setThreads] = useState<Record<string, ChatMessage[]>>({});
+  const [convoStatus, setConvoStatus] = useState<Record<string, string>>({});
+  const [modal, setModal] = useState<Modal>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [paletteOpen, setPaletteOpen] = useState(false);
 
-  // Append helper kept stable so the event listener never goes stale.
+  const openRef = useRef(open);
+  openRef.current = open;
+
   const append = useCallback((m: ChatMessage) => {
     setThreads((prev) => {
       const list = prev[m.convo] ? [...prev[m.convo], m] : [m];
@@ -162,36 +350,50 @@ function Messenger({ status }: { status: Status }) {
     });
   }, []);
 
+  const refreshLists = useCallback(async () => {
+    try {
+      const c = await rpc<{ contacts: Contacts }>("contacts_list");
+      setContacts(c.contacts);
+      const ch = await rpc<{ channels: RoomInfo[]; rooms: RoomInfo[] }>("channels_list");
+      setChannels(ch.channels);
+      setRooms(ch.rooms);
+      const g = await rpc<{ groups: GroupInfo[] }>("groups_list");
+      setGroups(g.groups);
+    } catch {
+      /* surfaced elsewhere */
+    }
+  }, []);
+
   useEffect(() => {
     void (async () => {
       try {
         const who = await rpc<{ contact_code: string }>("whoami");
         setMyCode(who.contact_code);
-        const c = await rpc<{ contacts: Contacts }>("contacts_list");
-        setContacts(c.contacts);
       } catch {
         /* surfaced elsewhere */
       }
+      await refreshLists();
     })();
-  }, []);
+  }, [refreshLists]);
 
-  // Single subscription to the sidecar event stream.
+  // One subscription to the sidecar event stream.
   useEffect(() => {
     const un = onSidecar(({ event, data }) => {
       if (event === "message") {
-        append({
-          convo: String(data.convo),
-          dir: data.dir as ChatMessage["dir"],
-          text: String(data.text),
-          ts: Date.now(),
-        });
+        const convo = String(data.convo);
+        const dir = data.dir as ChatMessage["dir"];
+        const who = data.who != null ? String(data.who) : undefined;
+        const authorized =
+          typeof data.authorized === "boolean" ? data.authorized : undefined;
+        append({ convo, dir, text: String(data.text), ts: Date.now(), who, authorized });
+        if (dir === "in" && notificationsEnabled() && !document.hasFocus()) {
+          void notify(who ?? convo);
+        }
       } else if (event === "chat_event") {
-        append({
-          convo: String(data.convo),
-          dir: "sys",
-          text: `${data.kind}${data.detail ? ` ${data.detail}` : ""}`,
-          ts: Date.now(),
-        });
+        const convo = String(data.convo);
+        const detail = `${data.kind}${data.detail ? ` ${data.detail}` : ""}`;
+        setConvoStatus((s) => ({ ...s, [convo]: detail }));
+        append({ convo, dir: "sys", text: detail, ts: Date.now() });
       }
     });
     return () => {
@@ -199,14 +401,61 @@ function Messenger({ status }: { status: Status }) {
     };
   }, [append]);
 
-  async function openChat(name: string) {
-    setActive(name);
-    if (openConvos.has(name)) return;
+  // Ctrl/Cmd-K toggles the command palette.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setPaletteOpen((p) => !p);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  const openConversation = useCallback(
+    async (kind: ConvoKind, label: string, meta: Partial<Conversation> = {}) => {
+      const existing = openRef.current[label];
+      if (existing) {
+        setActive(existing);
+        return;
+      }
+      setActive({ kind, label, ...meta });
+      try {
+        const params =
+          kind === "contact"
+            ? { kind, contact: label, relay_url: relayUrl }
+            : { kind, label, relay_url: relayUrl };
+        const res = await rpc<{
+          tier?: string;
+          can_post?: boolean;
+          session_tag?: string;
+          size?: number;
+        }>("chat_open", params);
+        const merged: Conversation = {
+          kind,
+          label,
+          tier: res.tier ?? meta.tier,
+          canPost: res.can_post ?? meta.canPost,
+          sessionTag: res.session_tag,
+          size: res.size ?? meta.size,
+          isOwner: meta.isOwner,
+        };
+        setOpen((o) => ({ ...o, [label]: merged }));
+        setActive((a) => (a && a.label === label ? merged : a));
+      } catch (e) {
+        append({ convo: label, dir: "sys", text: `could not open: ${e}`, ts: Date.now() });
+      }
+    },
+    [relayUrl, append],
+  );
+
+  async function send(text: string) {
+    if (!active) return;
     try {
-      await rpc("chat_open", { contact: name, relay_url: status.relay_url });
-      setOpenConvos((s) => new Set(s).add(name));
+      await rpc("chat_send", { convo: active.label, text });
     } catch (e) {
-      append({ convo: name, dir: "sys", text: `could not connect: ${e}`, ts: Date.now() });
+      append({ convo: active.label, dir: "sys", text: `send failed: ${e}`, ts: Date.now() });
     }
   }
 
@@ -215,151 +464,154 @@ function Messenger({ status }: { status: Status }) {
     setContacts(res.contacts);
   }
 
-  const names = Object.keys(contacts);
+  function onNew(kind: ConvoKind) {
+    if (kind === "channel") setModal("channel");
+    else if (kind === "room") setModal("room");
+    else if (kind === "group") setModal("group");
+    // contacts add inline in the sidebar
+  }
+
+  // Palette commands: every conversation + the create/lock/settings actions.
+  const commands: Command[] = [
+    ...channels.map((c) => ({
+      id: `ch:${c.label}`,
+      label: `# ${c.label}`,
+      hint: "channel",
+      run: () =>
+        void openConversation("channel", c.label, {
+          tier: c.tier,
+          canPost: c.can_post,
+          isOwner: c.is_owner,
+        }),
+    })),
+    ...rooms.map((r) => ({
+      id: `rm:${r.label}`,
+      label: `⬡ ${r.label}`,
+      hint: `room · ${r.tier}`,
+      run: () => void openConversation("room", r.label, { tier: r.tier, canPost: r.can_post }),
+    })),
+    ...groups.map((g) => ({
+      id: `gr:${g.label}`,
+      label: `※ ${g.label}`,
+      hint: "group",
+      run: () => void openConversation("group", g.label, { size: g.size }),
+    })),
+    ...Object.keys(contacts).map((n) => ({
+      id: `ct:${n}`,
+      label: `› ${n}`,
+      hint: "contact",
+      run: () => void openConversation("contact", n),
+    })),
+    { id: "new-channel", label: "New channel", hint: "action", run: () => setModal("channel") },
+    { id: "new-room", label: "New room", hint: "action", run: () => setModal("room") },
+    { id: "new-group", label: "New group", hint: "action", run: () => setModal("group") },
+    { id: "settings", label: "Settings", hint: "action", run: () => setSettingsOpen(true) },
+    ...(status.vault_exists
+      ? [{ id: "lock", label: "Lock vault", hint: "action", run: onLock }]
+      : []),
+  ];
+
+  const activeConvo = active ? (open[active.label] ?? active) : null;
 
   return (
     <div className="app">
-      <aside className="sidebar">
-        <div className="brand">
-          DRIFT<span className="ver">{VERSION}</span>
-        </div>
-        <div className="me">
-          <div className="label">your contact code</div>
-          <CodeBox code={myCode} />
-        </div>
-        <AddContact onAdd={addContact} />
-        <div className="contacts">
-          <div className="label">contacts</div>
-          {names.length === 0 && (
-            <p className="muted small">no contacts yet — add one above.</p>
-          )}
-          {names.map((name, i) => (
-            <button
-              key={name}
-              className={`contact ${active === name ? "active" : ""}`}
-              style={{ animationDelay: `${0.04 * i}s` }}
-              onClick={() => void openChat(name)}
-            >
-              <span className="dot" data-on={openConvos.has(name)} />
-              {name}
-            </button>
-          ))}
-        </div>
-        <Updater current={VERSION} />
-        <div className="footer muted">relay · {status.relay_url}</div>
-      </aside>
+      <Sidebar
+        version={VERSION}
+        myCode={myCode}
+        contacts={Object.keys(contacts)}
+        channels={channels}
+        rooms={rooms}
+        groups={groups}
+        active={active}
+        openLabels={new Set(Object.keys(open))}
+        onOpen={(kind, label, meta) => void openConversation(kind, label, meta)}
+        onNew={onNew}
+        onAddContact={addContact}
+        onSettings={() => setSettingsOpen(true)}
+        onLock={onLock}
+        vaultExists={status.vault_exists}
+        relayUrl={relayUrl}
+      />
       <main className="pane">
-        {active ? (
-          <Chat
-            convo={active}
-            messages={threads[active] ?? []}
-            connected={openConvos.has(active)}
+        {activeConvo ? (
+          <ChatPane
+            key={activeConvo.label}
+            conversation={activeConvo}
+            messages={threads[activeConvo.label] ?? []}
+            status={convoStatus[activeConvo.label]}
+            connected={!!open[activeConvo.label]}
+            onSend={send}
+            onManage={activeConvo.kind !== "contact" ? () => setModal("manage") : undefined}
           />
         ) : (
-          <div className="empty">
-            <span className="blip">›</span> select a contact to open a channel
-            <Cursor />
-          </div>
+          <EmptyState onPalette={() => setPaletteOpen(true)} />
         )}
       </main>
-    </div>
-  );
-}
 
-function AddContact({ onAdd }: { onAdd: (name: string, code: string) => Promise<void> }) {
-  const [name, setName] = useState("");
-  const [code, setCode] = useState("");
-  const [err, setErr] = useState<string | null>(null);
-
-  async function submit() {
-    setErr(null);
-    try {
-      await onAdd(name.trim(), code.trim());
-      setName("");
-      setCode("");
-    } catch (e) {
-      setErr(String(e));
-    }
-  }
-
-  return (
-    <div className="add-contact">
-      <div className="label">add contact</div>
-      <input placeholder="name" value={name} onChange={(e) => setName(e.target.value)} />
-      <input
-        placeholder="drift:… contact code"
-        value={code}
-        onChange={(e) => setCode(e.target.value)}
-      />
-      <button className="ghost" onClick={() => void submit()} disabled={!name || !code}>
-        + add
-      </button>
-      {err && <p className="error small">{err}</p>}
-    </div>
-  );
-}
-
-function Chat({
-  convo,
-  messages,
-  connected,
-}: {
-  convo: string;
-  messages: ChatMessage[];
-  connected: boolean;
-}) {
-  const [draft, setDraft] = useState("");
-  const scroller = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    scroller.current?.scrollTo(0, scroller.current.scrollHeight);
-  }, [messages]);
-
-  async function send() {
-    const text = draft.trim();
-    if (!text) return;
-    setDraft("");
-    try {
-      await rpc("chat_send", { convo, text });
-    } catch (e) {
-      // re-show the draft so nothing is silently lost
-      setDraft(text);
-      console.error(e);
-    }
-  }
-
-  const prefix = (dir: ChatMessage["dir"]) => (dir === "out" ? "›" : dir === "in" ? "‹" : "·");
-
-  return (
-    <div className="chat">
-      <header className="chat-head">
-        <span className="dot" data-on={connected} />
-        <span className="who">{convo}</span>
-        <span className="muted small">
-          {connected ? "secure channel open" : "negotiating…"}
-        </span>
-      </header>
-      <div className="scroll" ref={scroller}>
-        {messages.map((m, i) => (
-          <div key={i} className={`line ${m.dir}`}>
-            <span className="pfx">{prefix(m.dir)}</span>
-            <span className="body">{m.text}</span>
-          </div>
-        ))}
-      </div>
-      <div className="composer">
-        <span className="prompt">›</span>
-        <input
-          placeholder="type a message…"
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") void send();
+      {settingsOpen && (
+        <Settings
+          status={status}
+          contacts={contacts}
+          version={VERSION}
+          onChanged={onRefreshStatus}
+          onClose={() => setSettingsOpen(false)}
+        />
+      )}
+      {modal === "channel" && (
+        <NewChannelModal onClose={() => setModal(null)} onDone={() => void refreshLists()} />
+      )}
+      {modal === "room" && (
+        <JoinRoomModal onClose={() => setModal(null)} onDone={() => void refreshLists()} />
+      )}
+      {modal === "group" && (
+        <NewGroupModal
+          contacts={Object.keys(contacts)}
+          onClose={() => setModal(null)}
+          onDone={() => void refreshLists()}
+        />
+      )}
+      {modal === "manage" && activeConvo && (
+        <ManageModal
+          conversation={activeConvo}
+          group={
+            activeConvo.kind === "group"
+              ? groups.find((g) => g.label === activeConvo.label)
+              : undefined
+          }
+          contacts={Object.keys(contacts)}
+          onClose={() => setModal(null)}
+          onDone={() => void refreshLists()}
+          onLeft={() => {
+            const label = activeConvo.label;
+            setModal(null);
+            setActive(null);
+            setOpen((o) => {
+              const next = { ...o };
+              delete next[label];
+              return next;
+            });
+            void refreshLists();
           }}
         />
-        <button className="primary" onClick={() => void send()} disabled={!draft.trim()}>
-          send
-        </button>
+      )}
+      {paletteOpen && (
+        <CommandPalette commands={commands} onClose={() => setPaletteOpen(false)} />
+      )}
+    </div>
+  );
+}
+
+function EmptyState({ onPalette }: { onPalette: () => void }) {
+  return (
+    <div className="empty">
+      <pre className="ascii empty-mark">{WORDMARK}</pre>
+      <div className="empty-hint muted">
+        <span className="blip">›</span> select a conversation, or press{" "}
+        <button className="kbd" onClick={onPalette}>
+          Ctrl-K
+        </button>{" "}
+        to jump anywhere
+        <Cursor />
       </div>
     </div>
   );

@@ -54,6 +54,70 @@ DRIFT uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.17.0] — 2026-07-01
+
+**Desktop app — channels, rooms, groups, a CRT overhaul, and updates that
+actually arrive.** A large desktop round on `apps/desktop/`. No protocol or wire
+changes and **no new cryptography**: every feature is a thin wrapper over the
+existing, audited core — the sidecar (`drift/sidecar.py`) now exposes the same
+sovereign rooms / broadcast channels / groups the CLI and TUI already use. The
+terminal/CRT aesthetic is kept and extended (no emoji anywhere).
+
+### Added
+- **Broadcast channels.** Create a channel and share its name as an invite code
+  without contacting anyone first — you post, anyone with the name reads
+  (`channel_create`/`channel_join`, a `kind="channel"` invite room). Subscribers
+  are read-only; the composer says so.
+- **Sovereign rooms.** Open / invite / dark tiers, invite tokens, and
+  `driftroom:` descriptors for dark rooms (`room_create`/`room_join`/`room_invite`).
+  A persistent honest banner states rooms are **encrypted but not forward-secret**
+  and that sender tags are pseudonyms, not identities.
+- **Rolling invite codes.** `room_rotate` re-derives a room/channel's key under a
+  fresh, unguessable name — old subscribers and tokens are locked out until they
+  get the new code. Because the relay is blind it cannot deny an individual
+  reader, so rotation *is* the honest revoke; the manage sheet says this plainly.
+- **Groups (≤10).** Create a forward-secret group from your contacts and truly
+  **accept/deny** members via an explicit roster (`group_create`/`group_add`/
+  `group_remove`, pairwise composition — DESIGN.md §11).
+- **Vault self-serve.** Set a passphrase (and optional duress passphrase, wipe or
+  decoy) from Settings to seal your identity and enable lock — no CLI required
+  (`vault_create`).
+- **Command palette (Ctrl/Cmd-K).** Fuzzy-jump to any conversation and run
+  actions (new channel/room/group, lock, settings).
+- **Restructured navigation.** A grouped, collapsible sidebar — channels, rooms,
+  groups, contacts — each with its own create affordance and a per-conversation
+  accent color, plus animated view transitions and a richer empty state.
+- **Settings pane.** A panel (sidebar → `settings`) hosting verification, the FMD
+  dial, the vault, notifications, and the updater.
+- **Contact verification.** Generate and compare a contact's **safety number**
+  (`safety_number` RPC) to confirm no one is in the middle — a core parity item
+  from `docs/app-plan.md` §13c.
+- **Vault lock / unlock (panic/duress).** Seal the identity behind its passphrase
+  from the sidebar (`lock`) or the tray, and unseal it on a dedicated lock screen
+  (`unlock`). The UI treats the real, decoy, and wipe passphrases **identically** —
+  same text, same timing, same transition — so an onlooker cannot tell which slot
+  opened. Shown only when a sealed vault exists.
+- **Metadata-privacy (FMD) dial.** Set the false-positive detection rate
+  (`fmd_get`/`fmd_set`) via an off / low / high control, with an honest note on
+  the anonymity-set ↔ scanning-cost trade-off. Never changed silently.
+- **Native desktop integration.** A system-tray icon (show/hide, lock vault,
+  quit); native OS notifications on incoming messages when the window isn't
+  focused — the alert names the **contact only, never the message**, consistent
+  with the app-plan's push stance; window size/position persisted across
+  restarts; and a single-instance guard so a second launch focuses the running
+  window instead of spawning a second sidecar.
+- **In-chat polish.** Per-message timestamps, live connection/handshake state in
+  the chat header (from `chat_event`), and click-to-copy on any message.
+
+### Changed
+- **Auto-update is on by default.** The launch update check was opt-in *and off*,
+  so fresh installs never learned about new versions. It is now opt-*out*: a quiet
+  check runs on every launch unless the user turns it off. Nothing downloads or
+  installs without an explicit click, and the cross-platform signing/publishing
+  pipeline (`desktop-app.yml`, Windows/macOS/Linux) is unchanged.
+
+---
+
 ## [0.15.0] — 2026-06-19
 
 **UX polish, Lockdown Mode, and QR contact exchange.** A feature-and-experience

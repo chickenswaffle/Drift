@@ -21,6 +21,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::TrayIconBuilder;
 use tauri::{Emitter, Manager};
 use tokio::sync::oneshot;
 
@@ -170,15 +172,69 @@ fn spawn_sidecar(app: &tauri::AppHandle) -> Result<Bridge, String> {
     })
 }
 
+/// Show the main window if hidden, hide it if visible — the tray's primary
+/// affordance for a single-window app.
+fn toggle_main(app: &tauri::AppHandle) {
+    if let Some(win) = app.get_webview_window("main") {
+        if win.is_visible().unwrap_or(false) {
+            let _ = win.hide();
+        } else {
+            let _ = win.show();
+            let _ = win.set_focus();
+        }
+    }
+}
+
+/// System-tray icon + menu. "Lock vault" emits `menu:lock` to the UI (which owns
+/// the passphrase prompt) rather than touching the sidecar from here.
+fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
+    let show = MenuItem::with_id(app, "show", "Show / Hide", true, None::<&str>)?;
+    let lock = MenuItem::with_id(app, "lock", "Lock vault", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "Quit DRIFT", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&show, &lock, &quit])?;
+
+    let mut builder = TrayIconBuilder::new()
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .tooltip("DRIFT")
+        .on_menu_event(|app, event| match event.id.as_ref() {
+            "show" => toggle_main(app),
+            "lock" => {
+                let _ = app.emit("menu:lock", ());
+            }
+            "quit" => app.exit(0),
+            _ => {}
+        });
+    if let Some(icon) = app.default_window_icon() {
+        builder = builder.icon(icon.clone());
+    }
+    builder.build(app)?;
+    Ok(())
+}
+
 fn main() {
     tauri::Builder::default()
-        // Opt-in auto-update: the UI drives the check/download/install flow; these
+        // Single-instance MUST be registered first: a second launch is routed to
+        // the running app (focus it) instead of spawning a second sidecar.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(win) = app.get_webview_window("main") {
+                let _ = win.show();
+                let _ = win.unminimize();
+                let _ = win.set_focus();
+            }
+        }))
+        // Remember window size/position across restarts.
+        .plugin(tauri_plugin_window_state::Builder::new().build())
+        // Auto-update: the UI drives the check/download/install flow; these
         // plugins expose it and let us relaunch into the new version.
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        // Native notifications for incoming messages (fired from the UI).
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             let bridge = spawn_sidecar(&app.handle())?;
             app.manage(bridge);
+            build_tray(&app.handle())?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![rpc])
