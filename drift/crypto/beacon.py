@@ -74,7 +74,11 @@ BEACON_INFO = b"drift-beacon-v1"
 # anything sensitive).
 BEACON_LOOKUP_PREFIX = b"drift-beacon-lookup-v1"
 
-# Hard cap on a beacon's lifetime, mirrored by the relay server-side.
+# Hard cap on a *human-handle* beacon's lifetime. Ten minutes is policy for
+# guessable handles (a captured blob is offline-grindable — see module
+# docstring), not a protocol constant: invites (drift.crypto.invite) reuse this
+# construction with a random 128-bit handle, which is why they may run longer.
+# The relay enforces its own cap (BEACON_MAX_TTL) regardless.
 MAX_TTL_SECONDS = 600  # 10 minutes
 
 # Fields covered by the Ed25519 signature, in a fixed order (canonical JSON).
@@ -130,21 +134,23 @@ def _canonical(fields: dict[str, object]) -> bytes:
 
 
 def create_beacon(
-    identity: Identity, handle: str, ttl_seconds: int, relay_pubkey: bytes
+    identity: Identity, handle: str, ttl_seconds: int, relay_pubkey: bytes,
+    *, max_ttl_seconds: int = MAX_TTL_SECONDS,
 ) -> BeaconPayload:
     """
     Light a beacon for ``handle`` pointing at ``identity``'s contact code.
 
-    ``ttl_seconds`` is clamped to ``[1, MAX_TTL_SECONDS]`` so the signed expiry
-    never outlives the relay's own cap. ``relay_pubkey`` is the target relay's
-    long-term Ed25519 public key (raw bytes), folded into the lookup hash so the
-    index is relay-specific (audit M3). The returned payload's ``encrypted``
-    bytes are opaque to the relay; only someone with the exact handle can open
-    them.
+    ``ttl_seconds`` is clamped to ``[1, max_ttl_seconds]`` so the signed expiry
+    never outlives the relay's own cap. The default ceiling is the 10-minute
+    human-handle policy; invites pass a higher one because their random 128-bit
+    handles aren't grindable. ``relay_pubkey`` is the target relay's long-term
+    Ed25519 public key (raw bytes), folded into the lookup hash so the index is
+    relay-specific (audit M3). The returned payload's ``encrypted`` bytes are
+    opaque to the relay; only someone with the exact handle can open them.
     """
     import base64
 
-    ttl = max(1, min(int(ttl_seconds), MAX_TTL_SECONDS))
+    ttl = max(1, min(int(ttl_seconds), int(max_ttl_seconds)))
     expires_at = int(time.time()) + ttl
 
     inner: dict[str, object] = {

@@ -21,6 +21,7 @@ export function Sidebar({
   onOpen,
   onNew,
   onAddContact,
+  onInvite,
   onSettings,
   onLock,
   vaultExists,
@@ -36,7 +37,8 @@ export function Sidebar({
   openLabels: Set<string>;
   onOpen: (kind: ConvoKind, label: string, meta?: Partial<Conversation>) => void;
   onNew: (kind: ConvoKind) => void;
-  onAddContact: (name: string, code: string) => Promise<void>;
+  onAddContact: (name: string, code: string) => Promise<string | void>;
+  onInvite: () => void;
   onSettings: () => void;
   onLock: () => void;
   vaultExists: boolean;
@@ -79,6 +81,9 @@ export function Sidebar({
       <div className="me">
         <div className="label">your contact code</div>
         <CodeBox code={myCode} />
+        <button className="link invite-link" onClick={onInvite}>
+          › share disappearing code
+        </button>
       </div>
 
       <div className="nav">
@@ -220,17 +225,20 @@ function NavItem({
   );
 }
 
-function AddContact({ onAdd }: { onAdd: (name: string, code: string) => Promise<void> }) {
+function AddContact({ onAdd }: { onAdd: (name: string, code: string) => Promise<string | void> }) {
   const [name, setName] = useState("");
   const [code, setCode] = useState("");
   const [err, setErr] = useState<string | null>(null);
+  const [warn, setWarn] = useState<string | null>(null);
 
   async function submit() {
     setErr(null);
+    setWarn(null);
     try {
-      await onAdd(name.trim(), code.trim());
+      const warning = await onAdd(name.trim(), code.trim());
       setName("");
       setCode("");
+      if (warning) setWarn(warning);
     } catch (e) {
       setErr(String(e));
     }
@@ -240,13 +248,14 @@ function AddContact({ onAdd }: { onAdd: (name: string, code: string) => Promise<
     <div className="add-contact">
       <input placeholder="name" value={name} onChange={(e) => setName(e.target.value)} />
       <input
-        placeholder="drift:… contact code"
+        placeholder="drift:… code or driftinvite:… invite"
         value={code}
         onChange={(e) => setCode(e.target.value)}
       />
       <button className="ghost" onClick={() => void submit()} disabled={!name || !code}>
         + add contact
       </button>
+      {warn && <p className="warn small">{warn}</p>}
       {err && <p className="error small">{err}</p>}
     </div>
   );

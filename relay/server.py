@@ -279,7 +279,12 @@ async def _deliver_local(envelope: dict[str, Any]) -> int:
 # *deleted* on expiry, never served stale.
 # ---------------------------------------------------------------------------
 
-BEACON_MAX_TTL = 600  # seconds (10 min), enforced regardless of the request
+# Hard TTL cap enforced regardless of the request (env-overridable). 24 h by
+# default: the old 10-minute value was policy for *guessable human handles*,
+# which clients still clamp to 600 s themselves (beacon.MAX_TTL_SECONDS).
+# High-entropy invite handles (drift.crypto.invite, 128-bit random) are safe at
+# 24 h because grinding the handle is infeasible however long the blob lives.
+BEACON_MAX_TTL = int(os.environ.get("DRIFT_BEACON_MAX_TTL", str(24 * 3600)))
 
 # lookup_hash → {"payload": <base64 str>, "expires_at": <unix int>}
 _beacons: dict[str, dict[str, Any]] = {}

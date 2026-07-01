@@ -61,6 +61,137 @@ function Tabs({
   );
 }
 
+// ------------------------------------------------- disappearing contact code
+
+const INVITE_TTLS = [
+  { key: "10m", seconds: 600 },
+  { key: "1h", seconds: 3600 },
+  { key: "24h", seconds: 24 * 3600 },
+] as const;
+
+function fmtRemaining(total: number): string {
+  const s = Math.max(0, total);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  return h > 0
+    ? `${h}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`
+    : `${m}:${String(sec).padStart(2, "0")}`;
+}
+
+export function InviteModal({ onClose }: { onClose: () => void }) {
+  const [ttl, setTtl] = useState<(typeof INVITE_TTLS)[number]>(INVITE_TTLS[1]);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [invite, setInvite] = useState<{ code: string; expires_at: number } | null>(null);
+  const [remaining, setRemaining] = useState(0);
+  const [gone, setGone] = useState<"expired" | "extinguished" | null>(null);
+
+  // Live countdown off the relay's expires_at — the truth, not our request.
+  useEffect(() => {
+    if (!invite || gone) return;
+    const tick = () => {
+      const left = invite.expires_at - Math.floor(Date.now() / 1000);
+      setRemaining(left);
+      if (left <= 0) setGone("expired");
+    };
+    tick();
+    const t = setInterval(tick, 1000);
+    return () => clearInterval(t);
+  }, [invite, gone]);
+
+  async function mint() {
+    if (busy) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      const res = await rpc<{ code: string; expires_at: number }>("invite_create", {
+        ttl_seconds: ttl.seconds,
+      });
+      setInvite(res);
+      setGone(null);
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function extinguish() {
+    if (!invite || busy) return;
+    setBusy(true);
+    try {
+      await rpc("invite_extinguish", { code: invite.code });
+      setGone("extinguished");
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Modal title="disappearing code" onClose={onClose}>
+      {invite ? (
+        <>
+          {gone ? (
+            <p className="muted small">
+              {gone === "expired" ? "This code has expired." : "Code extinguished."} It no
+              longer resolves to anything. Mint another whenever you like.
+            </p>
+          ) : (
+            <>
+              <p className="muted small">
+                This code resolves to your permanent contact code exactly once, then
+                burns. It dies on its own at the timer. Best-effort: a relay that
+                ignores deletes, or a federation peer holding a replica, keeps the
+                sealed blob until expiry — but the blob is useless without this exact
+                code.
+              </p>
+              <CodeBox code={invite.code} dashed />
+              <div className="invite-countdown">
+                expires in <strong>{fmtRemaining(remaining)}</strong>
+              </div>
+              <button className="ghost danger" onClick={() => void extinguish()} disabled={busy}>
+                › extinguish now
+              </button>
+            </>
+          )}
+          {gone && (
+            <button className="primary" onClick={() => { setInvite(null); setGone(null); }}>
+              › mint another
+            </button>
+          )}
+        </>
+      ) : (
+        <>
+          <p className="muted small">
+            Share a one-time code instead of your permanent one. Whoever redeems it
+            first gets your contact code; then it burns. Your permanent code stays
+            off the wire.
+          </p>
+          <div className="label">lifetime</div>
+          <div className="dial">
+            {INVITE_TTLS.map((t) => (
+              <button
+                key={t.key}
+                className={`dial-stop ${ttl.key === t.key ? "on" : ""}`}
+                onClick={() => setTtl(t)}
+              >
+                {t.key}
+              </button>
+            ))}
+          </div>
+          <button className="primary" onClick={() => void mint()} disabled={busy}>
+            {busy ? "lighting…" : "› mint disappearing code"}
+          </button>
+          {err && <p className="error small">{err}</p>}
+        </>
+      )}
+    </Modal>
+  );
+}
+
 // ---------------------------------------------------------------- channels
 
 export function NewChannelModal({

@@ -143,6 +143,17 @@ class TestTTL:
         b = create_beacon(Identity.generate(), "Diego552", 300, _RELAY_PK)
         assert b.ttl_seconds == 300
 
+    def test_custom_max_ttl_respected(self) -> None:
+        # Invites raise the ceiling via max_ttl_seconds; the default stays 600 s.
+        b = create_beacon(
+            Identity.generate(), "Diego552", 3600, _RELAY_PK, max_ttl_seconds=7200
+        )
+        assert b.ttl_seconds == 3600
+        clamped = create_beacon(
+            Identity.generate(), "Diego552", 9999, _RELAY_PK, max_ttl_seconds=7200
+        )
+        assert clamped.ttl_seconds == 7200
+
 
 # --------------------------------------------------------------------------- #
 # Signature integrity

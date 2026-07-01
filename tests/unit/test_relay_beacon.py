@@ -115,15 +115,31 @@ class TestTTL:
     def test_ttl_capped_server_side(self, client: TestClient) -> None:
         idy = Identity.generate()
         b = create_beacon(idy, "Diego552", 3600, _RELAY_PK)  # client clamps too; force raw post
+        over = server.BEACON_MAX_TTL + 3600
         r = client.post("/beacon", json={
             "lookup_hash": b.lookup_hash,
             "payload": base64.b64encode(b.encrypted).decode(),
-            "ttl_seconds": 3600,  # ask for an hour
+            "ttl_seconds": over,  # ask for more than the cap
         })
         assert r.status_code == 200
-        # Server clamps storage to 600s regardless.
+        # Server clamps storage to BEACON_MAX_TTL regardless of the request.
         assert r.json()["ttl_seconds"] == server.BEACON_MAX_TTL
         assert r.json()["expires_at"] <= int(time.time()) + server.BEACON_MAX_TTL
+
+    def test_ttl_cap_env_overridable(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # BEACON_MAX_TTL is read from $DRIFT_BEACON_MAX_TTL at import time; the
+        # default is 24 h for high-entropy invite handles (clients still clamp
+        # human handles to beacon.MAX_TTL_SECONDS themselves).
+        import importlib
+
+        assert server.BEACON_MAX_TTL == 24 * 3600
+        monkeypatch.setenv("DRIFT_BEACON_MAX_TTL", "600")
+        reloaded = importlib.reload(server)
+        try:
+            assert reloaded.BEACON_MAX_TTL == 600
+        finally:
+            monkeypatch.delenv("DRIFT_BEACON_MAX_TTL")
+            importlib.reload(server)
 
     def test_expiry_deletes_not_hides(self, client: TestClient) -> None:
         digest, _, _ = _light(client, "Diego552", ttl=300)

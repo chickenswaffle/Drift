@@ -5,7 +5,7 @@ import { notify } from "./notify";
 import { Sidebar } from "./Sidebar";
 import { ChatPane } from "./ChatPane";
 import { CommandPalette, type Command } from "./CommandPalette";
-import { NewChannelModal, JoinRoomModal, NewGroupModal, ManageModal } from "./modals";
+import { NewChannelModal, JoinRoomModal, NewGroupModal, ManageModal, InviteModal } from "./modals";
 import { CodeBox } from "./CodeBox";
 import type {
   ChatMessage,
@@ -315,7 +315,7 @@ function LockPrompt({ onLocked, onCancel }: { onLocked: () => void; onCancel: ()
   );
 }
 
-type Modal = "channel" | "room" | "group" | "manage" | null;
+type Modal = "channel" | "room" | "group" | "manage" | "invite" | null;
 
 function Messenger({
   status,
@@ -459,7 +459,17 @@ function Messenger({
     }
   }
 
-  async function addContact(name: string, code: string) {
+  async function addContact(name: string, code: string): Promise<string | void> {
+    // A driftinvite: code redeems (and burns) a disappearing invite; a drift:
+    // code is a permanent contact code. Same box, both work.
+    if (code.startsWith("driftinvite:")) {
+      const res = await rpc<{ contacts: Contacts }>("invite_resolve", { name, code });
+      setContacts(res.contacts);
+      return (
+        "added — unverified. An invite proves the code wasn't tampered with, " +
+        "not who made it. Compare safety numbers before trusting."
+      );
+    }
     const res = await rpc<{ contacts: Contacts }>("contacts_add", { name, code });
     setContacts(res.contacts);
   }
@@ -505,6 +515,7 @@ function Messenger({
     { id: "new-channel", label: "New channel", hint: "action", run: () => setModal("channel") },
     { id: "new-room", label: "New room", hint: "action", run: () => setModal("room") },
     { id: "new-group", label: "New group", hint: "action", run: () => setModal("group") },
+    { id: "invite", label: "Share disappearing code", hint: "action", run: () => setModal("invite") },
     { id: "settings", label: "Settings", hint: "action", run: () => setSettingsOpen(true) },
     ...(status.vault_exists
       ? [{ id: "lock", label: "Lock vault", hint: "action", run: onLock }]
@@ -527,6 +538,7 @@ function Messenger({
         onOpen={(kind, label, meta) => void openConversation(kind, label, meta)}
         onNew={onNew}
         onAddContact={addContact}
+        onInvite={() => setModal("invite")}
         onSettings={() => setSettingsOpen(true)}
         onLock={onLock}
         vaultExists={status.vault_exists}
@@ -557,6 +569,7 @@ function Messenger({
           onClose={() => setSettingsOpen(false)}
         />
       )}
+      {modal === "invite" && <InviteModal onClose={() => setModal(null)} />}
       {modal === "channel" && (
         <NewChannelModal onClose={() => setModal(null)} onDone={() => void refreshLists()} />
       )}

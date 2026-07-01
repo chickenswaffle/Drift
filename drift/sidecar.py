@@ -245,6 +245,9 @@ class Sidecar:
         # tasks (see _serve), so without this a close/rotate/leave could pop a
         # conversation out from under an in-flight send on the same key.
         self._convo_locks: dict[str, asyncio.Lock] = {}
+        # Invites this process has lit: code → lookup_hash. Deliberately
+        # in-memory only — a disappearing code leaves no trace on disk.
+        self._live_invites: dict[str, str] = {}
         self._handlers: dict[str, Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]] = {
             "ping": self._ping,
             "status": self._status,
@@ -253,6 +256,10 @@ class Sidecar:
             "contacts_list": self._contacts_list,
             "contacts_add": self._contacts_add,
             "safety_number": self._safety_number,
+            # disappearing contact codes (one-time invites over the beacon store)
+            "invite_create": self._invite_create,
+            "invite_resolve": self._invite_resolve,
+            "invite_extinguish": self._invite_extinguish,
             "fmd_get": self._fmd_get,
             "fmd_set": self._fmd_set,
             "lock": self._lock,
@@ -366,6 +373,110 @@ class Sidecar:
         if not storage.is_valid_contact_code(code):
             raise RpcError("invalid contact code")
         return {"safety_number": storage.safety_number(identity, code)}
+
+    # -- disappearing contact codes -----------------------------------------
+    #
+    # An invite is a beacon under a random 128-bit handle (drift.crypto.invite)
+    # — no new cryptography, no new relay endpoints, and the relay can't tell
+    # an invite from a handle beacon. One-time is enforced by the *redeemer*
+    # deleting the beacon on first resolve (deletion authority ≈ resolution
+    # authority on a blind relay); expiry is the hard guarantee.
+
+    @staticmethod
+    async def _relay_pubkey_or_raise(http_base: str) -> bytes:
+        from drift.transport.beacon_http import fetch_relay_pubkey
+
+        relay_pubkey = await fetch_relay_pubkey(http_base)
+        if relay_pubkey is None:
+            raise RpcError("relay unreachable (or it doesn't serve beacons)")
+        return relay_pubkey
+
+    async def _invite_create(self, params: dict[str, Any]) -> dict[str, Any]:
+        import httpx
+
+        from drift.crypto.invite import INVITE_MAX_TTL_SECONDS, create_invite
+        from drift.transport.beacon_http import post_beacon, relay_http
+
+        identity = storage.load_identity()
+        try:
+            ttl = int(params.get("ttl_seconds", 3600))
+        except (TypeError, ValueError):
+            raise RpcError("ttl_seconds must be an integer") from None
+        if not (1 <= ttl <= INVITE_MAX_TTL_SECONDS):
+            raise RpcError(f"ttl_seconds must be 1..{INVITE_MAX_TTL_SECONDS}")
+
+        http_base = relay_http(str(params.get("relay_url") or DEFAULT_RELAY_URL))
+        relay_pubkey = await self._relay_pubkey_or_raise(http_base)
+        invite = create_invite(identity, ttl, relay_pubkey)
+        try:
+            posted = await post_beacon(http_base, invite.beacon)
+        except httpx.HTTPError:
+            raise RpcError("could not light the invite on the relay") from None
+
+        self._live_invites[invite.code] = invite.beacon.lookup_hash
+        # The relay's expires_at/ttl are the truth — an older relay that still
+        # caps at 600 s yields an honest countdown, not a lie.
+        return {
+            "code": invite.code,
+            "expires_at": int(posted.get("expires_at", invite.beacon.expires_at)),
+            "ttl_seconds": int(posted.get("ttl_seconds", invite.beacon.ttl_seconds)),
+        }
+
+    async def _invite_resolve(self, params: dict[str, Any]) -> dict[str, Any]:
+        from drift.crypto.beacon import lookup_hash as beacon_lookup_hash
+        from drift.crypto.beacon import resolve_beacon
+        from drift.crypto.invite import parse_invite
+        from drift.transport.beacon_http import delete_beacon, get_beacon, relay_http
+
+        identity = storage.load_identity()
+        name = str(params.get("name", "")).strip()
+        if not name:
+            raise RpcError("invite_resolve requires a contact name")
+        # One indistinguishable failure message for every failure mode, matching
+        # resolve_beacon's own design.
+        failure = RpcError("invite not found, expired, or already used")
+        try:
+            handle = parse_invite(str(params.get("code", "")))
+        except ValueError:
+            raise failure from None
+
+        http_base = relay_http(str(params.get("relay_url") or DEFAULT_RELAY_URL))
+        relay_pubkey = await self._relay_pubkey_or_raise(http_base)
+        digest = beacon_lookup_hash(handle, relay_pubkey)
+        encrypted = await get_beacon(http_base, digest)
+        if encrypted is None:
+            raise failure
+        info = resolve_beacon(handle, encrypted)
+        if info is None:
+            raise failure
+
+        contacts = storage.add_contact(identity, name, info.contact_code)
+        # The one-time burn: best-effort delete on first successful resolve.
+        await delete_beacon(http_base, digest)
+        return {
+            "name": name,
+            "contact_code": info.contact_code,
+            "safety_number": storage.safety_number(identity, info.contact_code),
+            "contacts": {n: c["code"] for n, c in contacts.items()},
+        }
+
+    async def _invite_extinguish(self, params: dict[str, Any]) -> dict[str, Any]:
+        from drift.crypto.beacon import lookup_hash as beacon_lookup_hash
+        from drift.crypto.invite import parse_invite
+        from drift.transport.beacon_http import delete_beacon, relay_http
+
+        code = str(params.get("code", "")).strip()
+        http_base = relay_http(str(params.get("relay_url") or DEFAULT_RELAY_URL))
+        digest = self._live_invites.pop(code, None)
+        if digest is None:
+            try:
+                handle = parse_invite(code)
+            except ValueError:
+                raise RpcError("not an invite code") from None
+            relay_pubkey = await self._relay_pubkey_or_raise(http_base)
+            digest = beacon_lookup_hash(handle, relay_pubkey)
+        await delete_beacon(http_base, digest)  # idempotent
+        return {"extinguished": True}
 
     async def _fmd_get(self, _: dict[str, Any]) -> dict[str, Any]:
         return {"fmd_rate": storage.get_fmd_rate()}

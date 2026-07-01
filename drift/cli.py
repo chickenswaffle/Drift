@@ -533,7 +533,9 @@ def verify(
 
 def _relay_http(relay: str) -> str:
     """ws(s):// → http(s):// relay base for the beacon HTTP endpoints."""
-    return relay.replace("wss://", "https://", 1).replace("ws://", "http://", 1).rstrip("/")
+    from drift.transport.beacon_http import relay_http
+
+    return relay_http(relay)
 
 
 def _parse_ttl(ttl: str) -> int:
@@ -573,27 +575,17 @@ async def _fetch_relay_pubkey(http_base: str) -> bytes | None:
     """Fetch the relay's long-term Ed25519 pubkey (raw bytes) for the M3
     relay-specific beacon lookup hash. Returns None if the relay can't be reached
     or doesn't expose the endpoint."""
-    import httpx
+    from drift.transport.beacon_http import fetch_relay_pubkey
 
-    from drift.crypto import b58decode
-
-    try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(f"{http_base}/beacon/pubkey", timeout=10.0)
-        if resp.status_code != 200:
-            return None
-        return b58decode(resp.json()["pubkey_b58"])
-    except (httpx.HTTPError, KeyError, ValueError):
-        return None
+    return await fetch_relay_pubkey(http_base)
 
 
 async def _beacon_async(identity: Any, handle: str, seconds: int, http_base: str) -> None:
-    import base64
-
     import httpx
     from rich.live import Live
 
     from drift.crypto.beacon import create_beacon
+    from drift.transport.beacon_http import post_beacon
 
     relay_pubkey = await _fetch_relay_pubkey(http_base)
     if relay_pubkey is None:
@@ -601,15 +593,8 @@ async def _beacon_async(identity: Any, handle: str, seconds: int, http_base: str
         raise typer.Exit(1)
     payload = create_beacon(identity, handle, seconds, relay_pubkey)
 
-    body = {
-        "lookup_hash": payload.lookup_hash,
-        "payload": base64.b64encode(payload.encrypted).decode(),
-        "ttl_seconds": payload.ttl_seconds,
-    }
     try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(f"{http_base}/beacon", json=body, timeout=10.0)
-            resp.raise_for_status()
+        await post_beacon(http_base, payload)
     except httpx.HTTPError as exc:
         console.print(f"[red]Could not light beacon:[/red] {exc}")
         raise typer.Exit(1) from None
@@ -633,11 +618,9 @@ async def _beacon_async(identity: Any, handle: str, seconds: int, http_base: str
         console.print(f"[dim]Beacon for {payload.handle} expired.[/dim]")
     except (KeyboardInterrupt, asyncio.CancelledError):
         # Early extinguish — tell the relay to delete it immediately.
-        try:
-            async with httpx.AsyncClient() as client:
-                await client.delete(f"{http_base}/beacon/{payload.lookup_hash}", timeout=5.0)
-        except httpx.HTTPError:
-            pass
+        from drift.transport.beacon_http import delete_beacon
+
+        await delete_beacon(http_base, payload.lookup_hash)
         console.print(f"\n[dim]Beacon for {payload.handle} extinguished.[/dim]")
 
 
@@ -680,24 +663,14 @@ def find(
 
 
 async def _find_async(handle: str, http_base: str, lookup_hash: Any, resolve_beacon: Any) -> Any:
-    import base64
-
-    import httpx
+    from drift.transport.beacon_http import get_beacon
 
     relay_pubkey = await _fetch_relay_pubkey(http_base)
     if relay_pubkey is None:
         return None
     digest = lookup_hash(handle, relay_pubkey)
-    try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(f"{http_base}/beacon/{digest}", timeout=10.0)
-    except httpx.HTTPError:
-        return None
-    if resp.status_code != 200:
-        return None
-    try:
-        encrypted = base64.b64decode(resp.json()["payload"])
-    except (KeyError, ValueError):
+    encrypted = await get_beacon(http_base, digest)
+    if encrypted is None:
         return None
     return resolve_beacon(handle, encrypted)
 
