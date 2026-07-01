@@ -35,13 +35,17 @@ jobs:
             label: windows
             stable_name: DRIFT-Setup-Windows-x64.exe
             bundle_glob: apps/desktop/src-tauri/target/release/bundle/nsis/*-setup.exe
-            updater_find: "*-setup.nsis.zip"
-            updater_stable: DRIFT-update-windows-x86_64.nsis.zip
+            # Tauri v2 signs the NSIS installer itself (…-setup.exe + .sig); it no
+            # longer emits a separate .nsis.zip updater bundle.
+            updater_find: "*-setup.exe"
+            updater_stable: DRIFT-update-windows-x86_64-setup.exe
             platform_key: windows-x86_64
           - os: ubuntu-22.04
             label: linux
-            updater_find: "*.AppImage.tar.gz"
-            updater_stable: DRIFT-update-linux-x86_64.AppImage.tar.gz
+            # Likewise the AppImage is signed directly (…​.AppImage + .sig), not a
+            # .AppImage.tar.gz.
+            updater_find: "*.AppImage"
+            updater_stable: DRIFT-update-linux-x86_64.AppImage
             platform_key: linux-x86_64
     runs-on: ${{ matrix.os }}
     steps:
@@ -321,8 +325,8 @@ jobs:
             "platforms": {
               "darwin-aarch64": { "signature": "$(sig darwin-aarch64)", "url": "$BASE/DRIFT-update-darwin-aarch64.app.tar.gz" },
               "darwin-x86_64":  { "signature": "$(sig darwin-x86_64)",  "url": "$BASE/DRIFT-update-darwin-x86_64.app.tar.gz" },
-              "windows-x86_64": { "signature": "$(sig windows-x86_64)", "url": "$BASE/DRIFT-update-windows-x86_64.nsis.zip" },
-              "linux-x86_64":   { "signature": "$(sig linux-x86_64)",   "url": "$BASE/DRIFT-update-linux-x86_64.AppImage.tar.gz" }
+              "windows-x86_64": { "signature": "$(sig windows-x86_64)", "url": "$BASE/DRIFT-update-windows-x86_64-setup.exe" },
+              "linux-x86_64":   { "signature": "$(sig linux-x86_64)",   "url": "$BASE/DRIFT-update-linux-x86_64.AppImage" }
             }
           }
           EOF
