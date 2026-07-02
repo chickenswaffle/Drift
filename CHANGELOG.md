@@ -67,11 +67,21 @@ never sees keys), and the relay was already blind.
   **require** (refuse to connect at all unless Tor is up). The sidecar holds one
   shared circuit for the whole process — bootstrapping is slow and per-circuit,
   so every session reuses it — brought up on the next `chat_open` with live
-  progress events, and torn down on lock / panic / exit. Honest about its
-  limits: a packaged build without the optional `arti`/`stem` backend reports
-  Tor **unavailable** rather than pretending, and `require` refuses to connect
-  until one is installed. New `tor.available()`; sidecar `tor_get` / `tor_set`
-  / `tor_status` + `tor_status` progress events; `storage.get/set_tor_mode`.
+  progress events, and torn down on lock / panic / exit. New `tor.available()`;
+  sidecar `tor_get` / `tor_set` / `tor_status` + `tor_status` progress events;
+  `storage.get/set_tor_mode`.
+- **Tor is bundled in shipped builds** — it actually works with no system tor.
+  The frozen sidecar collects the Python Tor backends (`stem` + SOCKS libs) and
+  embeds a standalone `tor` executable (plus its shared libs) at the PyInstaller
+  unpack root, where the new `tor.resolve_tor_binary()` finds it (env override
+  `$DRIFT_TOR_BINARY`, else bundled, else system `tor`). `sidecar/fetch_tor.sh`
+  pulls the Tor Expert Bundle per-OS/arch in CI; `build_sidecar.py` co-bundles
+  the binary and its libs. A build without a bundled backend honestly reports
+  Tor **unavailable** and `require` refuses to connect until one exists.
+- **Beacon / invite traffic rides Tor too.** When a circuit is up, invite
+  create / resolve / extinguish HTTP goes through the same SOCKS proxy as chat
+  (`beacon_http` gained a `socks` parameter) — otherwise enabling Tor would
+  still have leaked the client's IP to the relay on every invite.
 - **Relay picker, in Settings.** Point DRIFT at your own relay instead of the
   baked-in default (`ws://` / `wss://`, validated). Persists in `settings.json`,
   flows through `status`, and every conversation/invite opened afterward uses

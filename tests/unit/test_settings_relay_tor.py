@@ -12,7 +12,7 @@ from __future__ import annotations
 import pytest
 
 from drift import storage
-from drift.transport import tor
+from drift.transport import beacon_http, tor
 
 
 @pytest.fixture
@@ -86,3 +86,56 @@ class TestTorAvailable:
     def test_false_when_no_backend(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
         monkeypatch.setattr(tor, "_backend_installed", lambda name: False)
         assert tor.available() is False
+
+
+class TestResolveTorBinary:
+    def test_default_is_path_tor(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        monkeypatch.delenv("DRIFT_TOR_BINARY", raising=False)
+        monkeypatch.delattr(tor.sys, "_MEIPASS", raising=False)
+        assert tor.resolve_tor_binary() == "tor"
+
+    def test_env_override_wins(self, tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        binpath = tmp_path / "mytor"
+        binpath.write_text("#!/bin/sh\n")
+        monkeypatch.setenv("DRIFT_TOR_BINARY", str(binpath))
+        assert tor.resolve_tor_binary() == str(binpath)
+
+    def test_env_override_ignored_if_missing(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        monkeypatch.setenv("DRIFT_TOR_BINARY", "/no/such/tor")
+        monkeypatch.delattr(tor.sys, "_MEIPASS", raising=False)
+        assert tor.resolve_tor_binary() == "tor"
+
+    def test_bundled_next_to_frozen_sidecar(self, tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        monkeypatch.delenv("DRIFT_TOR_BINARY", raising=False)
+        name = "tor.exe" if tor.os.name == "nt" else "tor"
+        (tmp_path / name).write_text("#!/bin/sh\n")
+        monkeypatch.setattr(tor.sys, "_MEIPASS", str(tmp_path), raising=False)
+        assert tor.resolve_tor_binary() == str(tmp_path / name)
+
+    def test_env_beats_bundled(self, tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        name = "tor.exe" if tor.os.name == "nt" else "tor"
+        (tmp_path / name).write_text("bundled")
+        monkeypatch.setattr(tor.sys, "_MEIPASS", str(tmp_path), raising=False)
+        override = tmp_path / "override-tor"
+        override.write_text("override")
+        monkeypatch.setenv("DRIFT_TOR_BINARY", str(override))
+        assert tor.resolve_tor_binary() == str(override)
+
+
+class TestBeaconHttpSocks:
+    """Beacon/invite HTTP must ride the Tor circuit when one is active, or
+    enabling Tor still leaks the client IP to the relay on every invite."""
+
+    def test_direct_client_has_no_proxy(self) -> None:
+        client = beacon_http._client(None)
+        try:
+            assert client._mounts == {} or all(
+                t is None for t in client._mounts.values()
+            )
+        finally:
+            pass  # not entered as a context manager; nothing to close
+
+    def test_socks_client_mounts_a_proxy(self) -> None:
+        # A SOCKS proxy produces a routed transport (httpx mounts it for all://).
+        client = beacon_http._client(("127.0.0.1", 9050))
+        assert any(t is not None for t in client._mounts.values())

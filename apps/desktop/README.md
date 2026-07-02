@@ -72,10 +72,14 @@ A packaged install bundles a **frozen sidecar** (PyInstaller), so end users need
 **no Python**. Two steps:
 
 ```bash
-# 1. freeze the sidecar → src-tauri/binaries/drift-sidecar-<triple>[.exe]
+# 1. (optional) fetch a standalone tor to bundle, so Tor works with no system tor
+export DRIFT_TOR_BINARY="$(sidecar/fetch_tor.sh linux x86_64)"   # linux|macos|windows, x86_64|aarch64
+
+# 2. freeze the sidecar → src-tauri/binaries/drift-sidecar-<triple>[.exe]
+pip install -e ".[tor]"          # collects the Tor backends into the freeze
 python sidecar/build_sidecar.py
 
-# 2. build the installer, merging the release config that adds the externalBin
+# 3. build the installer, merging the release config that adds the externalBin
 cd apps/desktop
 npm run tauri build -- --config src-tauri/tauri.conf.release.json
 ```
@@ -85,6 +89,16 @@ keeps using the Python fallback; `tauri.conf.release.json` adds it only for
 packaged builds. At runtime the shell prefers the bundled `drift-sidecar` next
 to the executable and falls back to system Python only in dev (see
 `sidecar_command()` in `src-tauri/src/main.rs`).
+
+**Tor is bundled.** The freeze collects the Python Tor backends (`stem` + the
+SOCKS libs from the `tor` extra) and, when `$DRIFT_TOR_BINARY` points at one,
+embeds a standalone `tor` executable (plus its shared libs) at the unpack root
+where `drift.transport.tor.resolve_tor_binary()` looks — so a shipped app routes
+over Tor with **no system tor installed**. `sidecar/fetch_tor.sh` pulls the Tor
+Expert Bundle (pin the version with `$TOR_EB_VERSION`; verify integrity with
+`$TOR_EB_SHA256`). Without `$DRIFT_TOR_BINARY` the freeze still succeeds — Tor
+then falls back to the user's own system tor, and the app's Tor setting reports
+*unavailable* if there is none.
 
 Output: `.dmg` (macOS, unsigned), `.deb`/`.AppImage` (Linux), `.exe` (Windows).
 **Windows binaries can't be cross-compiled from macOS/Linux** — each target

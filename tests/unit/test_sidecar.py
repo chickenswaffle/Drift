@@ -20,7 +20,7 @@ import pytest
 
 import drift.sidecar as sidecar_mod
 from drift import storage
-from drift.crypto import Identity, panic
+from drift.crypto import Identity, b58encode, panic
 from drift.sidecar import Sidecar, _Conversation, _RoomConversation
 
 _FAST = panic.KDFParams(time_cost=1, memory_cost=8, parallelism=1)
@@ -281,6 +281,40 @@ class TestRelayAndTor:
         sc = make_sidecar()
         await call(sc, frames, "tor_set", {"mode": "prefer"})
         assert await sc._ensure_tor() is None  # clearnet, no raise
+
+    async def test_invite_resolve_routes_beacon_over_tor(self, store, frames, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """When a circuit is up, invite/beacon HTTP must carry the same SOCKS
+        proxy — otherwise enabling Tor still leaks the IP on invite resolve."""
+        from drift.transport import beacon_http
+
+        sc = make_sidecar()
+        await call(sc, frames, "init")
+
+        class _FakeCircuit:
+            socks_proxy = ("127.0.0.1", 9999)
+
+        async def fake_ensure_tor() -> Any:
+            return _FakeCircuit()
+
+        seen: dict[str, Any] = {}
+
+        async def fake_pubkey(http_base: str, socks: Any = None) -> bytes:
+            seen["pubkey"] = socks
+            return bytes(range(32))
+
+        async def fake_get(http_base: str, digest: str, socks: Any = None) -> bytes | None:
+            seen["get"] = socks
+            return None  # forces the indistinguishable failure; we only assert routing
+
+        monkeypatch.setattr(sc, "_ensure_tor", fake_ensure_tor)
+        monkeypatch.setattr(beacon_http, "fetch_relay_pubkey", fake_pubkey)
+        monkeypatch.setattr(beacon_http, "get_beacon", fake_get)
+
+        code = f"driftinvite:{b58encode(bytes(16))}"
+        resp = await call(sc, frames, "invite_resolve", {"name": "x", "code": code})
+        assert resp["ok"] is False  # beacon absent → expected failure
+        assert seen["pubkey"] == ("127.0.0.1", 9999)
+        assert seen["get"] == ("127.0.0.1", 9999)
 
 
 # --------------------------------------------------------------------------- #

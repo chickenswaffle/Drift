@@ -8,4 +8,6 @@ src-tauri/gen/
 src-tauri/binaries/
 sidecar/build/
 sidecar/dist/
+# Fetched Tor Expert Bundle (sidecar/fetch_tor.sh) — bundled into the freeze, never committed
+sidecar/tor-*/
 sidecar/*.spec

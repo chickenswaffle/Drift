@@ -423,11 +423,20 @@ class Sidecar:
         localhost)."""
         return str(params.get("relay_url") or storage.get_relay_url())
 
+    async def _tor_socks(self) -> tuple[str, int] | None:
+        """The active Tor circuit's SOCKS proxy, bootstrapping per the mode.
+        Beacon/invite HTTP rides this too, so enabling Tor doesn't still leak
+        the client's IP to the relay on invite create/resolve."""
+        client = await self._ensure_tor()
+        return client.socks_proxy if client is not None else None
+
     @staticmethod
-    async def _relay_pubkey_or_raise(http_base: str) -> bytes:
+    async def _relay_pubkey_or_raise(
+        http_base: str, socks: tuple[str, int] | None = None
+    ) -> bytes:
         from drift.transport.beacon_http import fetch_relay_pubkey
 
-        relay_pubkey = await fetch_relay_pubkey(http_base)
+        relay_pubkey = await fetch_relay_pubkey(http_base, socks)
         if relay_pubkey is None:
             raise RpcError("relay unreachable (or it doesn't serve beacons)")
         return relay_pubkey
@@ -446,11 +455,12 @@ class Sidecar:
         if not (1 <= ttl <= INVITE_MAX_TTL_SECONDS):
             raise RpcError(f"ttl_seconds must be 1..{INVITE_MAX_TTL_SECONDS}")
 
+        socks = await self._tor_socks()
         http_base = relay_http(self._relay_url(params))
-        relay_pubkey = await self._relay_pubkey_or_raise(http_base)
+        relay_pubkey = await self._relay_pubkey_or_raise(http_base, socks)
         invite = create_invite(identity, ttl, relay_pubkey)
         try:
-            posted = await post_beacon(http_base, invite.beacon)
+            posted = await post_beacon(http_base, invite.beacon, socks)
         except httpx.HTTPError:
             raise RpcError("could not light the invite on the relay") from None
 
@@ -481,10 +491,11 @@ class Sidecar:
         except ValueError:
             raise failure from None
 
+        socks = await self._tor_socks()
         http_base = relay_http(self._relay_url(params))
-        relay_pubkey = await self._relay_pubkey_or_raise(http_base)
+        relay_pubkey = await self._relay_pubkey_or_raise(http_base, socks)
         digest = beacon_lookup_hash(handle, relay_pubkey)
-        encrypted = await get_beacon(http_base, digest)
+        encrypted = await get_beacon(http_base, digest, socks)
         if encrypted is None:
             raise failure
         info = resolve_beacon(handle, encrypted)
@@ -493,7 +504,7 @@ class Sidecar:
 
         contacts = storage.add_contact(identity, name, info.contact_code)
         # The one-time burn: best-effort delete on first successful resolve.
-        await delete_beacon(http_base, digest)
+        await delete_beacon(http_base, digest, socks)
         return {
             "name": name,
             "contact_code": info.contact_code,
@@ -507,6 +518,7 @@ class Sidecar:
         from drift.transport.beacon_http import delete_beacon, relay_http
 
         code = str(params.get("code", "")).strip()
+        socks = await self._tor_socks()
         http_base = relay_http(self._relay_url(params))
         digest = self._live_invites.pop(code, None)
         if digest is None:
@@ -514,9 +526,9 @@ class Sidecar:
                 handle = parse_invite(code)
             except ValueError:
                 raise RpcError("not an invite code") from None
-            relay_pubkey = await self._relay_pubkey_or_raise(http_base)
+            relay_pubkey = await self._relay_pubkey_or_raise(http_base, socks)
             digest = beacon_lookup_hash(handle, relay_pubkey)
-        await delete_beacon(http_base, digest)  # idempotent
+        await delete_beacon(http_base, digest, socks)  # idempotent
         return {"extinguished": True}
 
     async def _fmd_get(self, _: dict[str, Any]) -> dict[str, Any]:

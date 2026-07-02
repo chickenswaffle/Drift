@@ -449,9 +449,10 @@ function TorSection({ status, onChanged }: { status: Status; onChanged?: () => v
       </p>
       {!available && (
         <p className="warn small">
-          No Tor backend is bundled in this build — install the `tor` extra (arti
-          or a system tor) to enable it. &apos;require&apos; will refuse to
-          connect until then.
+          No Tor backend detected in this build. Release builds bundle Tor; if
+          you see this, you&apos;re on a dev build or a build without it — install
+          the `tor` extra or a system tor. &apos;require&apos; refuses to connect
+          until one is present.
         </p>
       )}
       {live && <p className="muted small">status: {live}</p>}

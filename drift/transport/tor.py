@@ -37,9 +37,12 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import logging
+import os
 import re
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
@@ -123,6 +126,29 @@ class TorClient:
 def _backend_installed(name: str) -> bool:
     """True if the Python package for a backend is importable (no daemon check)."""
     return importlib.util.find_spec(name) is not None
+
+
+def resolve_tor_binary() -> str:
+    """The ``tor`` executable stem should launch, in priority order:
+
+      1. ``$DRIFT_TOR_BINARY`` — an explicit path (packaging / testing).
+      2. A ``tor``/``tor.exe`` bundled next to a **frozen** sidecar. PyInstaller
+         onefile unpacks data to ``sys._MEIPASS``; the desktop build drops the
+         Tor Expert Bundle's binary there so a shipped app needs no system Tor.
+      3. Bare ``tor`` — resolved on ``PATH`` at launch (dev / a user's own Tor).
+
+    Returns a command string suitable for stem's ``tor_cmd``.
+    """
+    override = os.environ.get("DRIFT_TOR_BINARY")
+    if override and Path(override).exists():
+        return override
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        name = "tor.exe" if os.name == "nt" else "tor"
+        bundled = Path(meipass) / name
+        if bundled.exists():
+            return str(bundled)
+    return "tor"
 
 
 def available() -> bool:
@@ -244,15 +270,17 @@ def _launch_stem(
         if match and on_progress is not None:
             on_progress(int(match.group(1)), line.strip())
 
+    tor_cmd = resolve_tor_binary()
     try:
         process = stem.process.launch_tor_with_config(
             config={"SocksPort": str(port), "Log": ["NOTICE stdout"]},
+            tor_cmd=tor_cmd,
             init_msg_handler=_handler,
             take_ownership=True,
         )
     except OSError as exc:
         # tor binary missing → treat as "unavailable" so we fall back / warn.
-        raise TorUnavailableError(f"could not launch system tor: {exc}") from exc
+        raise TorUnavailableError(f"could not launch tor ({tor_cmd}): {exc}") from exc
     except Exception as exc:  # noqa: BLE001 — stem raises bare on bootstrap failure
         raise TorBootstrapError(f"tor failed to bootstrap: {exc}") from exc
 

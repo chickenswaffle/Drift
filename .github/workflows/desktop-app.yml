@@ -40,6 +40,8 @@ jobs:
             updater_find: "*-setup.exe"
             updater_stable: DRIFT-update-windows-x86_64-setup.exe
             platform_key: windows-x86_64
+            tor_platform: windows
+            tor_arch: x86_64
           - os: ubuntu-22.04
             label: linux
             # Likewise the AppImage is signed directly (…​.AppImage + .sig), not a
@@ -47,6 +49,8 @@ jobs:
             updater_find: "*.AppImage"
             updater_stable: DRIFT-update-linux-x86_64.AppImage
             platform_key: linux-x86_64
+            tor_platform: linux
+            tor_arch: x86_64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -82,10 +86,20 @@ jobs:
       - name: Install DRIFT + PyInstaller
         run: |
           python -m pip install --upgrade pip
-          pip install -e .
+          pip install -e ".[tor]"
           pip install pyinstaller
 
-      - name: Freeze the sidecar binary
+      # Fetch a standalone tor binary (Tor Expert Bundle) so the frozen sidecar
+      # can route over Tor with no system tor on the user's machine. Runs in
+      # bash on every runner (Windows ships Git Bash). Exposes the path to the
+      # freeze step via DRIFT_TOR_BINARY.
+      - name: Fetch bundled tor
+        shell: bash
+        run: |
+          TORBIN="$(apps/desktop/sidecar/fetch_tor.sh ${{ matrix.tor_platform }} ${{ matrix.tor_arch }})"
+          echo "DRIFT_TOR_BINARY=$TORBIN" >> "$GITHUB_ENV"
+
+      - name: Freeze the sidecar binary (bundles tor)
         run: python apps/desktop/sidecar/build_sidecar.py
 
       - name: Install JS dependencies
@@ -173,10 +187,11 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Freeze arm64 sidecar (native)
+      - name: Freeze arm64 sidecar (native, bundles tor)
         run: |
           python -m pip install --upgrade pip
-          pip install -e . pyinstaller
+          pip install -e ".[tor]" pyinstaller
+          export DRIFT_TOR_BINARY="$(apps/desktop/sidecar/fetch_tor.sh macos aarch64)"
           TARGET_TRIPLE=aarch64-apple-darwin python apps/desktop/sidecar/build_sidecar.py
 
       - name: Install uv (to provision an x86_64 interpreter)
@@ -213,7 +228,8 @@ jobs:
           test -f "$SITE/cryptography/hazmat/bindings/_rust.abi3.so" \
             || { echo "::error::universal2 cryptography wheel did not install"; exit 1; }
           lipo -info "$SITE/cryptography/hazmat/bindings/_rust.abi3.so" || true
-          /tmp/venv-x86/bin/python -m pip install -e . pyinstaller
+          /tmp/venv-x86/bin/python -m pip install -e ".[tor]" pyinstaller
+          export DRIFT_TOR_BINARY="$(apps/desktop/sidecar/fetch_tor.sh macos x86_64)"
           TARGET_TRIPLE=x86_64-apple-darwin \
             /tmp/venv-x86/bin/python apps/desktop/sidecar/build_sidecar.py
           got2=$(file -b apps/desktop/src-tauri/binaries/drift-sidecar-x86_64-apple-darwin)
