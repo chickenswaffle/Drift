@@ -12,7 +12,7 @@
 
 [![CI](https://github.com/chickenswaffle/Drift/actions/workflows/ci.yml/badge.svg)](https://github.com/chickenswaffle/Drift/actions/workflows/ci.yml)
 [![Version](https://img.shields.io/badge/version-v0.20.0-blue)](https://github.com/chickenswaffle/Drift/releases/tag/v0.20.0)
-[![Phase](https://img.shields.io/badge/phase-12%20%E2%80%94%20Lockdown%20Mode-brightgreen)](#project-status) [![Site](https://img.shields.io/badge/site-driftmsg.io-00aa2a?style=flat&labelColor=0a0a0a)](https://chickenswaffle.github.io/DRIFT-Site/)
+[![Protocol](https://img.shields.io/badge/protocol-DRIFT--P%2F1%20draft-brightgreen)](PROTOCOL.md) [![Site](https://img.shields.io/badge/site-driftmsg.io-00aa2a?style=flat&labelColor=0a0a0a)](https://chickenswaffle.github.io/DRIFT-Site/)
 
 > A terminal-first, end-to-end encrypted messenger with rotating, unlinkable receiving addresses.
 
@@ -131,17 +131,20 @@ Being precise here is what separates a serious tool from snake oil.
 | 10 | WITNESS — verifiable proof of relay blindness | ✅ Complete (`v0.12.0`) |
 | 11 | Sovereign Rooms — cryptographic chatrooms with no server-side representation, rotating stealth addresses, three security tiers (open/invite/dark), and optional federation sharding | ✅ Complete (`v0.13.0`) |
 | 12 | Lockdown Mode — endpoint hardening against software keyloggers, screen scrapers, and shoulder-surfing | ✅ Complete (`v0.15.0`) |
-| 13 | GUI app — native iOS/Android + desktop (Tauri), Python stays the reference impl | 🚧 In progress — desktop client building (Tauri + Python sidecar, [`apps/desktop/`](apps/desktop/)); mobile + shared Rust core designed in [`docs/app-plan.md`](docs/app-plan.md) |
+| 13 | GUI app — desktop (Tauri) shipped; native iOS/Android + shared Rust core designed | 🚧 Desktop shipped (`v0.17.0`+, [`apps/desktop/`](apps/desktop/)) — installers on the [releases page](https://github.com/chickenswaffle/Drift/releases/latest); mobile designed in [`docs/app-plan.md`](docs/app-plan.md) |
 
 **Protocol upgrades** — cryptographic hardening that spans the whole stack rather than a single phase:
 
 - **X3DH key agreement** ✅ `v0.14.0` — forward-secret handshake, eliminates deterministic bootstrap
+- **The Drift Protocol spec** ✅ `v0.20.0` — the wire protocol, versioned as [DRIFT-P/1](PROTOCOL.md)
 
-**Recent additions** (`v0.15.0`):
+**Recent additions** (`v0.20.0` — desktop):
 
-- **Lockdown Mode** — a toggleable high-paranoia state (`Ctrl+K`, or `drift chat --lockdown`): every keystroke re-scrambles the on-screen input so keyloggers and screen scrapers see only noise, scrollback history is wiped from memory, and paste is ignored. Defeats software keyloggers, screen scrapers, shoulder-surfing, and clipboard sniffers; hardware keyloggers and OS-level memory forensics are out of scope.
-- **QR contact exchange** — `drift init` renders a scannable QR of your contact code automatically on first run, and `drift whoami --qr` prints one on demand.
-- **UX polish** — interactive arrow-key welcome screen, empty-state hints, chat splash, post-init onboarding, send-confirmation glyphs, and system-message styling.
+- **Security score** — a clickable `SEC n/N` posture chip; every red item states its threat and most carry a one-click fix.
+- **Lockdown Mode (desktop)** — OS-level screen-capture shield (macOS/Windows), blur-on-unfocus, per-chat no-copy, clipboard guard.
+- **WITNESS live canary** — the relay's blindness chain re-verified in-app every 60 s; a break goes loud.
+- **Cipher X-ray** — any message's *actual* wire envelope (one-time address, opaque blob) next to its decrypted layers.
+- **Tor, bundled** — desktop routes over Tor with no system tor installed; safety-number randomart; disappearing invite codes; remote burn.
 
 ---
 
