@@ -54,6 +54,31 @@ DRIFT uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.19.1] — 2026-07-02
+
+**Motion pass — the terminal feels alive.** A cosmetic-only release for the
+desktop app: no protocol, crypto, or sidecar changes, no new dependencies.
+
+### Added
+- **Decrypt-reveal for incoming messages.** Each arriving line settles out of
+  random glyph noise into cleartext, left-to-right — dramatizing the moment a
+  sealed message is opened. Purely visual (the plaintext is already in hand);
+  see `apps/desktop/src/Scramble.tsx`.
+- **CRT power-on.** A one-shot bright scanline blooms open into the frame on
+  launch, like a tube warming up.
+- **Micro-interactions.** Copy → green flash on code boxes; a "transmitted"
+  pulse on the composer prompt when you send; a phosphor breathe on the
+  wordmark; a radar ring around live-peer status dots; a light-bar gleam that
+  sweeps primary buttons on hover; tactile press + hover-slide on list rows.
+
+### Notes
+- Every effect is gated behind `prefers-reduced-motion` — motion off, phosphor
+  glow intact. The decrypt-reveal and power-on don't even mount when reduced
+  motion is set; the CSS effects (including pseudo-element sweeps) are disabled
+  in the same media query.
+
+---
+
 ## [0.19.0] — 2026-07-01
 
 **The desktop learns to hide — Tor routing and a relay picker.** Two network

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { ChatMessage, Conversation } from "./types";
+import { Scramble } from "./Scramble";
 import { accentFor, copyText, fmtTime, glyphFor } from "./util";
 
 /** One conversation surface for every kind. A 1:1 chat, a room/channel (public
@@ -37,6 +38,7 @@ export function ChatPane({
     Number(localStorage.getItem(`drift.expire.${conversation.label}`) ?? 0),
   );
   const [burnArmed, setBurnArmed] = useState(false);
+  const [transmit, setTransmit] = useState(false);
   const scroller = useRef<HTMLDivElement>(null);
 
   function pickExpiry(seconds: number) {
@@ -59,6 +61,9 @@ export function ChatPane({
     if (!t) return;
     setDraft("");
     onSend(t);
+    // Brief "sealed & transmitted" pulse on the composer prompt.
+    setTransmit(true);
+    setTimeout(() => setTransmit(false), 420);
   }
 
   const prefix = (m: ChatMessage) =>
@@ -157,7 +162,11 @@ export function ChatPane({
                 {m.authorized === false ? " (unverified)" : ""}
               </span>
             )}
-            <span className="body">{m.text}</span>
+            {m.dir === "in" ? (
+              <Scramble className="body" text={m.text} />
+            ) : (
+              <span className="body">{m.text}</span>
+            )}
             {m.dir !== "sys" && (
               <button
                 className="line-copy"
@@ -181,7 +190,7 @@ export function ChatPane({
         ))}
       </div>
 
-      <div className="composer">
+      <div className={`composer${transmit ? " transmit" : ""}`}>
         <span className="prompt">{sessionTag ? `${sessionTag} ›` : "›"}</span>
         <input
           placeholder={readOnly ? "read-only — you hold no posting token" : "type a message…"}

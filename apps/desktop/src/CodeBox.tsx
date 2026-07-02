@@ -6,7 +6,7 @@ export function CodeBox({ code, dashed }: { code: string; dashed?: boolean }) {
   const [copied, setCopied] = useState(false);
   return (
     <div
-      className={`codebox${dashed ? " dashed" : ""}`}
+      className={`codebox${dashed ? " dashed" : ""}${copied ? " copied" : ""}`}
       title="click to copy"
       onClick={() => {
         void copyText(code);

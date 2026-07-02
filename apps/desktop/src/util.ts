@@ -59,3 +59,13 @@ export function fmtTime(ts: number): string {
   const d = new Date(ts);
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
+
+// True when the user (or OS) has asked for reduced motion. Every non-trivial
+// animation checks this so the app degrades to instant, still frames — the CRT
+// glow stays, the movement stops.
+export function prefersReducedMotion(): boolean {
+  return (
+    typeof window !== "undefined" &&
+    window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true
+  );
+}

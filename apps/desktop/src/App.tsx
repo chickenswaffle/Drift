@@ -17,7 +17,7 @@ import type {
   Status,
 } from "./types";
 
-const VERSION = "v0.19.0";
+const VERSION = "v0.19.1";
 
 // Block-art wordmark shown on the boot screen.
 const WORDMARK = String.raw`
@@ -31,6 +31,24 @@ const WORDMARK = String.raw`
 /** Blinking terminal caret. */
 function Cursor() {
   return <span className="cursor" aria-hidden />;
+}
+
+/**
+ * One-shot CRT "power on": a bright scanline blooms open into the full frame,
+ * then unmounts. Plays once per app launch and never under reduced motion.
+ */
+function PowerOn() {
+  const skip =
+    typeof window !== "undefined" &&
+    window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+  const [done, setDone] = useState(!!skip);
+  useEffect(() => {
+    if (skip) return;
+    const t = setTimeout(() => setDone(true), 900);
+    return () => clearTimeout(t);
+  }, [skip]);
+  if (done) return null;
+  return <div className="crt-power" aria-hidden />;
 }
 
 export function App() {
@@ -130,6 +148,7 @@ export function App() {
 
   return (
     <>
+      <PowerOn />
       <div className="scanbar" aria-hidden />
       {content}
       {lockPrompt && (

@@ -99,6 +99,39 @@ body::after {
   0% { transform: translateY(-40vh); }
   100% { transform: translateY(140vh); }
 }
+
+/* ---------- CRT power-on (one shot per launch) ---------- */
+.crt-power {
+  position: fixed;
+  inset: 0;
+  z-index: 9500;
+  pointer-events: none;
+  background: #000;
+  animation: crtPower 0.9s ease-out forwards;
+}
+@keyframes crtPower {
+  0% {
+    background: #000;
+    clip-path: inset(0 0 0 0);
+  }
+  22% {
+    /* collapse to a single bright horizontal line */
+    background: var(--text);
+    clip-path: inset(49.7% 0 49.7% 0);
+    filter: brightness(2.4);
+  }
+  46% {
+    /* the line blooms open vertically */
+    background: rgba(0, 255, 65, 0.5);
+    clip-path: inset(0 0 0 0);
+    filter: brightness(1.6);
+  }
+  100% {
+    background: rgba(0, 255, 65, 0);
+    clip-path: inset(0 0 0 0);
+    filter: brightness(1);
+  }
+}
 @keyframes flicker {
   0%, 100% { opacity: 1; }
   92% { opacity: 1; }
@@ -233,8 +266,13 @@ button:hover:not(:disabled) {
   border-color: var(--green-dim);
   box-shadow: var(--glow-green);
 }
+button:active:not(:disabled) {
+  transform: translateY(1px) scale(0.985);
+}
 button:disabled { opacity: 0.4; cursor: default; }
 button.primary {
+  position: relative;
+  overflow: hidden;
   background: transparent;
   border-color: var(--green-dim);
   color: var(--green);
@@ -245,6 +283,24 @@ button.primary {
 button.primary:hover:not(:disabled) {
   background: rgba(0, 255, 65, 0.08);
   border-color: var(--green);
+}
+/* a light-bar sweeps across primary buttons on hover — a phosphor gleam */
+button.primary::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    100deg,
+    transparent 20%,
+    rgba(0, 255, 65, 0.18) 50%,
+    transparent 80%
+  );
+  transform: translateX(-120%);
+  transition: transform 0.55s ease;
+  pointer-events: none;
+}
+button.primary:hover:not(:disabled)::after {
+  transform: translateX(120%);
 }
 button.ghost { background: transparent; }
 
@@ -261,6 +317,17 @@ button.ghost { background: transparent; }
   transition: border-color 0.15s, box-shadow 0.15s;
 }
 .codebox:hover { border-color: var(--cyan-dim); box-shadow: var(--glow-cyan); }
+.codebox.copied {
+  border-color: var(--green);
+  border-style: solid;
+  animation: copyFlash 0.6s ease-out;
+}
+.codebox.copied code { color: var(--green); }
+.codebox.copied .copy { color: var(--green); text-shadow: var(--glow-green); }
+@keyframes copyFlash {
+  0% { background: rgba(0, 255, 65, 0.22); box-shadow: 0 0 14px rgba(0, 255, 65, 0.5); }
+  100% { background: var(--bg); box-shadow: none; }
+}
 .codebox code {
   font-size: 11px;
   word-break: break-all;
@@ -297,6 +364,12 @@ button.ghost { background: transparent; }
   font-weight: 700;
   letter-spacing: 3px;
   font-size: 15px;
+  animation: phosphor 4.5s ease-in-out infinite;
+}
+/* the wordmark glow gently breathes, like a warm phosphor tube */
+@keyframes phosphor {
+  0%, 100% { text-shadow: 0 0 6px rgba(0, 255, 65, 0.55); }
+  50% { text-shadow: 0 0 10px rgba(0, 255, 65, 0.85), 0 0 2px rgba(0, 255, 65, 0.6); }
 }
 .brand .ver { color: var(--muted); text-shadow: none; letter-spacing: 0; font-size: 10px; font-weight: 400; }
 
@@ -345,7 +418,8 @@ input::placeholder { color: var(--muted); }
   color: var(--text);
   animation: lineIn 0.25s ease-out both;
 }
-.contact:hover { background: var(--panel-2); border-color: var(--line-soft); box-shadow: none; }
+.contact { transition: background 0.14s, border-color 0.14s, transform 0.14s; }
+.contact:hover { background: var(--panel-2); border-color: var(--line-soft); box-shadow: none; transform: translateX(3px); }
 .contact.active {
   background: rgba(0, 212, 255, 0.06);
   border-color: var(--cyan-dim);
@@ -359,9 +433,24 @@ input::placeholder { color: var(--muted); }
   flex: none;
 }
 .dot[data-on="true"] {
+  position: relative;
   background: var(--green);
   box-shadow: var(--glow-green);
   animation: pulse 1.8s ease-in-out infinite;
+}
+/* a faint radar ring expands outward from a live peer's status dot */
+.dot[data-on="true"]::after {
+  content: "";
+  position: absolute;
+  inset: -3px;
+  border-radius: 50%;
+  border: 1px solid var(--green);
+  animation: radar 1.8s ease-out infinite;
+  pointer-events: none;
+}
+@keyframes radar {
+  0% { transform: scale(0.6); opacity: 0.7; }
+  100% { transform: scale(2.2); opacity: 0; }
 }
 .footer {
   border-top: 1px solid var(--line);
@@ -478,8 +567,13 @@ input::placeholder { color: var(--muted); }
 .line .pfx { flex: none; font-weight: 700; opacity: 0.9; }
 .line.out { color: var(--green); }
 .line.out .pfx { color: var(--green); text-shadow: var(--glow-green); }
-.line.in { color: var(--text); }
+.line.in { color: var(--text); animation: msgIn 0.22s ease-out both, inArrive 0.9s ease-out both; }
 .line.in .pfx { color: var(--cyan); text-shadow: var(--glow-cyan); }
+/* incoming lines land with a brief cyan wash that fades — a decrypt "settle" */
+@keyframes inArrive {
+  0% { background: rgba(0, 212, 255, 0.12); box-shadow: inset 2px 0 0 0 var(--cyan); }
+  100% { background: transparent; box-shadow: inset 2px 0 0 0 transparent; }
+}
 .line.sys { color: var(--muted); font-size: 11px; font-style: italic; }
 .line.sys .pfx { color: var(--green-dim); }
 .line:hover { background: rgba(255, 255, 255, 0.02); }
@@ -501,8 +595,21 @@ input::placeholder { color: var(--muted); }
   text-shadow: var(--glow-green);
   font-weight: 700;
   flex: none;
+  transition: transform 0.12s ease;
 }
 .composer input { margin: 0; flex: 1; }
+/* on send: the prompt kicks forward and the top edge flares — "transmitted" */
+.composer.transmit {
+  box-shadow: inset 0 1px 0 0 rgba(0, 255, 65, 0.5);
+}
+.composer.transmit .prompt {
+  animation: transmit 0.42s ease-out;
+}
+@keyframes transmit {
+  0% { transform: translateX(0); text-shadow: var(--glow-green); }
+  35% { transform: translateX(4px); text-shadow: 0 0 12px rgba(0, 255, 65, 0.9); color: #eafff0; }
+  100% { transform: translateX(0); text-shadow: var(--glow-green); }
+}
 
 /* ---------- scrollbars ---------- */
 ::-webkit-scrollbar { width: 9px; height: 9px; }
@@ -760,7 +867,8 @@ button.link:hover:not(:disabled) {
   color: var(--text);
   animation: lineIn 0.2s ease-out both;
 }
-.nav-item:hover { background: var(--panel-2); border-color: var(--line-soft); box-shadow: none; }
+.nav-item { transition: background 0.14s, border-color 0.14s, transform 0.14s; }
+.nav-item:hover { background: var(--panel-2); border-color: var(--line-soft); box-shadow: none; transform: translateX(3px); }
 .nav-item.active { background: rgba(0, 212, 255, 0.06); border-color: var(--cyan-dim); }
 .item-glyph { flex: none; width: 1.1ch; font-weight: 700; text-align: center; }
 .item-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -928,12 +1036,31 @@ button.ghost.danger:hover:not(:disabled) { border-color: var(--red); box-shadow:
 /* ---------- respect reduced motion ---------- */
 @media (prefers-reduced-motion: reduce) {
   *,
+  *::before,
+  *::after,
   body::before,
   .scanbar,
   .ascii,
   .dot[data-on="true"],
+  .dot[data-on="true"]::after,
   .dot-pulse,
-  .cursor {
+  .cursor,
+  .brand,
+  .line.in,
+  .codebox.copied,
+  .composer.transmit .prompt,
+  button.primary::after {
     animation: none !important;
+  }
+  /* movement off, glow stays: neutralize the tactile transforms + sweeps */
+  .contact:hover,
+  .nav-item:hover,
+  button:active:not(:disabled),
+  .composer.transmit .prompt {
+    transform: none !important;
+  }
+  button.primary::after,
+  .dot[data-on="true"]::after {
+    display: none !important;
   }
 }
