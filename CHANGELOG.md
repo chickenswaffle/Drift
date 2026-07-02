@@ -54,6 +54,92 @@ DRIFT uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.18.0] — 2026-07-01
+
+**Nothing lingers — disappearing contact codes, disappearing messages, panic
+lock, and a hardened shell.** The theme of this release: everything can
+disappear — the code you share, the messages you send, the whole identity.
+**No new cryptography**: every feature is a thin wrapper over the existing,
+internally reviewed primitives (beacon, burn, vault, cover).
+
+### Added
+- **Disappearing contact codes (`driftinvite:`).** Mint a one-time code
+  instead of sharing your permanent one: it resolves to your contact code
+  exactly once, then burns, and dies on its own at the timer (10 m / 1 h /
+  24 h dial) regardless. Under the hood an invite *is* a beacon whose handle
+  is 128 random bits instead of a memorable name — same signing, same
+  encryption, same relay endpoints, so a relay can't even tell an invite from
+  a handle beacon. One-time works by the *redeemer* deleting the beacon on
+  first resolve via the existing idempotent `DELETE /beacon/{hash}` (on a
+  blind relay, deletion authority = resolution authority); expiry is the hard
+  guarantee and one-time is best-effort — the UI says exactly that. New
+  `drift.crypto.invite` + `drift.transport.beacon_http` (shared by CLI and
+  sidecar); sidecar `invite_create` / `invite_resolve` / `invite_extinguish`;
+  desktop InviteModal with live countdown and extinguish; the add-contact box
+  transparently redeems `driftinvite:` codes with an unverified warning. Live
+  invites are tracked in memory only — a disappearing code leaves no trace on
+  disk. Relay `BEACON_MAX_TTL` is now env-overridable (default 24 h; clients
+  still clamp guessable human handles to 10 minutes themselves).
+- **Disappearing messages + burn, in the GUI.** The burn machinery
+  (`crypto/burn.py`) finally has a surface: hover **burn** on your latest
+  sent line, or **burn conversation** in the header (two-click confirm) — the
+  peer's client verifies the tombstone's HMAC before deleting, and the UI
+  erases only on that verified event. Plus a per-conversation **expiry dial**
+  (off / 5 m / 1 h / 1 d): lines vanish from your screen on schedule, with an
+  honesty banner — it's a client-side display timer, your peer keeps their
+  copy unless you burn, and honest relays hold nothing past 30 seconds either
+  way.
+- **Panic lock.** Tray item + global **Ctrl/Cmd+Shift+L** (works with the
+  window hidden): closes every session and shreds the plaintext working copy
+  instantly, no passphrase. The sealed `vault.bin` persists — unlock restores
+  it — at the deliberate cost of anything changed since the last unlock.
+- **Verify-before-add.** "› check first" in the add-contact box shows the
+  safety number a code would produce *before* saving anything.
+- **Remove contact.** Hover `×` in the sidebar; closes any live session
+  first. (`storage.remove_contact`, sidecar `contacts_remove`.)
+- **Onboarding vault.** "Generate + seal with a passphrase" (with optional
+  duress wipe/decoy) at first run — the sidecar's `init` always supported it;
+  now the UI offers it.
+- **Cover-traffic dial** in Settings (off / low / high): Poisson-scheduled
+  decoy envelopes on newly opened 1:1 chats, so a wire-watcher can't tell
+  when you're really talking.
+- **The hermetic sidecar smoke test, for real.**
+  `tests/integration/test_sidecar_e2e.py` spawns two actual
+  `python -m drift.sidecar` subprocesses with isolated `$DRIFT_CONFIG` homes
+  against the in-process relay and drives the wire protocol end to end:
+  init → invite create/resolve/one-time/extinguish → chat_open →
+  send/receive → burn-reaches-peer. Plus `tests/unit/test_sidecar.py`
+  (dispatch, error hygiene, validation, locks) and `tests/unit/test_invite.py`.
+
+### Security (desktop shell hardening)
+- **CSP enabled** (was `null`): `script-src 'self'` with a stricter release
+  overlay — the injection backstop a messenger rendering remote strings
+  should have had. `style-src` keeps `'unsafe-inline'` for the accent inline
+  styles; that's the documented trade.
+- **RPC allowlist in the Rust shell**: the single `rpc` command now rejects
+  any method not on the UI's list, so a compromised webview can't probe the
+  sidecar surface.
+- **Per-conversation locks in the sidecar**: requests dispatch as concurrent
+  tasks, and close/rotate/leave could previously pull a session out from
+  under an in-flight send on the same conversation.
+- **Clipboard hygiene**: clicking a message line no longer silently copies
+  its plaintext (explicit hover **copy** button instead), and an opt-in
+  setting clears DRIFT-copied codes from the clipboard after 30 s (best
+  effort, only if the clipboard still holds them).
+- **Error hygiene**: unexpected sidecar exceptions return a generic message
+  instead of their repr; contact/room names dropped from stderr logs (the
+  shell inherits them); range/type validation on `fmd_set`, `group_create`,
+  `init` duress mode.
+- **Honest wording**: the sidecar's "audited core" comments now say
+  "internally reviewed" — SECURITY.md is the source of truth (no independent
+  audit yet). Unsigned-macOS note added to SECURITY.md + the desktop README.
+
+### Changed
+- Versions unified at 0.18.0 across the desktop app, Python package, and
+  README (previously 0.17.0 / 0.15.5 / 0.15.0).
+
+---
+
 ## [0.17.0] — 2026-07-01
 
 **Desktop app — channels, rooms, groups, a CRT overhaul, and updates that
