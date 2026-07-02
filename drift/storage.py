@@ -163,6 +163,16 @@ def add_contact(identity: Identity, name: str, code: str) -> Contacts:
     return contacts
 
 
+def remove_contact(identity: Identity, name: str) -> Contacts:
+    """Forget the contact called ``name``, returning the rest. Unknown names are
+    a no-op (mirrors :func:`remove_room`): removing is local bookkeeping — the
+    peer keeps their copy of the key exchange either way."""
+    contacts = load_contacts(identity)
+    contacts.pop(name, None)
+    save_contacts(identity, contacts)
+    return contacts
+
+
 # ---------------------------------------------------------------------------
 # Groups (Phase 8) — per-identity, keyed by local group name
 # ---------------------------------------------------------------------------
@@ -727,3 +737,25 @@ def set_fmd_rate(rate: float) -> float:
     SETTINGS_FILE.write_text(json.dumps(settings, indent=2))
     SETTINGS_FILE.chmod(0o600)
     return rate
+
+
+def get_cover_level() -> str:
+    """Cover-traffic level for new 1:1 sessions: ``off`` / ``low`` / ``high``.
+    Stored alongside ``fmd_rate`` in settings.json; junk falls back to off."""
+    raw = str(_load_settings().get("cover_level", "off")).strip().lower()
+    return raw if raw in ("off", "low", "high") else "off"
+
+
+def set_cover_level(level: str) -> str:
+    """Persist the cover-traffic level (``off`` / ``low`` / ``high``); returns
+    the value stored. Raises ``StorageError`` on junk. Applies to sessions
+    opened after the change."""
+    level = level.strip().lower()
+    if level not in ("off", "low", "high"):
+        raise StorageError("cover level must be off, low, or high")
+    settings = _load_settings()
+    settings["cover_level"] = level
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    SETTINGS_FILE.write_text(json.dumps(settings, indent=2))
+    SETTINGS_FILE.chmod(0o600)
+    return level

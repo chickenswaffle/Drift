@@ -11,6 +11,7 @@ Run: pytest tests/unit/test_relay_beacon.py -v
 from __future__ import annotations
 
 import base64
+import os
 import time
 from typing import Any
 
@@ -126,20 +127,25 @@ class TestTTL:
         assert r.json()["ttl_seconds"] == server.BEACON_MAX_TTL
         assert r.json()["expires_at"] <= int(time.time()) + server.BEACON_MAX_TTL
 
-    def test_ttl_cap_env_overridable(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # BEACON_MAX_TTL is read from $DRIFT_BEACON_MAX_TTL at import time; the
-        # default is 24 h for high-entropy invite handles (clients still clamp
-        # human handles to beacon.MAX_TTL_SECONDS themselves).
-        import importlib
-
+    def test_ttl_cap_default_is_24h(self) -> None:
+        # 24 h default for high-entropy invite handles; clients still clamp
+        # human handles to beacon.MAX_TTL_SECONDS (600 s) themselves.
         assert server.BEACON_MAX_TTL == 24 * 3600
-        monkeypatch.setenv("DRIFT_BEACON_MAX_TTL", "600")
-        reloaded = importlib.reload(server)
-        try:
-            assert reloaded.BEACON_MAX_TTL == 600
-        finally:
-            monkeypatch.delenv("DRIFT_BEACON_MAX_TTL")
-            importlib.reload(server)
+
+    def test_ttl_cap_env_overridable(self) -> None:
+        # $DRIFT_BEACON_MAX_TTL is read at import time. A subprocess gives a
+        # clean import without reloading relay.server in-process (a reload
+        # would swap _recent/app out from under the other relay test modules).
+        import subprocess
+        import sys
+
+        out = subprocess.run(
+            [sys.executable, "-c",
+             "import relay.server as s; print(s.BEACON_MAX_TTL)"],
+            capture_output=True, text=True, check=True,
+            env={**os.environ, "DRIFT_BEACON_MAX_TTL": "600"},
+        )
+        assert out.stdout.strip() == "600"
 
     def test_expiry_deletes_not_hides(self, client: TestClient) -> None:
         digest, _, _ = _light(client, "Diego552", ttl=300)

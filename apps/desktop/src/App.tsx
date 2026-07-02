@@ -73,6 +73,35 @@ export function App() {
     return () => un?.();
   }, []);
 
+  // Panic (tray item or the global CmdOrCtrl+Shift+L): no prompt, no
+  // passphrase — shred the working copy, show the lock screen, hide the
+  // window. Changes since the last unlock are discarded by design.
+  useEffect(() => {
+    let un: (() => void) | undefined;
+    void (async () => {
+      try {
+        const { listen } = await import("@tauri-apps/api/event");
+        un = await listen("menu:panic", () => {
+          if (!hasVault.current) return;
+          void (async () => {
+            try {
+              await rpc("panic_lock");
+              setLockPrompt(false);
+              setLocked(true);
+              const { getCurrentWindow } = await import("@tauri-apps/api/window");
+              await getCurrentWindow().hide();
+            } catch {
+              /* no vault or sidecar hiccup — nothing to seal */
+            }
+          })();
+        });
+      } catch {
+        /* no Tauri in dev */
+      }
+    })();
+    return () => un?.();
+  }, []);
+
   let content: JSX.Element;
   if (locked) {
     content = (
@@ -157,12 +186,25 @@ function Onboarding({ onDone }: { onDone: () => void }) {
   const [busy, setBusy] = useState(false);
   const [code, setCode] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  // Optional seal-it-now step: the sidecar's init already takes vault params,
+  // so onboarding can create identity + vault in one shot.
+  const [sealing, setSealing] = useState(false);
+  const [pass, setPass] = useState("");
+  const [duress, setDuress] = useState("");
+  const [mode, setMode] = useState<"wipe" | "decoy">("wipe");
 
-  async function generate() {
+  async function generate(withVault: boolean) {
     setBusy(true);
     setErr(null);
     try {
-      const res = await rpc<{ contact_code: string }>("init");
+      const params = withVault
+        ? {
+            passphrase: pass,
+            duress_passphrase: duress || undefined,
+            duress_mode: duress ? mode : undefined,
+          }
+        : {};
+      const res = await rpc<{ contact_code: string }>("init", params);
       setCode(res.contact_code);
     } catch (e) {
       setErr(String(e));
@@ -175,18 +217,7 @@ function Onboarding({ onDone }: { onDone: () => void }) {
     <div className="boot">
       <pre className="ascii">{WORDMARK}</pre>
       <div className="card">
-        {!code ? (
-          <>
-            <p className="muted">
-              No accounts. No phone numbers. Your identity is a keypair generated
-              locally — it never leaves this machine.
-            </p>
-            <button className="primary" disabled={busy} onClick={generate}>
-              {busy ? "generating…" : "› generate my identity"}
-            </button>
-            {err && <p className="error small">{err}</p>}
-          </>
-        ) : (
+        {code ? (
           <>
             <div className="label">identity ready — share this code</div>
             <CodeBox code={code} />
@@ -194,6 +225,70 @@ function Onboarding({ onDone }: { onDone: () => void }) {
             <button className="primary" onClick={onDone}>
               › continue
             </button>
+          </>
+        ) : sealing ? (
+          <>
+            <p className="muted small">
+              Seal your identity behind a passphrase from the start. An optional
+              duress passphrase opens a decoy or triggers a wipe —
+              indistinguishable to an onlooker from a normal unlock.
+            </p>
+            <input
+              className="lock-input"
+              type="password"
+              placeholder="passphrase"
+              value={pass}
+              autoFocus
+              onChange={(e) => setPass(e.target.value)}
+            />
+            <input
+              className="lock-input"
+              type="password"
+              placeholder="duress passphrase (optional)"
+              value={duress}
+              onChange={(e) => setDuress(e.target.value)}
+            />
+            {duress && (
+              <div className="dial">
+                <button
+                  className={`dial-stop ${mode === "wipe" ? "on" : ""}`}
+                  onClick={() => setMode("wipe")}
+                >
+                  wipe
+                </button>
+                <button
+                  className={`dial-stop ${mode === "decoy" ? "on" : ""}`}
+                  onClick={() => setMode("decoy")}
+                >
+                  decoy
+                </button>
+              </div>
+            )}
+            <button
+              className="primary"
+              disabled={busy || !pass}
+              onClick={() => void generate(true)}
+            >
+              {busy ? "generating…" : "› generate sealed identity"}
+            </button>
+            <button className="link" onClick={() => setSealing(false)}>
+              back
+            </button>
+            {err && <p className="error small">{err}</p>}
+          </>
+        ) : (
+          <>
+            <p className="muted">
+              No accounts. No phone numbers. Your identity is a keypair generated
+              locally — it never leaves this machine.
+            </p>
+            <button className="primary" disabled={busy} onClick={() => void generate(false)}>
+              {busy ? "generating…" : "› generate my identity"}
+            </button>
+            <button className="link" onClick={() => setSealing(true)}>
+              › generate + seal with a passphrase
+            </button>
+            {err && <p className="error small">{err}</p>}
           </>
         )}
       </div>
@@ -343,6 +438,12 @@ function Messenger({
   const openRef = useRef(open);
   openRef.current = open;
 
+  // Convos where WE just requested a burn: the relay echoes the verified
+  // tombstone to every subscriber (us included), so the event — not the rpc
+  // call — is the single source of truth. This flag only decides whether the
+  // sys line says "you" or "peer" and which side's line disappears.
+  const pendingBurns = useRef(new Set<string>());
+
   const append = useCallback((m: ChatMessage) => {
     setThreads((prev) => {
       const list = prev[m.convo] ? [...prev[m.convo], m] : [m];
@@ -394,6 +495,37 @@ function Messenger({
         const detail = `${data.kind}${data.detail ? ` ${data.detail}` : ""}`;
         setConvoStatus((s) => ({ ...s, [convo]: detail }));
         append({ convo, dir: "sys", text: detail, ts: Date.now() });
+      } else if (event === "burn") {
+        // Only HMAC-verified tombstones reach here (the session checks the
+        // token before the sidecar emits).
+        const convo = String(data.convo);
+        const scope = String(data.scope);
+        const mine = pendingBurns.current.delete(convo);
+        setThreads((prev) => {
+          const list = prev[convo] ?? [];
+          if (scope === "conversation") {
+            return {
+              ...prev,
+              [convo]: [{
+                convo, dir: "sys" as const, ts: Date.now(),
+                text: mine ? "conversation burned" : "conversation burned by peer",
+              }],
+            };
+          }
+          // message scope: the burner's last sent line vanishes — ours if we
+          // initiated, else the peer's latest incoming.
+          const gone = mine ? "out" : "in";
+          const idx = [...list].reverse().findIndex((m) => m.dir === gone);
+          const next = idx === -1 ? [...list] : [
+            ...list.slice(0, list.length - 1 - idx),
+            ...list.slice(list.length - idx),
+          ];
+          next.push({
+            convo, dir: "sys" as const, ts: Date.now(),
+            text: mine ? "your last message burned" : "peer burned their last message",
+          });
+          return { ...prev, [convo]: next };
+        });
       }
     });
     return () => {
@@ -459,6 +591,46 @@ function Messenger({
     }
   }
 
+  async function burn(scope: "message" | "conversation") {
+    if (!active) return;
+    const convo = active.label;
+    pendingBurns.current.add(convo);
+    try {
+      await rpc("chat_burn", { convo, scope });
+      // The verified tombstone will arrive as a "burn" event and do the erasing.
+    } catch (e) {
+      pendingBurns.current.delete(convo);
+      append({ convo, dir: "sys", text: `burn failed: ${e}`, ts: Date.now() });
+    }
+  }
+
+  // Disappearing messages: one sweep drops lines older than each conversation's
+  // expiry dial (localStorage drift.expire.<label>, seconds; absent/0 = off).
+  // Client-side by design — there is no on-disk history anywhere to purge, and
+  // the peer keeps their copy unless burn is used.
+  useEffect(() => {
+    const sweep = () => {
+      const now = Date.now();
+      setThreads((prev) => {
+        let changed = false;
+        const next: typeof prev = {};
+        for (const [label, list] of Object.entries(prev)) {
+          const ttl = Number(localStorage.getItem(`drift.expire.${label}`) ?? 0);
+          if (!ttl) {
+            next[label] = list;
+            continue;
+          }
+          const kept = list.filter((m) => m.dir === "sys" || m.ts >= now - ttl * 1000);
+          if (kept.length !== list.length) changed = true;
+          next[label] = kept;
+        }
+        return changed ? next : prev;
+      });
+    };
+    const t = setInterval(sweep, 30_000);
+    return () => clearInterval(t);
+  }, []);
+
   async function addContact(name: string, code: string): Promise<string | void> {
     // A driftinvite: code redeems (and burns) a disappearing invite; a drift:
     // code is a permanent contact code. Same box, both work.
@@ -472,6 +644,32 @@ function Messenger({
     }
     const res = await rpc<{ contacts: Contacts }>("contacts_add", { name, code });
     setContacts(res.contacts);
+  }
+
+  async function removeContact(name: string) {
+    try {
+      const res = await rpc<{ contacts: Contacts }>("contacts_remove", { name });
+      setContacts(res.contacts);
+      // The sidecar closed any live session; drop our side of it too.
+      setOpen((o) => {
+        const next = { ...o };
+        delete next[name];
+        return next;
+      });
+      setThreads((t) => {
+        const next = { ...t };
+        delete next[name];
+        return next;
+      });
+      setActive((a) => (a && a.kind === "contact" && a.label === name ? null : a));
+    } catch {
+      /* surfaced elsewhere */
+    }
+  }
+
+  async function checkCode(code: string): Promise<string> {
+    const res = await rpc<{ safety_number: string }>("safety_number", { code });
+    return res.safety_number;
   }
 
   function onNew(kind: ConvoKind) {
@@ -538,6 +736,8 @@ function Messenger({
         onOpen={(kind, label, meta) => void openConversation(kind, label, meta)}
         onNew={onNew}
         onAddContact={addContact}
+        onRemoveContact={(name) => void removeContact(name)}
+        onCheckCode={checkCode}
         onInvite={() => setModal("invite")}
         onSettings={() => setSettingsOpen(true)}
         onLock={onLock}
@@ -553,6 +753,11 @@ function Messenger({
             status={convoStatus[activeConvo.label]}
             connected={!!open[activeConvo.label]}
             onSend={send}
+            onBurn={
+              activeConvo.kind === "contact" && open[activeConvo.label]
+                ? (scope) => void burn(scope)
+                : undefined
+            }
             onManage={activeConvo.kind !== "contact" ? () => setModal("manage") : undefined}
           />
         ) : (

@@ -255,6 +255,7 @@ class Sidecar:
             "whoami": self._whoami,
             "contacts_list": self._contacts_list,
             "contacts_add": self._contacts_add,
+            "contacts_remove": self._contacts_remove,
             "safety_number": self._safety_number,
             # disappearing contact codes (one-time invites over the beacon store)
             "invite_create": self._invite_create,
@@ -262,12 +263,16 @@ class Sidecar:
             "invite_extinguish": self._invite_extinguish,
             "fmd_get": self._fmd_get,
             "fmd_set": self._fmd_set,
+            "cover_get": self._cover_get,
+            "cover_set": self._cover_set,
             "lock": self._lock,
             "unlock": self._unlock,
             "vault_create": self._vault_create,
+            "panic_lock": self._panic_lock,
             "chat_open": self._chat_open,
             "chat_send": self._chat_send,
             "chat_close": self._chat_close,
+            "chat_burn": self._chat_burn,
             # channels & rooms (sovereign rooms / broadcast channels)
             "channels_list": self._channels_list,
             "channel_create": self._channel_create,
@@ -359,6 +364,20 @@ class Sidecar:
         name = str(params.get("name", ""))
         code = str(params.get("code", ""))
         contacts = storage.add_contact(identity, name, code)
+        return {"contacts": {n: c["code"] for n, c in contacts.items()}}
+
+    async def _contacts_remove(self, params: dict[str, Any]) -> dict[str, Any]:
+        identity = storage.load_identity()
+        name = str(params.get("name", ""))
+        if not name:
+            raise RpcError("contacts_remove requires a name")
+        # Close any live conversation with them first (it holds their code).
+        async with self._convo_lock(name):
+            conversation = self._convos.pop(name, None)
+            if conversation is not None:
+                await conversation.close()
+        self._convo_locks.pop(name, None)
+        contacts = storage.remove_contact(identity, name)
         return {"contacts": {n: c["code"] for n, c in contacts.items()}}
 
     async def _safety_number(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -490,6 +509,25 @@ class Sidecar:
             raise RpcError("fmd rate must be between 0 and 1")
         return {"fmd_rate": storage.set_fmd_rate(rate)}
 
+    async def _cover_get(self, _: dict[str, Any]) -> dict[str, Any]:
+        return {"cover_level": storage.get_cover_level()}
+
+    async def _cover_set(self, params: dict[str, Any]) -> dict[str, Any]:
+        level = str(params.get("level", "off"))
+        return {"cover_level": storage.set_cover_level(level)}
+
+    async def _panic_lock(self, _: dict[str, Any]) -> dict[str, Any]:
+        """Instant, passphrase-free seal: close everything and shred the
+        materialized working copy. The sealed vault.bin persists, so the next
+        unlock restores it — at the cost of anything changed *since* the last
+        unlock/lock (new contacts, rooms). That trade is the whole point: a
+        panic must not wait for typing."""
+        if not storage.vault_exists():
+            raise RpcError("panic lock requires a vault — set a passphrase first")
+        await self._close_all_convos()
+        storage.shred_working_copy()
+        return {"locked": True}
+
     async def _lock(self, params: dict[str, Any]) -> dict[str, Any]:
         passphrase = params.get("passphrase")
         if not passphrase:
@@ -524,6 +562,7 @@ class Sidecar:
         identity = storage.load_identity()
 
         if kind == "contact":
+            from drift.crypto.cover import CoverLevel
             from drift.transport.session import Session
 
             convo = str(params.get("contact", ""))
@@ -540,9 +579,17 @@ class Sidecar:
                 def on_event(k: str, d: str) -> None:
                     _emit_event("chat_event", {"convo": convo, "kind": k, "detail": d})
 
+                def on_burn(scope: str, message_id: str | None) -> None:
+                    # Only fired for HMAC-verified tombstones (session.messages
+                    # checks the token before calling this).
+                    _emit_event("burn", {"convo": convo, "scope": scope,
+                                         "message_id": message_id})
+
                 session: Any = Session(
                     identity, entry["code"], relay_url,
-                    on_event=on_event, prekeys=storage.ensure_prekeys(identity),
+                    on_event=on_event, on_burn=on_burn,
+                    prekeys=storage.ensure_prekeys(identity),
+                    cover=CoverLevel.parse(storage.get_cover_level()),
                 )
                 conversation: Any = _Conversation(convo, session, self._loop)
                 await conversation.start()
@@ -622,6 +669,29 @@ class Sidecar:
                 await conversation.close()
         self._convo_locks.pop(convo, None)
         return {"closed": True}
+
+    async def _chat_burn(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Erase our last message (or the whole conversation) from the relay
+        and, via a verified tombstone, from the peer's client too. 1:1 only —
+        rooms/channels are shared-key and have no burn construction."""
+        convo = str(params.get("convo", ""))
+        scope = str(params.get("scope", "message"))
+        if scope not in ("message", "conversation"):
+            raise RpcError("scope must be 'message' or 'conversation'")
+        async with self._convo_lock(convo):
+            conversation = self._convos.get(convo)
+            if conversation is None:
+                raise RpcError(f"no open conversation: {convo}")
+            if not isinstance(conversation, _Conversation):
+                raise RpcError("burn is available for 1:1 chats only")
+            try:
+                if scope == "message":
+                    await conversation.session.burn_last_message()
+                else:
+                    await conversation.session.burn_conversation()
+            except Exception as exc:
+                raise RpcError(f"burn failed: {exc}") from None
+        return {"requested": True, "scope": scope}
 
     # -- vault -------------------------------------------------------------
 

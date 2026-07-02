@@ -6,12 +6,22 @@ import { accentFor, copyText, fmtTime, glyphFor } from "./util";
  *  banner, sender pseudonyms, read-only when you hold no posting token), and a
  *  group (sender names, member count) all share the composer + scroll; only the
  *  header, banner, and per-line author rendering differ. */
+// Per-conversation disappearing-messages dial. Client-side display TTL only —
+// the sweep lives in App; this just owns the setting + banner.
+const EXPIRY_STOPS = [
+  { key: "off", seconds: 0 },
+  { key: "5m", seconds: 300 },
+  { key: "1h", seconds: 3600 },
+  { key: "1d", seconds: 86400 },
+] as const;
+
 export function ChatPane({
   conversation,
   messages,
   status,
   connected,
   onSend,
+  onBurn,
   onManage,
 }: {
   conversation: Conversation;
@@ -19,10 +29,21 @@ export function ChatPane({
   status?: string;
   connected: boolean;
   onSend: (text: string) => void;
+  onBurn?: (scope: "message" | "conversation") => void;
   onManage?: () => void;
 }) {
   const [draft, setDraft] = useState("");
+  const [expiry, setExpiry] = useState<number>(() =>
+    Number(localStorage.getItem(`drift.expire.${conversation.label}`) ?? 0),
+  );
+  const [burnArmed, setBurnArmed] = useState(false);
   const scroller = useRef<HTMLDivElement>(null);
+
+  function pickExpiry(seconds: number) {
+    setExpiry(seconds);
+    if (seconds) localStorage.setItem(`drift.expire.${conversation.label}`, String(seconds));
+    else localStorage.removeItem(`drift.expire.${conversation.label}`);
+  }
 
   useEffect(() => {
     scroller.current?.scrollTo(0, scroller.current.scrollHeight);
@@ -42,6 +63,15 @@ export function ChatPane({
 
   const prefix = (m: ChatMessage) =>
     m.dir === "out" ? "›" : m.dir === "in" ? "‹" : "·";
+
+  // Burn targets only our most recent sent line (that's what the burn token
+  // addresses — the last message this session sent).
+  const lastOutIndex = (() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].dir === "out") return i;
+    }
+    return -1;
+  })();
 
   const headStatus =
     status ??
@@ -63,12 +93,52 @@ export function ChatPane({
           {label}
         </span>
         <span className="muted small">{headStatus}</span>
+        <span className="head-spacer" />
+        <span className="expiry-dial" title="disappearing messages (this screen only)">
+          <span className="muted small">expiry</span>
+          {EXPIRY_STOPS.map((s) => (
+            <button
+              key={s.key}
+              className={`dial-stop mini ${expiry === s.seconds ? "on" : ""}`}
+              onClick={() => pickExpiry(s.seconds)}
+            >
+              {s.key}
+            </button>
+          ))}
+        </span>
+        {onBurn &&
+          (burnArmed ? (
+            <span className="burn-confirm">
+              <button className="link danger" onClick={() => { setBurnArmed(false); onBurn("conversation"); }}>
+                confirm burn
+              </button>
+              <button className="link" onClick={() => setBurnArmed(false)}>
+                cancel
+              </button>
+            </span>
+          ) : (
+            <button
+              className="link danger"
+              title="erase this conversation from the relay and your peer's verified client"
+              onClick={() => setBurnArmed(true)}
+            >
+              burn conversation
+            </button>
+          ))}
         {onManage && kind !== "contact" && (
           <button className="link chat-manage" onClick={onManage}>
             manage
           </button>
         )}
       </header>
+
+      {expiry > 0 && (
+        <div className="room-banner disappearing" title="client-side display timer">
+          DISAPPEARING · lines vanish from this screen on schedule. Your peer keeps
+          their copy unless you burn — burn asks their verified client to delete
+          too. Honest relays hold nothing past 30 seconds either way.
+        </div>
+      )}
 
       {isRoom && (
         <div className="room-banner" title="rooms are shared-key, not ratcheted">
@@ -95,6 +165,15 @@ export function ChatPane({
                 onClick={() => void copyText(m.text)}
               >
                 copy
+              </button>
+            )}
+            {onBurn && i === lastOutIndex && (
+              <button
+                className="line-copy danger"
+                title="erase this message from the relay and your peer's verified client"
+                onClick={() => onBurn("message")}
+              >
+                burn
               </button>
             )}
             <span className="ts muted">{fmtTime(m.ts)}</span>

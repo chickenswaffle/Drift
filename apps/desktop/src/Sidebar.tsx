@@ -21,6 +21,8 @@ export function Sidebar({
   onOpen,
   onNew,
   onAddContact,
+  onRemoveContact,
+  onCheckCode,
   onInvite,
   onSettings,
   onLock,
@@ -38,6 +40,8 @@ export function Sidebar({
   onOpen: (kind: ConvoKind, label: string, meta?: Partial<Conversation>) => void;
   onNew: (kind: ConvoKind) => void;
   onAddContact: (name: string, code: string) => Promise<string | void>;
+  onRemoveContact: (name: string) => void;
+  onCheckCode: (code: string) => Promise<string>;
   onInvite: () => void;
   onSettings: () => void;
   onLock: () => void;
@@ -128,7 +132,7 @@ export function Sidebar({
           kind="contact"
           onNew={onNew}
           count={contactItems.length}
-          adder={<AddContact onAdd={onAddContact} />}
+          adder={<AddContact onAdd={onAddContact} onCheck={onCheckCode} />}
         >
           {contactItems.map((it) => (
             <NavItem
@@ -137,6 +141,7 @@ export function Sidebar({
               active={active?.kind === "contact" && active.label === it.label}
               on={openLabels.has(it.label)}
               onClick={() => onOpen("contact", it.label)}
+              onRemove={() => onRemoveContact(it.label)}
             />
           ))}
         </Section>
@@ -206,30 +211,61 @@ function NavItem({
   active,
   on,
   onClick,
+  onRemove,
 }: {
   item: Item;
   active: boolean;
   on: boolean;
   onClick: () => void;
+  onRemove?: () => void;
 }) {
   const accent = accentFor(item.label);
+  // A div (not a button) so the optional remove control can be a real button
+  // inside it without invalid nesting.
   return (
-    <button className={`nav-item ${active ? "active" : ""}`} onClick={onClick}>
+    <div
+      className={`nav-item ${active ? "active" : ""}`}
+      role="button"
+      tabIndex={0}
+      onClick={onClick}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") onClick();
+      }}
+    >
       <span className="item-glyph" style={{ color: accent }}>
         {glyphFor(item.kind)}
       </span>
       <span className="item-label">{item.label}</span>
       {item.sub && <span className="item-sub muted">{item.sub}</span>}
+      {onRemove && (
+        <button
+          className="item-remove"
+          title={`remove ${item.label}`}
+          onClick={(e) => {
+            e.stopPropagation();
+            onRemove();
+          }}
+        >
+          ×
+        </button>
+      )}
       <span className="dot" data-on={on} />
-    </button>
+    </div>
   );
 }
 
-function AddContact({ onAdd }: { onAdd: (name: string, code: string) => Promise<string | void> }) {
+function AddContact({
+  onAdd,
+  onCheck,
+}: {
+  onAdd: (name: string, code: string) => Promise<string | void>;
+  onCheck: (code: string) => Promise<string>;
+}) {
   const [name, setName] = useState("");
   const [code, setCode] = useState("");
   const [err, setErr] = useState<string | null>(null);
   const [warn, setWarn] = useState<string | null>(null);
+  const [checked, setChecked] = useState<string | null>(null);
 
   async function submit() {
     setErr(null);
@@ -238,11 +274,27 @@ function AddContact({ onAdd }: { onAdd: (name: string, code: string) => Promise<
       const warning = await onAdd(name.trim(), code.trim());
       setName("");
       setCode("");
+      setChecked(null);
       if (warning) setWarn(warning);
     } catch (e) {
       setErr(String(e));
     }
   }
+
+  // Verify-then-trust, before saving anything: show the safety number this
+  // code would produce so it can be compared out-of-band first. Permanent
+  // codes only — an invite must be redeemed (burned) to learn the code inside.
+  async function check() {
+    setErr(null);
+    setChecked(null);
+    try {
+      setChecked(await onCheck(code.trim()));
+    } catch (e) {
+      setErr(String(e));
+    }
+  }
+
+  const isInvite = code.trim().startsWith("driftinvite:");
 
   return (
     <div className="add-contact">
@@ -250,11 +302,27 @@ function AddContact({ onAdd }: { onAdd: (name: string, code: string) => Promise<
       <input
         placeholder="drift:… code or driftinvite:… invite"
         value={code}
-        onChange={(e) => setCode(e.target.value)}
+        onChange={(e) => {
+          setCode(e.target.value);
+          setChecked(null);
+        }}
       />
-      <button className="ghost" onClick={() => void submit()} disabled={!name || !code}>
-        + add contact
-      </button>
+      <div className="add-actions">
+        <button className="ghost" onClick={() => void submit()} disabled={!name || !code}>
+          + add contact
+        </button>
+        {!isInvite && (
+          <button className="ghost" onClick={() => void check()} disabled={!code}>
+            › check first
+          </button>
+        )}
+      </div>
+      {checked && (
+        <p className="muted small">
+          safety number: <span className="safety-inline">{checked}</span> — compare
+          out-of-band, then add.
+        </p>
+      )}
       {warn && <p className="warn small">{warn}</p>}
       {err && <p className="error small">{err}</p>}
     </div>

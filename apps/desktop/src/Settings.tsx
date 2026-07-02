@@ -80,6 +80,7 @@ export function Settings({
         <VaultSection vaultExists={status.vault_exists} onChanged={onChanged} />
         <VerifySection contacts={contacts} />
         <FmdSection currentRate={status.fmd_rate} />
+        <CoverSection />
         <NotifySection />
         <ClipboardSection />
 
@@ -133,10 +134,17 @@ function VaultSection({
     <section className="setting">
       <div className="label">vault</div>
       {vaultExists || done ? (
-        <p className="muted small">
-          A passphrase-sealed vault is set. Lock DRIFT from the sidebar or tray;
-          unlock with your passphrase. Your identity is encrypted at rest.
-        </p>
+        <>
+          <p className="muted small">
+            A passphrase-sealed vault is set. Lock DRIFT from the sidebar or tray;
+            unlock with your passphrase. Your identity is encrypted at rest.
+          </p>
+          <p className="muted small">
+            Panic lock (tray, or Ctrl/Cmd+Shift+L anywhere) seals instantly with
+            no passphrase — anything changed this session (new contacts, rooms)
+            is discarded. Normal lock preserves changes.
+          </p>
+        </>
       ) : (
         <>
           <p className="muted small">
@@ -302,6 +310,67 @@ function FmdSection({ currentRate }: { currentRate: number }) {
         ))}
       </div>
       <p className="muted small">{note}</p>
+      {err && <p className="error small">{err}</p>}
+    </section>
+  );
+}
+
+// Cover traffic: Poisson-scheduled dummy envelopes + uniform message size on
+// open 1:1 channels, so a wire-watcher can't tell when you're really talking.
+const COVER_STOPS = [
+  { key: "off", note: "no decoys — cheapest, but send timing is visible on the wire" },
+  { key: "low", note: "occasional decoys blur your activity pattern at modest bandwidth" },
+  { key: "high", note: "steady decoys — strongest timing cover, costs the most bandwidth" },
+] as const;
+
+function CoverSection() {
+  const [active, setActive] = useState<string>("off");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    void rpc<{ cover_level: string }>("cover_get")
+      .then((r) => setActive(r.cover_level))
+      .catch(() => undefined);
+  }, []);
+
+  async function pick(key: string) {
+    if (busy) return;
+    setBusy(true);
+    setErr(null);
+    const prev = active;
+    setActive(key);
+    try {
+      await rpc<{ cover_level: string }>("cover_set", { level: key });
+    } catch (e) {
+      setActive(prev);
+      setErr(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const note = COVER_STOPS.find((s) => s.key === active)?.note ?? "";
+
+  return (
+    <section className="setting">
+      <div className="label">cover traffic</div>
+      <div className="dial">
+        {COVER_STOPS.map((s) => (
+          <button
+            key={s.key}
+            className={`dial-stop ${active === s.key ? "on" : ""}`}
+            onClick={() => void pick(s.key)}
+            disabled={busy}
+          >
+            {s.key}
+          </button>
+        ))}
+      </div>
+      <p className="muted small">
+        {note} Constant-shape decoy traffic on open 1:1 channels — hides when
+        you&apos;re really talking. Applies to newly opened chats.
+      </p>
       {err && <p className="error small">{err}</p>}
     </section>
   );
