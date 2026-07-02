@@ -20,7 +20,7 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import TypedDict
+from typing import NotRequired, TypedDict
 
 from drift.crypto import Identity, x3dh
 from drift.crypto.groups import GroupState
@@ -72,8 +72,14 @@ SETTINGS_FILE = CONFIG_DIR / "settings.json"
 
 
 class Contact(TypedDict):
-    """A saved contact record."""
+    """A saved contact record.
+
+    ``verified`` is a user attestation — set only after the user compared
+    safety numbers out-of-band and confirmed they match. It carries no
+    cryptographic weight of its own (absent means unverified).
+    """
     code: str
+    verified: NotRequired[bool]
 
 
 Contacts = dict[str, Contact]
@@ -159,6 +165,24 @@ def add_contact(identity: Identity, name: str, code: str) -> Contacts:
         raise StorageError("invalid contact code")
     contacts = load_contacts(identity)
     contacts[name] = {"code": code}
+    save_contacts(identity, contacts)
+    return contacts
+
+
+def set_contact_verified(identity: Identity, name: str, verified: bool) -> Contacts:
+    """
+    Record the user's attestation that ``name``'s safety number was compared
+    out-of-band (or clear it). Pure bookkeeping — no cryptographic effect.
+
+    Raises ``StorageError`` for unknown contacts.
+    """
+    contacts = load_contacts(identity)
+    if name not in contacts:
+        raise StorageError(f"no contact named {name!r}")
+    if verified:
+        contacts[name]["verified"] = True
+    else:
+        contacts[name].pop("verified", None)
     save_contacts(identity, contacts)
     return contacts
 

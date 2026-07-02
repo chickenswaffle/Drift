@@ -4,7 +4,7 @@ import { CodeBox } from "./CodeBox";
 import type { Conversation, GroupInfo } from "./types";
 
 /** Shared modal shell: backdrop, card, title, Escape-to-close. */
-function Modal({
+export function Modal({
   title,
   onClose,
   children,

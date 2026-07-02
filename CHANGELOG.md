@@ -54,7 +54,65 @@ DRIFT uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-## [0.19.1] — 2026-07-02
+## [0.20.0] — 2026-07-02
+
+**Show your work.** The desktop app stops asking to be trusted and starts
+proving things: a live security score, a verifiable-blindness canary, and an
+x-ray of the actual wire. Plus desktop Lockdown Mode and the protocol gets a
+name — **DRIFT-P/1**. No new cryptography anywhere in this release: one
+attestation bit, metadata plumbing, visualization, and documentation.
+
+### Added
+- **Security score (SEC chip).** A clickable `SEC n/N` posture score in the
+  sidebar footer and every chat header. Expands to a checklist — green items
+  pass, red items carry a one-line threat statement and (where a safe default
+  exists) a one-click fix: Tor routing, encrypted relay link, identity vault,
+  cover traffic, FMD noise, clipboard guard, screen shield, concealed contact
+  code, plus per-chat items (contact verified, disappearing messages). Honesty
+  footer included: a green board doesn't make a compromised endpoint safe.
+- **Desktop Lockdown Mode.** One master switch (Settings + tray) over four
+  device-local protections, each independently toggleable: **screen shield**
+  (window excluded from screenshots/recording via OS content protection —
+  macOS/Windows; labeled unavailable on Linux), **blur-on-unfocus** (the frame
+  veils the instant focus leaves), **no-copy** (global or per-conversation:
+  copy buttons vanish, selection and copy events disabled), and the clipboard
+  guard. None of it binds the peer's device — the UI says so.
+- **WITNESS live canary.** The relay's signed, hash-chained blindness
+  certificates are now re-verified inside the app once a minute (over Tor when
+  active) — a heartbeat row under the relay line, and a panel rendering what
+  the relay provably cannot see from the newest certificate. A chain break
+  goes loud (red banner + native alert) and stays broken until restart. New
+  `drift/transport/witness_http.py` (shared client, beacon_http precedent);
+  CLI `witness verify/subscribe` refactored onto it, behavior unchanged.
+- **Cipher X-ray.** Hover any 1:1 message → `xray` → the actual envelope from
+  the wire: the one-time stealth address, the opaque blob's size and first
+  bytes as a hex view, the FMD flag, side by side with the decrypted layer
+  ladder. Every displayed field was already relay-visible; the sidecar event
+  carries wire metadata only (asserted in tests — no plaintext-derived data).
+  New optional `on_envelope` hook on `Session` (the `on_burn` pattern).
+- **Safety-number randomart.** Every safety number now renders as OpenSSH-style
+  drunken-bishop art — same picture on both screens = same keys. Shown in
+  Settings verify, add-contact check-first, and the new verify flow, which
+  ends in "mark verified": a persisted, non-cryptographic attestation bit
+  (`contact_verify` RPC) that shows as ✓ in the sidebar and greens the
+  checklist item.
+- **The Drift Protocol.** `PROTOCOL.md` — the versioned DRIFT-P/1 wire
+  specification (identity, stealth addressing, sealed-sender blob layout,
+  envelope format, X3DH/ratchet framing, cover, FMD, beacons/invites, burn
+  tokens, groups/rooms, WITNESS, at-rest, versioning-without-negotiation, and
+  an explicit "what this protocol does NOT provide"). Plus
+  `docs/open-core.md` — the open-core stance: protocol/client/relay stay MIT,
+  paid layer lives above the protocol, the moat is trademark + stewardship.
+
+### Changed
+- `contacts_*` RPCs now return `{name: {code, verified}}` instead of a flat
+  `{name: code}` map.
+- Clipboard-clear setting moved into the Lockdown section (same key).
+
+### Security
+- New Tauri capability `core:window:allow-set-content-protected` (the screen
+  shield); `contact_verify` and `witness_status` added to the shell's RPC
+  allowlist.
 
 **Motion pass — the terminal feels alive.** A cosmetic-only release for the
 desktop app: no protocol, crypto, or sidecar changes, no new dependencies.

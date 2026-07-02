@@ -11,7 +11,7 @@
 # DRIFT
 
 [![CI](https://github.com/chickenswaffle/Drift/actions/workflows/ci.yml/badge.svg)](https://github.com/chickenswaffle/Drift/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-v0.19.0-blue)](https://github.com/chickenswaffle/Drift/releases/tag/v0.19.0)
+[![Version](https://img.shields.io/badge/version-v0.20.0-blue)](https://github.com/chickenswaffle/Drift/releases/tag/v0.20.0)
 [![Phase](https://img.shields.io/badge/phase-12%20%E2%80%94%20Lockdown%20Mode-brightgreen)](#project-status) [![Site](https://img.shields.io/badge/site-driftmsg.io-00aa2a?style=flat&labelColor=0a0a0a)](https://chickenswaffle.github.io/DRIFT-Site/)
 
 > A terminal-first, end-to-end encrypted messenger with rotating, unlinkable receiving addresses.
@@ -45,6 +45,22 @@ $ drift chat bob
 Every message you receive lands at a **fresh, random address** that the relay cannot link to you or to any of your other messages. Your identity is a keypair you generate locally — nothing more. The relay is a dumb bulletin board of opaque ciphertext with a TTL; it sees nothing useful and holds nothing useful.
 
 Full protocol design: [`DESIGN.md`](DESIGN.md)
+
+---
+
+## The Drift Protocol
+
+The wire protocol has a name and a versioned specification: **DRIFT-P/1**, in
+[`PROTOCOL.md`](PROTOCOL.md) — identity, stealth addressing, sealed sender,
+the envelope format, X3DH + Double Ratchet framing, beacons/invites, burns,
+FMD, rooms/groups, and WITNESS, each with its wire layout and its honest
+limits. If you want to build a compatible client or relay, start there.
+
+**Open-core stance:** the protocol, this client, and the reference relay are
+MIT and stay that way — a security tool you can't read is a security tool you
+can't trust. Anything we ever charge for will live *above* the protocol
+(operated relays, monitoring, enterprise tooling), never inside it. Details:
+[`docs/open-core.md`](docs/open-core.md).
 
 ---
 

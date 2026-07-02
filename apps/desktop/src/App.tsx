@@ -6,6 +6,11 @@ import { Sidebar } from "./Sidebar";
 import { ChatPane } from "./ChatPane";
 import { CommandPalette, type Command } from "./CommandPalette";
 import { NewChannelModal, JoinRoomModal, NewGroupModal, ManageModal, InviteModal } from "./modals";
+import { SecBadge, SecPanel, VerifyModal } from "./Security";
+import { WitnessCanary } from "./Witness";
+import { XrayModal } from "./Xray";
+import { buildChecklist, type Fix } from "./seccheck";
+import { applyOnStartup, blurOn, setShield, shieldOn } from "./lockdown";
 import { CodeBox } from "./CodeBox";
 import type {
   ChatMessage,
@@ -17,7 +22,7 @@ import type {
   Status,
 } from "./types";
 
-const VERSION = "v0.19.1";
+const VERSION = "v0.20.0";
 
 // Block-art wordmark shown on the boot screen.
 const WORDMARK = String.raw`
@@ -120,6 +125,22 @@ export function App() {
     return () => un?.();
   }, []);
 
+  // Lockdown veil: when enabled, losing OS focus blurs the whole frame so a
+  // shoulder-surfer (or a stray screen-share) sees phosphor, not messages.
+  const [veiled, setVeiled] = useState(false);
+  useEffect(() => {
+    const onBlur = () => {
+      if (blurOn()) setVeiled(true);
+    };
+    const onFocus = () => setVeiled(false);
+    window.addEventListener("blur", onBlur);
+    window.addEventListener("focus", onFocus);
+    return () => {
+      window.removeEventListener("blur", onBlur);
+      window.removeEventListener("focus", onFocus);
+    };
+  }, []);
+
   let content: JSX.Element;
   if (locked) {
     content = (
@@ -150,7 +171,12 @@ export function App() {
     <>
       <PowerOn />
       <div className="scanbar" aria-hidden />
-      {content}
+      <div className={veiled ? "veil-wrap veiled" : "veil-wrap"}>{content}</div>
+      {veiled && (
+        <div className="veil-mark" aria-hidden>
+          DRIFT · LOCKDOWN
+        </div>
+      )}
       {lockPrompt && (
         <LockPrompt
           onLocked={() => {
@@ -454,6 +480,47 @@ function Messenger({
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
 
+  // Security posture: cover level (only reachable via cover_get), a tick that
+  // forces checklist recompute after localStorage/shield fixes, the open
+  // checklist panel (global from the sidebar, contextual from a chat), and
+  // the verify-flow target.
+  const [coverLevel, setCoverLevel] = useState("off");
+  const [secTick, setSecTick] = useState(0);
+  const [secPanel, setSecPanel] = useState<"global" | "convo" | null>(null);
+  const [verifyName, setVerifyName] = useState<string | null>(null);
+  const [xrayMsg, setXrayMsg] = useState<ChatMessage | null>(null);
+
+  // Re-apply device-local lockdown protections (the OS forgets across runs).
+  useEffect(() => {
+    void applyOnStartup();
+  }, []);
+
+  // Tray "Lockdown mode" → toggle everything at once.
+  useEffect(() => {
+    let un: (() => void) | undefined;
+    void (async () => {
+      try {
+        const { listen } = await import("@tauri-apps/api/event");
+        const { lockdownAll, setLockdownAll } = await import("./lockdown");
+        un = await listen("menu:lockdown", () => {
+          void setLockdownAll(!lockdownAll()).then(() => setSecTick((t) => t + 1));
+        });
+      } catch {
+        /* no Tauri in dev */
+      }
+    })();
+    return () => un?.();
+  }, []);
+
+  const refreshCover = useCallback(async () => {
+    try {
+      const res = await rpc<{ cover_level: string }>("cover_get");
+      setCoverLevel(res.cover_level);
+    } catch {
+      /* surfaced elsewhere */
+    }
+  }, []);
+
   const openRef = useRef(open);
   openRef.current = open;
 
@@ -493,8 +560,9 @@ function Messenger({
         /* surfaced elsewhere */
       }
       await refreshLists();
+      await refreshCover();
     })();
-  }, [refreshLists]);
+  }, [refreshLists, refreshCover]);
 
   // One subscription to the sidecar event stream.
   useEffect(() => {
@@ -505,7 +573,11 @@ function Messenger({
         const who = data.who != null ? String(data.who) : undefined;
         const authorized =
           typeof data.authorized === "boolean" ? data.authorized : undefined;
-        append({ convo, dir, text: String(data.text), ts: Date.now(), who, authorized });
+        const envelope =
+          data.envelope && typeof data.envelope === "object"
+            ? (data.envelope as ChatMessage["envelope"])
+            : undefined;
+        append({ convo, dir, text: String(data.text), ts: Date.now(), who, authorized, envelope });
         if (dir === "in" && notificationsEnabled() && !document.hasFocus()) {
           void notify(who ?? convo);
         }
@@ -741,6 +813,53 @@ function Messenger({
 
   const activeConvo = active ? (open[active.label] ?? active) : null;
 
+  // The checklist reads live state on every render; secTick forces a render
+  // after fixes that only touch localStorage or the window (no React state).
+  void secTick;
+  const globalItems = buildChecklist({ status, coverLevel, shieldOn: shieldOn() });
+  const convoItems = activeConvo
+    ? buildChecklist({
+        status,
+        coverLevel,
+        shieldOn: shieldOn(),
+        convo: {
+          kind: activeConvo.kind,
+          label: activeConvo.label,
+          verified: !!contacts[activeConvo.label]?.verified,
+        },
+      })
+    : globalItems;
+
+  async function applyFix(fix: Fix) {
+    try {
+      if (fix.kind === "rpc") {
+        await rpc(fix.method, fix.params);
+        await refreshCover();
+        onRefreshStatus();
+      } else if (fix.kind === "local") {
+        localStorage.setItem(fix.key, fix.value);
+      } else if (fix.kind === "settings") {
+        setSecPanel(null);
+        setSettingsOpen(true);
+      } else if (fix.kind === "verify") {
+        if (activeConvo?.kind === "contact") {
+          setSecPanel(null);
+          setVerifyName(activeConvo.label);
+        }
+      } else if (fix.kind === "shield") {
+        await setShield(true);
+      }
+    } finally {
+      setSecTick((t) => t + 1);
+    }
+  }
+
+  const verifiedNames = new Set(
+    Object.entries(contacts)
+      .filter(([, c]) => c.verified)
+      .map(([n]) => n),
+  );
+
   return (
     <div className="app">
       <Sidebar
@@ -762,6 +881,10 @@ function Messenger({
         onLock={onLock}
         vaultExists={status.vault_exists}
         relayUrl={relayUrl}
+        verified={verifiedNames}
+        concealed={localStorage.getItem("drift.conceal") === "1"}
+        secBadge={<SecBadge items={globalItems} onOpen={() => setSecPanel("global")} />}
+        witness={<WitnessCanary />}
       />
       <main className="pane">
         {activeConvo ? (
@@ -771,6 +894,8 @@ function Messenger({
             messages={threads[activeConvo.label] ?? []}
             status={convoStatus[activeConvo.label]}
             connected={!!open[activeConvo.label]}
+            secBadge={<SecBadge items={convoItems} onOpen={() => setSecPanel("convo")} />}
+            onXray={activeConvo.kind === "contact" ? setXrayMsg : undefined}
             onSend={send}
             onBurn={
               activeConvo.kind === "contact" && open[activeConvo.label]
@@ -790,7 +915,30 @@ function Messenger({
           contacts={contacts}
           version={VERSION}
           onChanged={onRefreshStatus}
-          onClose={() => setSettingsOpen(false)}
+          onClose={() => {
+            setSettingsOpen(false);
+            void refreshCover();
+            setSecTick((t) => t + 1);
+          }}
+        />
+      )}
+      {secPanel && (
+        <SecPanel
+          items={secPanel === "convo" ? convoItems : globalItems}
+          onFix={(f) => void applyFix(f)}
+          onClose={() => setSecPanel(null)}
+        />
+      )}
+      {xrayMsg && <XrayModal message={xrayMsg} onClose={() => setXrayMsg(null)} />}
+      {verifyName && (
+        <VerifyModal
+          name={verifyName}
+          verified={!!contacts[verifyName]?.verified}
+          onVerified={setContacts}
+          onClose={() => {
+            setVerifyName(null);
+            setSecTick((t) => t + 1);
+          }}
         />
       )}
       {modal === "invite" && <InviteModal onClose={() => setModal(null)} />}

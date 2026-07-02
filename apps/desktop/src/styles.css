@@ -1033,6 +1033,260 @@ button.ghost.danger:hover:not(:disabled) { border-color: var(--red); box-shadow:
 }
 .kbd:hover:not(:disabled) { box-shadow: var(--glow-green); }
 
+/* ---------- security score (SEC badge + checklist panel) ---------- */
+.sec-badge {
+  flex: none;
+  padding: 2px 8px;
+  border-radius: 5px;
+  border: 1px solid var(--line);
+  background: transparent;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  font-variant-numeric: tabular-nums;
+}
+.sec-badge.ok {
+  color: var(--green);
+  border-color: var(--green-dim);
+  text-shadow: var(--glow-green);
+}
+.sec-badge.warn { color: #ffd166; border-color: rgba(255, 209, 102, 0.5); }
+.sec-badge.bad { color: var(--red); border-color: rgba(255, 77, 77, 0.5); }
+.sec-badge:hover:not(:disabled) { box-shadow: var(--glow-green); }
+.sec-badge.bad:hover:not(:disabled),
+.sec-badge.warn:hover:not(:disabled) { box-shadow: 0 0 6px rgba(255, 209, 102, 0.35); }
+
+.foot-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.sec-list { display: flex; flex-direction: column; }
+.sec-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 9px 2px;
+  border-top: 1px solid var(--line-soft);
+}
+.sec-row:first-child { border-top: none; }
+.sec-glyph { flex: none; font-weight: 700; width: 1.2ch; }
+.sec-row.ok .sec-glyph { color: var(--green); text-shadow: var(--glow-green); }
+.sec-row.bad .sec-glyph { color: var(--red); text-shadow: 0 0 6px rgba(255, 77, 77, 0.4); }
+.sec-body { flex: 1; min-width: 0; }
+.sec-label { font-size: 12px; letter-spacing: 0.5px; }
+.sec-row.ok .sec-label { color: var(--text); }
+.sec-row.bad .sec-label { color: var(--red); }
+.sec-threat { font-size: 11px; color: var(--muted); margin-top: 2px; line-height: 1.45; }
+.sec-note { font-size: 10px; color: #ffd166; margin-top: 2px; }
+.sec-fix {
+  flex: none;
+  align-self: center;
+  font-size: 10px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  padding: 4px 9px;
+  border-radius: 5px;
+  background: transparent;
+  border: 1px solid var(--green-dim);
+  color: var(--green);
+}
+.sec-fix:hover:not(:disabled) { background: rgba(0, 255, 65, 0.08); }
+
+/* ---------- randomart (drunken bishop) ---------- */
+.randomart {
+  margin: 8px 0;
+  padding: 8px 10px;
+  border: 1px dashed var(--line);
+  border-radius: 7px;
+  background: var(--bg);
+  color: var(--cyan);
+  font-size: 12px;
+  line-height: 1.15;
+  letter-spacing: 1px;
+  width: fit-content;
+  text-shadow: 0 0 4px rgba(0, 212, 255, 0.3);
+  user-select: none;
+}
+.randomart.small { font-size: 10px; }
+
+/* ---------- concealed contact code ---------- */
+.codebox.concealed { cursor: default; }
+.codebox.concealed code { color: var(--muted); letter-spacing: 1px; }
+.codebox.concealed .link { font-size: 11px; }
+
+/* ---------- verified contact ✓ ---------- */
+.item-verified {
+  flex: none;
+  color: var(--green);
+  font-size: 11px;
+  font-weight: 700;
+  text-shadow: var(--glow-green);
+}
+
+/* ---------- lockdown veil (blur on unfocus) ---------- */
+.veil-wrap { height: 100%; }
+.veil-wrap.veiled {
+  filter: blur(16px) brightness(0.45) saturate(0.6);
+  pointer-events: none;
+}
+.veil-mark {
+  position: fixed;
+  inset: 0;
+  z-index: 9400;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  color: var(--green);
+  text-shadow: var(--glow-green);
+  font-weight: 700;
+  letter-spacing: 6px;
+  font-size: 18px;
+}
+
+/* ---------- no-copy conversations ---------- */
+.scroll.nocopy { user-select: none; -webkit-user-select: none; }
+
+/* ---------- WITNESS canary ---------- */
+.witness-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  margin-top: 7px;
+  padding: 5px 7px;
+  border-radius: 6px;
+  border: 1px solid var(--line-soft);
+  background: transparent;
+  text-align: left;
+  font-size: 10px;
+  letter-spacing: 0.5px;
+}
+.witness-row .witness-label { color: var(--muted); }
+.witness-row.verified .witness-label { color: var(--green-dim); }
+.witness-row.broken {
+  border-color: var(--red);
+  background: rgba(255, 77, 77, 0.08);
+  box-shadow: 0 0 8px rgba(255, 77, 77, 0.35);
+}
+.witness-row.broken .witness-label {
+  color: var(--red);
+  font-weight: 700;
+  text-shadow: 0 0 6px rgba(255, 77, 77, 0.4);
+}
+.witness-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #2a2a2a;
+}
+.witness-dot.verified {
+  background: var(--green);
+  box-shadow: var(--glow-green);
+  animation: heartbeat 60s linear infinite;
+}
+.witness-dot.broken {
+  background: var(--red);
+  box-shadow: 0 0 8px rgba(255, 77, 77, 0.7);
+  animation: pulse 0.8s ease-in-out infinite;
+}
+/* one strong beat per certificate period — the chain is alive */
+@keyframes heartbeat {
+  0% { transform: scale(1.6); box-shadow: 0 0 12px rgba(0, 255, 65, 0.9); }
+  1.2% { transform: scale(1); box-shadow: var(--glow-green); }
+  100% { transform: scale(1); box-shadow: var(--glow-green); }
+}
+
+.witness-facts {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin: 12px 0;
+}
+.witness-fact {
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 10px 12px;
+  font-size: 10px;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.witness-fact .wf-num {
+  display: block;
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--green);
+  text-shadow: var(--glow-green);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- cipher x-ray ---------- */
+.xray-cols {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+.xray-col { min-width: 0; }
+.xray-field { margin: 8px 0; }
+.xray-key {
+  display: block;
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 1.5px;
+  color: var(--green-dim);
+  margin-bottom: 3px;
+}
+.xray-addr {
+  display: block;
+  font-size: 10px;
+  word-break: break-all;
+  color: var(--cyan);
+  text-shadow: 0 0 4px rgba(0, 212, 255, 0.3);
+}
+.xray-hex {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+  font-size: 10px;
+  line-height: 1.5;
+  color: var(--muted);
+  overflow-x: auto;
+  white-space: pre;
+}
+.xray-ladder { display: flex; flex-direction: column; gap: 6px; margin: 8px 0 14px; }
+.xray-layer {
+  display: flex;
+  flex-direction: column;
+  padding: 6px 10px;
+  border-left: 2px solid var(--green-dim);
+  animation: lineIn 0.3s ease-out both;
+}
+.xray-layer-name {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  color: var(--green);
+  text-shadow: var(--glow-green);
+}
+.xray-layer-note { font-size: 10px; }
+.xray-plain {
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--bg);
+  font-size: 13px;
+  color: var(--text);
+  word-break: break-word;
+}
+.xray-plain .pfx { color: var(--green); font-weight: 700; }
+
 /* ---------- respect reduced motion ---------- */
 @media (prefers-reduced-motion: reduce) {
   *,
@@ -1049,6 +1303,8 @@ button.ghost.danger:hover:not(:disabled) { border-color: var(--red); box-shadow:
   .line.in,
   .codebox.copied,
   .composer.transmit .prompt,
+  .witness-dot.verified,
+  .witness-dot.broken,
   button.primary::after {
     animation: none !important;
   }

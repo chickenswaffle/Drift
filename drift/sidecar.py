@@ -100,6 +100,21 @@ class _Conversation:
         self.session = session
         self._loop = loop
         self._reader: asyncio.Task[None] | None = None
+        # Cipher X-ray: the session's on_envelope hook parks the latest wire
+        # metadata here; the next message event (same code path, strictly
+        # ordered — the hook fires before messages() yields / send() returns)
+        # picks it up. Memory only, never persisted, never plaintext.
+        self.last_envelope: dict[str, Any] | None = None
+
+    def on_envelope(self, info: dict[str, Any]) -> None:
+        self.last_envelope = info
+
+    def _take_envelope(self, direction: str) -> dict[str, Any] | None:
+        env = self.last_envelope
+        if env is not None and env.get("dir") == direction:
+            self.last_envelope = None
+            return env
+        return None
 
     async def start(self) -> None:
         await self.session.__aenter__()
@@ -108,7 +123,11 @@ class _Conversation:
     async def _read_loop(self) -> None:
         try:
             async for msg in self.session.messages():
-                _emit_event("message", {"convo": self.convo, "dir": "in", "text": msg})
+                data: dict[str, Any] = {"convo": self.convo, "dir": "in", "text": msg}
+                env = self._take_envelope("in")
+                if env is not None:
+                    data["envelope"] = env
+                _emit_event("message", data)
         except asyncio.CancelledError:  # normal on close
             raise
         except Exception as exc:  # surface, don't crash the whole bridge
@@ -120,7 +139,11 @@ class _Conversation:
     async def send(self, text: str) -> None:
         await self.session.send(text)
         # Echo our own line back so the UI renders it from a single source.
-        _emit_event("message", {"convo": self.convo, "dir": "out", "text": text})
+        data: dict[str, Any] = {"convo": self.convo, "dir": "out", "text": text}
+        env = self._take_envelope("out")
+        if env is not None:
+            data["envelope"] = env
+        _emit_event("message", data)
 
     async def close(self) -> None:
         if self._reader is not None:
@@ -261,6 +284,7 @@ class Sidecar:
             "contacts_list": self._contacts_list,
             "contacts_add": self._contacts_add,
             "contacts_remove": self._contacts_remove,
+            "contact_verify": self._contact_verify,
             "safety_number": self._safety_number,
             # disappearing contact codes (one-time invites over the beacon store)
             "invite_create": self._invite_create,
@@ -275,6 +299,7 @@ class Sidecar:
             "tor_get": self._tor_get,
             "tor_set": self._tor_set,
             "tor_status": self._tor_status,
+            "witness_status": self._witness_status,
             "lock": self._lock,
             "unlock": self._unlock,
             "vault_create": self._vault_create,
@@ -369,17 +394,35 @@ class Sidecar:
         identity = storage.load_identity()
         return {"contact_code": identity.contact_code()}
 
+    @staticmethod
+    def _contacts_out(contacts: storage.Contacts) -> dict[str, Any]:
+        """Shape a contacts map for the UI: name -> {code, verified}."""
+        return {
+            "contacts": {
+                n: {"code": c["code"], "verified": bool(c.get("verified"))}
+                for n, c in contacts.items()
+            }
+        }
+
     async def _contacts_list(self, _: dict[str, Any]) -> dict[str, Any]:
         identity = storage.load_identity()
-        contacts = storage.load_contacts(identity)
-        return {"contacts": {name: c["code"] for name, c in contacts.items()}}
+        return self._contacts_out(storage.load_contacts(identity))
 
     async def _contacts_add(self, params: dict[str, Any]) -> dict[str, Any]:
         identity = storage.load_identity()
         name = str(params.get("name", ""))
         code = str(params.get("code", ""))
-        contacts = storage.add_contact(identity, name, code)
-        return {"contacts": {n: c["code"] for n, c in contacts.items()}}
+        return self._contacts_out(storage.add_contact(identity, name, code))
+
+    async def _contact_verify(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Record (or clear) the user's out-of-band safety-number attestation.
+        A bookkeeping bit only — it grants nothing cryptographically."""
+        identity = storage.load_identity()
+        name = str(params.get("name", ""))
+        if not name:
+            raise RpcError("contact_verify requires a name")
+        verified = bool(params.get("verified", True))
+        return self._contacts_out(storage.set_contact_verified(identity, name, verified))
 
     async def _contacts_remove(self, params: dict[str, Any]) -> dict[str, Any]:
         identity = storage.load_identity()
@@ -392,8 +435,7 @@ class Sidecar:
             if conversation is not None:
                 await conversation.close()
         self._convo_locks.pop(name, None)
-        contacts = storage.remove_contact(identity, name)
-        return {"contacts": {n: c["code"] for n, c in contacts.items()}}
+        return self._contacts_out(storage.remove_contact(identity, name))
 
     async def _safety_number(self, params: dict[str, Any]) -> dict[str, Any]:
         identity = storage.load_identity()
@@ -509,7 +551,7 @@ class Sidecar:
             "name": name,
             "contact_code": info.contact_code,
             "safety_number": storage.safety_number(identity, info.contact_code),
-            "contacts": {n: c["code"] for n, c in contacts.items()},
+            **self._contacts_out(contacts),
         }
 
     async def _invite_extinguish(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -579,6 +621,15 @@ class Sidecar:
 
     async def _tor_status(self, _: dict[str, Any]) -> dict[str, Any]:
         return await self._tor_get({})
+
+    async def _witness_status(self, params: dict[str, Any]) -> dict[str, Any]:
+        """One-shot canary check of the relay's WITNESS chain (the UI polls
+        this once a minute). Rides the Tor circuit when one is active, so
+        watching the canary doesn't leak the client's IP to the relay."""
+        from drift.transport.witness_http import witness_status
+
+        socks = await self._tor_socks()
+        return await witness_status(self._relay_url(params), limit=60, socks=socks)
 
     async def _ensure_tor(self) -> Any:
         """Return the shared Tor circuit for the current mode, bootstrapping it
@@ -701,14 +752,23 @@ class Sidecar:
                     _emit_event("burn", {"convo": convo, "scope": scope,
                                          "message_id": message_id})
 
+                # Cipher X-ray: forward wire metadata into the conversation
+                # (created just below — the closure resolves at call time, and
+                # the session can't traffic before conversation.start()).
+                conversation: Any = None
+
+                def on_envelope(info: dict[str, Any]) -> None:
+                    if conversation is not None:
+                        conversation.on_envelope(info)
+
                 session: Any = Session(
                     identity, entry["code"], relay_url,
-                    on_event=on_event, on_burn=on_burn,
+                    on_event=on_event, on_burn=on_burn, on_envelope=on_envelope,
                     prekeys=storage.ensure_prekeys(identity),
                     cover=CoverLevel.parse(storage.get_cover_level()),
                     tor_client=tor_client,
                 )
-                conversation: Any = _Conversation(convo, session, self._loop)
+                conversation = _Conversation(convo, session, self._loop)
                 await conversation.start()
                 self._convos[convo] = conversation
                 return {"convo": convo, "kind": "contact", "relay_url": relay_url}

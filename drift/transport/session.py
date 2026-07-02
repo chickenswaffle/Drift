@@ -105,6 +105,14 @@ STEALTH_CHANNEL = "drift-stealth-v1"
 # message_id is the base64 one-time address for message-scope burns, else None.
 BurnHook = Callable[[str, str | None], None]
 
+# Callback receiving wire metadata for each envelope this session sends or
+# (successfully) receives — the Cipher X-ray feed. Every field is already
+# public on the wire (the one-time address and the opaque blob ARE what the
+# relay sees); it never carries plaintext, headers, or key material.
+# Keys: dir ("in"/"out"), addr_b58, addr_digest, wire_bytes, sealed_preview
+# (first 32 bytes of the sealed blob, hex), fmd (bool).
+EnvelopeHook = Callable[[dict[str, object]], None]
+
 
 def _keypair_from_private(private_bytes: bytes) -> Keypair:
     """Reconstruct an X25519 Keypair from raw private key bytes."""
@@ -543,6 +551,7 @@ class Session:
         ping_interval: float = 30.0,
         on_event: EventHook | None = None,
         on_burn: BurnHook | None = None,
+        on_envelope: EnvelopeHook | None = None,
         tor_client: TorClient | None = None,
         fmd_key: FMDKeypair | None = None,
         prekeys: PreKeyPrivates | None = None,
@@ -555,6 +564,9 @@ class Session:
         self._on_event = on_event
         # Optional callback for verified burn tombstones from the relay.
         self._on_burn = on_burn
+        # Optional Cipher X-ray feed: wire metadata (relay-visible fields only)
+        # for each envelope sent / accepted. See EnvelopeHook.
+        self._on_envelope = on_envelope
         # Optional persistence hook for prekey privates created during a
         # mid-session replenishment (see ``_maybe_replenish_prekeys``).
         self._on_prekeys_changed = on_prekeys_changed
@@ -636,6 +648,26 @@ class Session:
         """Report a non-secret transport event to the optional hook."""
         if self._on_event is not None:
             self._on_event(kind, detail)
+
+    def _emit_envelope(self, direction: str, addr: bytes, blob: bytes, fmd: bool) -> None:
+        """Feed the Cipher X-ray hook one envelope's wire metadata. Every field
+        is relay-visible by definition (this IS what the relay saw); a failing
+        hook is ignored — telemetry must never break delivery."""
+        if self._on_envelope is None:
+            return
+        try:
+            self._on_envelope(
+                {
+                    "dir": direction,
+                    "addr_b58": b58encode(addr),
+                    "addr_digest": _addr_digest(addr),
+                    "wire_bytes": len(blob),
+                    "sealed_preview": blob[:32].hex(),
+                    "fmd": fmd,
+                }
+            )
+        except Exception:
+            logger.debug("on_envelope hook failed (ignored)", exc_info=True)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -889,6 +921,7 @@ class Session:
         )
         self._emit("sealed", "sender identity sealed")
         self._emit("erase", "message key erased")
+        self._emit_envelope("out", one_time_addr, sealed_blob, fmd is not None)
 
     async def burn_last_message(self) -> None:
         """Send a burn request for the last message we sent."""
@@ -989,6 +1022,9 @@ class Session:
             # Authenticated: now it is safe to record the address and surface it.
             self._seen_addrs.add(item.one_time_addr)
             self._emit("recv", _addr_digest(item.one_time_addr))
+            self._emit_envelope(
+                "in", item.one_time_addr, item.ciphertext, item.fmd_flag is not None
+            )
             # A sender just burned one of our OTPKs; top the relay pool back up in
             # the background so we never start serving weaker OTPK-less handshakes.
             if consumed_otpk:

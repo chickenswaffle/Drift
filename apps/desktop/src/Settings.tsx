@@ -2,6 +2,20 @@ import { useCallback, useEffect, useState } from "react";
 import { rpc, onSidecar } from "./rpc";
 import { Updater } from "./Updater";
 import { copyText } from "./util";
+import {
+  blurOn,
+  clipGuardOn,
+  lockdownAll,
+  noCopyGlobal,
+  setBlur,
+  setClipGuard,
+  setLockdownAll,
+  setNoCopyGlobal,
+  setShield,
+  shieldOn,
+} from "./lockdown";
+import { onLinux } from "./seccheck";
+import { randomart } from "./randomart";
 import type { Contacts, Status } from "./types";
 
 // Native notifications are opt-*out* — on unless the user turns them off. The
@@ -83,8 +97,8 @@ export function Settings({
         <TorSection status={status} onChanged={onChanged} />
         <FmdSection currentRate={status.fmd_rate} />
         <CoverSection />
+        <LockdownSection />
         <NotifySection />
-        <ClipboardSection />
 
         <section className="setting">
           <div className="label">updates</div>
@@ -247,7 +261,16 @@ function VerifySection({ contacts }: { contacts: Contacts }) {
               {busy ? "…" : "› show"}
             </button>
           </div>
-          {number && <SafetyNumber value={number} />}
+          {number && (
+            <>
+              <pre className="randomart" aria-label="key randomart">{randomart(number)}</pre>
+              <SafetyNumber value={number} />
+              <p className="muted small">
+                same picture on both screens = same keys. Different picture =
+                someone is in the middle.
+              </p>
+            </>
+          )}
           {err && <p className="error small">{err}</p>}
         </>
       )}
@@ -525,31 +548,92 @@ function CoverSection() {
 // Clipboard clearing is opt-*in*: silently blanking the clipboard surprises
 // people, but codes and safety numbers sitting in an OS clipboard forever is
 // its own leak. The actual timer lives in util.copyText.
-const CLIPBOARD_CLEAR_KEY = "drift.clipboard_clear";
+/**
+ * Desktop Lockdown Mode — one master switch over four device-local
+ * protections, each independently toggleable underneath. Mirrors the CLI's
+ * Lockdown (v0.15.0) in spirit: harden THIS endpoint, claim nothing beyond it.
+ */
+function LockdownSection() {
+  const [, force] = useState(0);
+  const bump = () => force((n) => n + 1);
+  const linux = onLinux();
+  const master = lockdownAll();
 
-function ClipboardSection() {
-  const [on, setOn] = useState<boolean>(
-    () => localStorage.getItem(CLIPBOARD_CLEAR_KEY) === "1",
-  );
   return (
     <section className="setting">
-      <div className="label">clipboard</div>
+      <div className="label">lockdown mode</div>
       <label className="toggle">
         <input
           type="checkbox"
-          checked={on}
+          checked={master}
           onChange={() => {
-            const next = !on;
-            setOn(next);
-            localStorage.setItem(CLIPBOARD_CLEAR_KEY, next ? "1" : "0");
+            void setLockdownAll(!master).then(bump);
           }}
         />
-        clear copied codes from the clipboard after 30 seconds
+        <strong>lockdown — all protections on</strong>
       </label>
       <p className="muted small">
-        Best-effort: only clears if the clipboard still holds what DRIFT copied,
-        and some OS clipboard managers keep history DRIFT can&apos;t reach.
+        Hardens this device. Blocks screen capture of this window (macOS and
+        Windows — not enforceable on Linux), blurs it the moment it loses
+        focus, disables copying inside chats, and clears copied codes. None of
+        this binds your peer&apos;s device, and no software stops a camera
+        pointed at glass.
       </p>
+      <label className="toggle">
+        <input
+          type="checkbox"
+          checked={shieldOn()}
+          onChange={() => void setShield(!shieldOn()).then(bump)}
+        />
+        screen shield — exclude this window from capture
+        {linux ? <span className="warn small"> (unavailable on Linux)</span> : null}
+      </label>
+      <label className="toggle">
+        <input
+          type="checkbox"
+          checked={blurOn()}
+          onChange={() => {
+            setBlur(!blurOn());
+            bump();
+          }}
+        />
+        blur the window when it loses focus
+      </label>
+      <label className="toggle">
+        <input
+          type="checkbox"
+          checked={noCopyGlobal()}
+          onChange={() => {
+            setNoCopyGlobal(!noCopyGlobal());
+            bump();
+          }}
+        />
+        disable copying in every conversation
+      </label>
+      <label className="toggle">
+        <input
+          type="checkbox"
+          checked={clipGuardOn()}
+          onChange={() => {
+            setClipGuard(!clipGuardOn());
+            bump();
+          }}
+        />
+        clear copied codes after 30 seconds
+      </label>
+      <label className="toggle">
+        <input
+          type="checkbox"
+          checked={localStorage.getItem("drift.conceal") === "1"}
+          onChange={() => {
+            const next = localStorage.getItem("drift.conceal") !== "1";
+            if (next) localStorage.setItem("drift.conceal", "1");
+            else localStorage.removeItem("drift.conceal");
+            bump();
+          }}
+        />
+        conceal my contact code in the sidebar until revealed
+      </label>
     </section>
   );
 }

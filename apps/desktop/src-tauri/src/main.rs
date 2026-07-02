@@ -77,6 +77,7 @@ const ALLOWED_METHODS: &[&str] = &[
     "contacts_list",
     "contacts_add",
     "contacts_remove",
+    "contact_verify",
     "safety_number",
     "fmd_get",
     "fmd_set",
@@ -110,6 +111,7 @@ const ALLOWED_METHODS: &[&str] = &[
     "invite_create",
     "invite_resolve",
     "invite_extinguish",
+    "witness_status",
 ];
 
 /// The single command the web UI calls. `method` is checked against the
@@ -241,8 +243,9 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     let show = MenuItem::with_id(app, "show", "Show / Hide", true, None::<&str>)?;
     let lock = MenuItem::with_id(app, "lock", "Lock vault", true, None::<&str>)?;
     let panic = MenuItem::with_id(app, "panic", "Panic lock", true, None::<&str>)?;
+    let lockdown = MenuItem::with_id(app, "lockdown", "Lockdown mode", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit DRIFT", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&show, &lock, &panic, &quit])?;
+    let menu = Menu::with_items(app, &[&show, &lock, &panic, &lockdown, &quit])?;
 
     let mut builder = TrayIconBuilder::new()
         .menu(&menu)
@@ -255,6 +258,11 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
             }
             "panic" => {
                 let _ = app.emit("menu:panic", ());
+            }
+            // Toggle Lockdown mode — the UI owns the state (localStorage) and
+            // the window-level shield call; this only signals intent.
+            "lockdown" => {
+                let _ = app.emit("menu:lockdown", ());
             }
             "quit" => app.exit(0),
             _ => {}

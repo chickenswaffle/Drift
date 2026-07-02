@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { ChatMessage, Conversation } from "./types";
+import { noCopyGlobal } from "./lockdown";
 import { Scramble } from "./Scramble";
 import { accentFor, copyText, fmtTime, glyphFor } from "./util";
 
@@ -21,17 +22,21 @@ export function ChatPane({
   messages,
   status,
   connected,
+  secBadge,
   onSend,
   onBurn,
   onManage,
+  onXray,
 }: {
   conversation: Conversation;
   messages: ChatMessage[];
   status?: string;
   connected: boolean;
+  secBadge?: React.ReactNode;
   onSend: (text: string) => void;
   onBurn?: (scope: "message" | "conversation") => void;
   onManage?: () => void;
+  onXray?: (m: ChatMessage) => void;
 }) {
   const [draft, setDraft] = useState("");
   const [expiry, setExpiry] = useState<number>(() =>
@@ -39,12 +44,24 @@ export function ChatPane({
   );
   const [burnArmed, setBurnArmed] = useState(false);
   const [transmit, setTransmit] = useState(false);
+  // No-copy: the per-conversation switch, or forced everywhere by Lockdown.
+  const [noCopyLocal, setNoCopyLocal] = useState(
+    () => localStorage.getItem(`drift.nocopy.${conversation.label}`) === "1",
+  );
+  const noCopy = noCopyGlobal() || noCopyLocal;
   const scroller = useRef<HTMLDivElement>(null);
 
   function pickExpiry(seconds: number) {
     setExpiry(seconds);
     if (seconds) localStorage.setItem(`drift.expire.${conversation.label}`, String(seconds));
     else localStorage.removeItem(`drift.expire.${conversation.label}`);
+  }
+
+  function toggleNoCopy() {
+    const next = !noCopyLocal;
+    setNoCopyLocal(next);
+    if (next) localStorage.setItem(`drift.nocopy.${conversation.label}`, "1");
+    else localStorage.removeItem(`drift.nocopy.${conversation.label}`);
   }
 
   useEffect(() => {
@@ -98,7 +115,16 @@ export function ChatPane({
           {label}
         </span>
         <span className="muted small">{headStatus}</span>
+        {secBadge}
         <span className="head-spacer" />
+        <button
+          className={`dial-stop mini ${noCopy ? "on" : ""}`}
+          title="stops casual copying on this device — your peer's client and cameras are beyond any app's reach"
+          disabled={noCopyGlobal()}
+          onClick={toggleNoCopy}
+        >
+          no-copy
+        </button>
         <span className="expiry-dial" title="disappearing messages (this screen only)">
           <span className="muted small">expiry</span>
           {EXPIRY_STOPS.map((s) => (
@@ -152,7 +178,11 @@ export function ChatPane({
         </div>
       )}
 
-      <div className="scroll" ref={scroller}>
+      <div
+        className={`scroll${noCopy ? " nocopy" : ""}`}
+        ref={scroller}
+        onCopy={noCopy ? (e) => e.preventDefault() : undefined}
+      >
         {messages.map((m, i) => (
           <div key={i} className={`line ${m.dir}`}>
             <span className="pfx">{prefix(m)}</span>
@@ -167,13 +197,22 @@ export function ChatPane({
             ) : (
               <span className="body">{m.text}</span>
             )}
-            {m.dir !== "sys" && (
+            {m.dir !== "sys" && !noCopy && (
               <button
                 className="line-copy"
                 title="copy this line to the clipboard"
                 onClick={() => void copyText(m.text)}
               >
                 copy
+              </button>
+            )}
+            {onXray && m.envelope && (
+              <button
+                className="line-copy"
+                title="see the actual envelope this line rode in on"
+                onClick={() => onXray(m)}
+              >
+                xray
               </button>
             )}
             {onBurn && i === lastOutIndex && (

@@ -174,6 +174,39 @@ class TestContacts:
         resp = await call(make_sidecar(), frames, "contacts_remove", {})
         assert resp["ok"] is False
 
+    async def test_contacts_shape_has_code_and_verified(self, store, frames) -> None:  # type: ignore[no-untyped-def]
+        sc = make_sidecar()
+        await call(sc, frames, "init")
+        code = Identity.generate().contact_code()
+        resp = await call(sc, frames, "contacts_add", {"name": "bob", "code": code})
+        assert resp["result"]["contacts"]["bob"] == {"code": code, "verified": False}
+
+    async def test_contact_verify_roundtrip(self, store, frames) -> None:  # type: ignore[no-untyped-def]
+        """Verify sets the attestation bit; unverify clears it; the flag
+        survives a fresh contacts_list read (it is persisted)."""
+        sc = make_sidecar()
+        await call(sc, frames, "init")
+        code = Identity.generate().contact_code()
+        await call(sc, frames, "contacts_add", {"name": "bob", "code": code})
+
+        resp = await call(sc, frames, "contact_verify", {"name": "bob"})
+        assert resp["ok"] is True
+        assert resp["result"]["contacts"]["bob"]["verified"] is True
+
+        resp = await call(sc, frames, "contacts_list")
+        assert resp["result"]["contacts"]["bob"]["verified"] is True
+
+        resp = await call(sc, frames, "contact_verify", {"name": "bob", "verified": False})
+        assert resp["result"]["contacts"]["bob"]["verified"] is False
+
+    async def test_contact_verify_unknown_or_missing_name(self, store, frames) -> None:  # type: ignore[no-untyped-def]
+        sc = make_sidecar()
+        await call(sc, frames, "init")
+        resp = await call(sc, frames, "contact_verify", {"name": "ghost"})
+        assert resp["ok"] is False
+        resp = await call(sc, frames, "contact_verify", {})
+        assert resp["ok"] is False
+
 
 # --------------------------------------------------------------------------- #
 # Vault / panic

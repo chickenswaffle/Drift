@@ -1280,7 +1280,7 @@ def witness_verify(
 async def _witness_verify_async(relay_url: str) -> bool:
     import httpx
 
-    from drift.crypto import b58decode
+    from drift.transport.witness_http import fetch_pubkey_and_chain
     from relay.witness import (
         PERIOD_SECONDS,
         WitnessCertificate,
@@ -1290,19 +1290,11 @@ async def _witness_verify_async(relay_url: str) -> bool:
     http_base = _relay_http(relay_url)
     console.print(f"Verifying DRIFT relay: [bold]{relay_url}[/bold]")
     try:
-        async with httpx.AsyncClient() as client:
-            pub_resp = await client.get(f"{http_base}/witness/pubkey", timeout=10.0)
-            pub_resp.raise_for_status()
-            chain_resp = await client.get(
-                f"{http_base}/witness/chain", params={"limit": 1440}, timeout=30.0
-            )
-            chain_resp.raise_for_status()
+        expected_id, raw_certs = await fetch_pubkey_and_chain(http_base, limit=1440)
     except httpx.HTTPError as exc:
         console.print(f"  [red]✗ Could not reach the relay:[/red] {exc}")
         return False
 
-    expected_id = b58decode(pub_resp.json()["pubkey_b58"])
-    raw_certs = chain_resp.json().get("certificates", [])
     try:
         certs = [WitnessCertificate.from_dict(c) for c in raw_certs]
     except (KeyError, ValueError) as exc:
@@ -1387,7 +1379,7 @@ def witness_subscribe(
 async def _witness_subscribe_async(relay_url: str) -> None:
     import httpx
 
-    from drift.crypto import b58decode
+    from drift.transport.witness_http import fetch_current_cert, fetch_witness_pubkey
     from relay.witness import PERIOD_SECONDS, WitnessCertificate
 
     http_base = _relay_http(relay_url)
@@ -1399,14 +1391,9 @@ async def _witness_subscribe_async(relay_url: str) -> None:
     last: WitnessCertificate | None = None
     while True:
         try:
-            async with httpx.AsyncClient() as client:
-                if expected_id is None:
-                    pk = await client.get(f"{http_base}/witness/pubkey", timeout=10.0)
-                    pk.raise_for_status()
-                    expected_id = b58decode(pk.json()["pubkey_b58"])
-                resp = await client.get(f"{http_base}/witness/current", timeout=10.0)
-                resp.raise_for_status()
-            cert = WitnessCertificate.from_dict(resp.json())
+            if expected_id is None:
+                expected_id = await fetch_witness_pubkey(http_base)
+            cert = WitnessCertificate.from_dict(await fetch_current_cert(http_base))
         except (httpx.HTTPError, KeyError, ValueError) as exc:
             console.print(f"\n[red]⚠ Could not fetch a certificate:[/red] {exc}")
             await asyncio.sleep(PERIOD_SECONDS)

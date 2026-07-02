@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { CodeBox } from "./CodeBox";
+import { randomart } from "./randomart";
 import { accentFor, glyphFor } from "./util";
 import type { Conversation, ConvoKind, GroupInfo, RoomInfo } from "./types";
 
@@ -28,6 +29,10 @@ export function Sidebar({
   onLock,
   vaultExists,
   relayUrl,
+  verified,
+  concealed,
+  secBadge,
+  witness,
 }: {
   version: string;
   myCode: string;
@@ -47,6 +52,10 @@ export function Sidebar({
   onLock: () => void;
   vaultExists: boolean;
   relayUrl: string;
+  verified: Set<string>;
+  concealed: boolean;
+  secBadge?: React.ReactNode;
+  witness?: React.ReactNode;
 }) {
   const channelItems: Item[] = channels.map((c) => ({
     kind: "channel",
@@ -84,7 +93,7 @@ export function Sidebar({
       </div>
       <div className="me">
         <div className="label">your contact code</div>
-        <CodeBox code={myCode} />
+        {concealed ? <ConcealedCode code={myCode} /> : <CodeBox code={myCode} />}
         <button className="link invite-link" onClick={onInvite}>
           › share disappearing code
         </button>
@@ -140,6 +149,7 @@ export function Sidebar({
               item={it}
               active={active?.kind === "contact" && active.label === it.label}
               on={openLabels.has(it.label)}
+              verified={verified.has(it.label)}
               onClick={() => onOpen("contact", it.label)}
               onRemove={() => onRemoveContact(it.label)}
             />
@@ -158,9 +168,41 @@ export function Sidebar({
             </button>
           )}
         </div>
-        <div className="muted small">relay · {relayUrl}</div>
+        <div className="foot-status">
+          <span className="muted small">relay · {relayUrl}</span>
+          {secBadge}
+        </div>
+        {witness}
       </div>
     </aside>
+  );
+}
+
+/** The contact code, held back until deliberately revealed — and re-hidden
+ *  after 10 s. The code itself never renders until asked. */
+function ConcealedCode({ code }: { code: string }) {
+  const [shown, setShown] = useState(false);
+  const timer = useRef<number | null>(null);
+  useEffect(
+    () => () => {
+      if (timer.current != null) window.clearTimeout(timer.current);
+    },
+    [],
+  );
+  if (shown) return <CodeBox code={code} />;
+  return (
+    <div className="codebox concealed" title="concealed — reveal to show for 10 s">
+      <code>drift:{"•".repeat(24)}</code>
+      <button
+        className="link"
+        onClick={() => {
+          setShown(true);
+          timer.current = window.setTimeout(() => setShown(false), 10_000);
+        }}
+      >
+        reveal
+      </button>
+    </div>
   );
 }
 
@@ -210,12 +252,14 @@ function NavItem({
   item,
   active,
   on,
+  verified,
   onClick,
   onRemove,
 }: {
   item: Item;
   active: boolean;
   on: boolean;
+  verified?: boolean;
   onClick: () => void;
   onRemove?: () => void;
 }) {
@@ -236,6 +280,11 @@ function NavItem({
         {glyphFor(item.kind)}
       </span>
       <span className="item-label">{item.label}</span>
+      {verified && (
+        <span className="item-verified" title="safety number verified out-of-band">
+          ✓
+        </span>
+      )}
       {item.sub && <span className="item-sub muted">{item.sub}</span>}
       {onRemove && (
         <button
@@ -318,10 +367,13 @@ function AddContact({
         )}
       </div>
       {checked && (
-        <p className="muted small">
-          safety number: <span className="safety-inline">{checked}</span> — compare
-          out-of-band, then add.
-        </p>
+        <>
+          <p className="muted small">
+            safety number: <span className="safety-inline">{checked}</span> — compare
+            out-of-band, then add.
+          </p>
+          <pre className="randomart small" aria-label="key randomart">{randomart(checked)}</pre>
+        </>
       )}
       {warn && <p className="warn small">{warn}</p>}
       {err && <p className="error small">{err}</p>}

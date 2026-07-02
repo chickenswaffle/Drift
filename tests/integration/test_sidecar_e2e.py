@@ -175,7 +175,20 @@ async def test_two_sidecars_exchange_message(relay_url: str, two_sidecars: Any) 
     await sender.call("chat_send", {"convo": "peer", "text": "hello across sidecars"})
 
     evt = await receiver.next_event("message")
-    assert evt["data"] == {"convo": "peer", "dir": "in", "text": "hello across sidecars"}
+    data = evt["data"]
+    assert data["convo"] == "peer"
+    assert data["dir"] == "in"
+    assert data["text"] == "hello across sidecars"
+
+    # Cipher X-ray: the event carries the real wire envelope — relay-visible
+    # metadata only, never anything derived from the plaintext.
+    env = data["envelope"]
+    assert env["dir"] == "in"
+    assert env["wire_bytes"] > 0
+    assert len(env["addr_b58"]) > 20
+    assert len(env["sealed_preview"]) == 64  # 32 bytes, hex
+    assert "hello" not in str(env)  # no plaintext leaks into wire metadata
+    assert set(env) == {"dir", "addr_b58", "addr_digest", "wire_bytes", "sealed_preview", "fmd"}
 
 
 @pytest.mark.asyncio
@@ -264,3 +277,26 @@ async def test_burn_last_message_reaches_peer(relay_url: str, two_sidecars: Any)
     # The relay broadcasts to every subscriber — the burner sees it too.
     echo = await sender.next_event("burn")
     assert echo["data"]["scope"] == "message"
+
+
+@pytest.mark.asyncio
+async def test_witness_status_verifies_relay(relay_url: str, two_sidecars: Any) -> None:
+    """The canary RPC: fetches the relay's blindness chain, re-verifies it
+    independently, and surfaces the zero-knowledge counts from the newest
+    certificate. An unreachable relay is reported, never raised."""
+    a, _ = two_sidecars
+
+    res = await a.call("witness_status", {"relay_url": relay_url})
+    assert res["supported"] is True
+    assert res["verified"] is True
+    assert res["count"] >= 1
+    assert res["signatures_valid"] and res["chain_intact"]
+    latest = res["latest"]
+    assert latest["sender_identities_known"] == 0
+    assert latest["recipient_identities_known"] == 0
+    assert latest["contents_readable"] == 0
+    assert latest["conversations_linked"] == 0
+    assert len(latest["cert_hash"]) == 64
+
+    dead = await a.call("witness_status", {"relay_url": "ws://127.0.0.1:1"})
+    assert dead["supported"] is False and dead["verified"] is False

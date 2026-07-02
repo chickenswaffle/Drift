@@ -8,9 +8,25 @@ export interface Status {
   tor_active?: boolean;
 }
 
-export type Contacts = Record<string, string>; // name -> contact code
+export interface ContactInfo {
+  code: string;
+  verified: boolean; // user attestation after out-of-band safety-number compare
+}
+
+export type Contacts = Record<string, ContactInfo>;
 
 export type MsgDir = "in" | "out" | "sys";
+
+// Wire metadata for one envelope — everything here was already visible to the
+// relay (the one-time address and opaque blob ARE the wire). Never plaintext.
+export interface EnvelopeInfo {
+  dir: "in" | "out";
+  addr_b58: string;
+  addr_digest: string;
+  wire_bytes: number;
+  sealed_preview: string; // first bytes of the sealed blob, hex
+  fmd: boolean;
+}
 
 export interface ChatMessage {
   convo: string;
@@ -19,6 +35,7 @@ export interface ChatMessage {
   ts: number;
   who?: string; // room/group sender pseudonym or name
   authorized?: boolean; // room posts: false → unverified sender tag
+  envelope?: EnvelopeInfo; // 1:1 chats: the actual wire envelope (Cipher X-ray)
 }
 
 // Everything the sidebar can open. `label` is the sidecar handle: a contact's
