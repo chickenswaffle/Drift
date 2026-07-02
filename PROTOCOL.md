@@ -243,7 +243,43 @@ anchors: a breaking change bumps them, and mixed-version peers simply fail to
 detect/decrypt rather than downgrade. There is deliberately **no in-band
 version negotiation** — negotiation is a downgrade-attack surface.
 
-## 14. What this protocol does NOT provide
+## 14. Extensions
+
+DRIFT-P is deliberately small; everything else — including commercial
+services — attaches through extensions. An extension is an optional protocol
+layered on the core, identified as:
+
+- `drift-ext/<name>/<version>` — **registered extensions**, specified openly
+  in this repository (the first: `drift-ext/witness/1`, §11 — WITNESS is
+  optional for relays and advertised as an extension);
+- `x-<vendor>-<name>/<version>` — **vendor extensions**, specified and
+  operated by whoever owns them. They may be proprietary.
+
+Relays advertise what they speak:
+
+```
+GET /capabilities → {"protocol": "DRIFT-P/1", "extensions": ["drift-ext/witness/1", …]}
+```
+
+Clients MUST treat unknown extensions as absent and continue on the core
+protocol — extensions are additive, never load-bearing for security.
+
+**Conformance rules (normative).** An extension, open or proprietary, MUST
+NOT:
+
+1. alter envelope semantics (§2) or attach sender-, recipient-, or
+   conversation-linkable metadata to an envelope;
+2. gate *core* message delivery on payment, identity, or token possession;
+3. weaken any guarantee of §1–§12.
+
+The sanctioned pattern for privileged service tiers is **per-connection**
+authorization (e.g. a signed bearer token presented when subscribing, granting
+rate/retention/priority tiers); **per-envelope** privilege markers are
+non-conforming, because they put a distinguisher on the wire. An
+implementation shipping a non-conforming extension may not claim DRIFT-P
+compatibility (see `TRADEMARKS.md`).
+
+## 15. What this protocol does NOT provide
 
 - protection of a compromised endpoint (malware reads screens);
 - perfect timing privacy against a truly global passive adversary (cover

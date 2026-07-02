@@ -71,9 +71,16 @@ kills the credibility that makes the paid layer sellable.
 - New code in this repo: stays MIT (default).
 - Paid-layer code: separate private repos from day one — never mixed into
   this tree, so there is never a relicensing knot to untangle.
-- Adopt a lightweight **CLA or DCO** for external contributions *now*, before
-  there are many contributors — it preserves future flexibility (e.g. dual
-  licensing a specific component) and costs nothing today.
+- ~~Adopt a lightweight **CLA or DCO**~~ **Done:** DCO required on all PRs
+  (CONTRIBUTING.md "Sign your work" + CI `dco` job) — preserves future
+  flexibility (e.g. dual licensing a specific component) at zero contributor
+  cost.
+- **Proprietary protocol work lives in the private `drift-pro` repository**,
+  attaching to the open core through the extension mechanism (PROTOCOL.md
+  §14: `x-*` vendor namespace, `/capabilities` advertisement, per-connection
+  — never per-envelope — privileges). First products there: **WITNESS
+  Attest** (attestation protocol + service, implemented) and **DRIFT Pulse**
+  (QoS protocol, spec draft).
 - Alternatives considered and rejected: AGPL relicensing (chills the adoption
   a messenger needs; past MIT versions remain forkable anyway) and
   closed-sourcing new features (kills trust — see rule of thumb above).

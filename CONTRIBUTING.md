@@ -52,12 +52,33 @@ the WebSocket client (`drift/transport/`) are both wide open.
 
 ---
 
+## Sign your work (DCO)
+
+Every commit must carry a `Signed-off-by:` line — add it with:
+
+```bash
+git commit -s
+```
+
+That line is your assertion of the [Developer Certificate of
+Origin](https://developercertificate.org/): you wrote the change (or have the
+right to submit it) and you're contributing it under this repository's MIT
+license. It's one flag, no paperwork, no copyright assignment — the same
+model the Linux kernel uses. CI rejects PRs with unsigned commits.
+
+Why we ask: it keeps the project's licensing provenance clean, which protects
+both contributors and DRIFT's long-term stewardship (see
+[`docs/open-core.md`](docs/open-core.md)).
+
+---
+
 ## Pull request checklist
 
 - [ ] All existing tests pass (`pytest`)
 - [ ] New code has tests
 - [ ] Linter passes (`ruff check .`)
 - [ ] Type checker passes (`mypy drift/`)
+- [ ] Commits are signed off (`git commit -s` — see "Sign your work")
 - [ ] PR description explains *what* and *why*, not just *what*
 - [ ] Crypto changes include a clear explanation of the security reasoning
 

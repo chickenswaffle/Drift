@@ -867,6 +867,21 @@ async def root() -> JSONResponse:
     })
 
 
+@app.get("/capabilities")
+async def capabilities() -> JSONResponse:
+    """What this relay speaks (PROTOCOL.md §14 — Extensions).
+
+    The core protocol plus advertised extensions. Extensions are additive and
+    never load-bearing for security: a client that recognizes none of them
+    proceeds on the core protocol unchanged. The reference relay always ships
+    WITNESS, so it is always advertised.
+    """
+    return JSONResponse({
+        "protocol": "DRIFT-P/1",
+        "extensions": ["drift-ext/witness/1"],
+    })
+
+
 # ---------------------------------------------------------------------------
 # WITNESS endpoints (Phase 10)
 # ---------------------------------------------------------------------------
