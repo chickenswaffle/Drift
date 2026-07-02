@@ -59,5 +59,12 @@ TORBIN="$(find "$DEST" -type f -name "$BINNAME" -path '*/tor/*' 2>/dev/null | gr
 [ -z "$TORBIN" ] && { echo "::error::no $BINNAME in expert bundle" >&2; exit 1; }
 chmod +x "$TORBIN" || true
 
+# Windows runners: this script runs under Git Bash, whose paths (/d/a/…) the
+# native Windows Python in the freeze step cannot resolve. Hand back a native
+# path in mixed form (D:/a/…) — valid for Windows Python, safe in bash.
+if command -v cygpath >/dev/null 2>&1; then
+  TORBIN="$(cygpath -m "$TORBIN")"
+fi
+
 echo "tor binary: $TORBIN" >&2
 echo "$TORBIN"
