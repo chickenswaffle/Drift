@@ -81,7 +81,7 @@ class TestBootstrap:
     async def test_reports_progress_0_and_100(self) -> None:
         seen: list[int] = []
 
-        async def fake_backend(name, on_progress, socks_port):  # type: ignore[no-untyped-def]
+        async def fake_backend(name, on_progress, socks_port, timeout):  # type: ignore[no-untyped-def]
             on_progress(42, "Bootstrapped 42% (loading_descriptors)")
             return _fake_client()
 
@@ -95,7 +95,7 @@ class TestBootstrap:
 
     @pytest.mark.asyncio
     async def test_timeout_raises_bootstrap_error(self) -> None:
-        async def slow_backend(name, on_progress, socks_port):  # type: ignore[no-untyped-def]
+        async def slow_backend(name, on_progress, socks_port, timeout):  # type: ignore[no-untyped-def]
             await asyncio.sleep(10)
             return _fake_client()
 
@@ -113,7 +113,7 @@ class TestBootstrap:
     async def test_falls_back_to_next_backend(self) -> None:
         client = _fake_client()
 
-        async def picky(name, on_progress, socks_port):  # type: ignore[no-untyped-def]
+        async def picky(name, on_progress, socks_port, timeout):  # type: ignore[no-untyped-def]
             if name == "arti":
                 raise TorUnavailableError("arti not installed")
             return client
@@ -127,7 +127,7 @@ class TestBootstrap:
 
     @pytest.mark.asyncio
     async def test_all_backends_fail_raises_unavailable(self) -> None:
-        async def always_fail(name, on_progress, socks_port):  # type: ignore[no-untyped-def]
+        async def always_fail(name, on_progress, socks_port, timeout):  # type: ignore[no-untyped-def]
             raise TorUnavailableError("nope")
 
         with (
@@ -141,6 +141,52 @@ class TestBootstrap:
         # Callers catch the TorError base for the graceful fallback.
         assert issubclass(TorUnavailableError, TorError)
         assert issubclass(TorBootstrapError, TorError)
+
+
+# ---------------------------------------------------------------------------
+# stem timeout — the bootstrap budget must bound the (uncancellable) thread
+# ---------------------------------------------------------------------------
+
+
+class TestStemTimeout:
+    def test_budget_passed_into_stem(self) -> None:
+        """_launch_stem must hand the bootstrap budget to stem itself. The
+        thread it runs in can't be cancelled, so stem's own timeout is what
+        actually reaps tor within the caller's deadline (a Tor-hostile network
+        stalls mid-handshake — stem must not hang past this)."""
+        import sys
+        import types
+
+        captured: dict[str, object] = {}
+
+        def fake_launch(**kwargs):  # type: ignore[no-untyped-def]
+            captured.update(kwargs)
+            return MagicMock()  # stands in for the tor subprocess handle
+
+        fake_stem_process = types.ModuleType("stem.process")
+        fake_stem_process.launch_tor_with_config = fake_launch  # type: ignore[attr-defined]
+        fake_stem = types.ModuleType("stem")
+        fake_stem.process = fake_stem_process  # type: ignore[attr-defined]
+
+        with patch.dict(sys.modules, {"stem": fake_stem, "stem.process": fake_stem_process}):
+            client = tor._launch_stem(None, 9051, timeout=17.0)
+
+        assert captured["timeout"] == 17
+        assert client.socks_port == 9051
+
+    @pytest.mark.asyncio
+    async def test_outer_wait_for_exceeds_stem_budget(self) -> None:
+        """The outer asyncio backstop must allow a grace beyond the stem budget,
+        so stem's inner timeout fires and cleans up first."""
+        seen: dict[str, float] = {}
+
+        async def capture_backend(name, on_progress, socks_port, timeout):  # type: ignore[no-untyped-def]
+            seen["timeout"] = timeout
+            return _fake_client()
+
+        with patch.object(tor, "_run_backend", capture_backend):
+            await tor.bootstrap(backend="stem", timeout=12.0)
+        assert seen["timeout"] == 12.0
 
 
 # ---------------------------------------------------------------------------

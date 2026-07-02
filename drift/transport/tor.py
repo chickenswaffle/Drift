@@ -55,6 +55,11 @@ TOR_DEFAULT_HOPS = 3
 # How long we wait for a circuit before giving up and offering a direct connect.
 DEFAULT_BOOTSTRAP_TIMEOUT = 30.0
 
+# Extra seconds the outer asyncio.wait_for allows beyond the budget passed into
+# stem, so stem's own (cancellable-from-inside) timeout fires first and reaps
+# the tor process rather than the outer backstop abandoning an orphan thread.
+_BOOTSTRAP_GRACE = 5.0
+
 # (percent, human-readable status line) — e.g. (42, "Bootstrapped 42% (loading_descriptors)").
 ProgressCallback = Callable[[int, str], None]
 
@@ -201,8 +206,14 @@ async def bootstrap(
     if on_progress is not None:
         on_progress(0, "Starting Tor")
     try:
+        # The outer wait_for is only a backstop: the stem backend runs in a
+        # thread that can't be cancelled, so wait_for alone would block until
+        # the thread returned on its own. The real bound is passed *into* stem
+        # (below), which kills tor and returns within budget; the grace here
+        # lets that inner timeout fire and clean up first.
         return await asyncio.wait_for(
-            _bootstrap_any(backends, on_progress, socks_port), timeout
+            _bootstrap_any(backends, on_progress, socks_port, timeout),
+            timeout + _BOOTSTRAP_GRACE,
         )
     except TimeoutError as exc:
         raise TorBootstrapError(
@@ -214,12 +225,13 @@ async def _bootstrap_any(
     backends: tuple[str, ...],
     on_progress: ProgressCallback | None,
     socks_port: int | None,
+    timeout: float,
 ) -> TorClient:
     """Try each backend in turn; return the first circuit, else raise."""
     errors: list[str] = []
     for name in backends:
         try:
-            client = await _run_backend(name, on_progress, socks_port)
+            client = await _run_backend(name, on_progress, socks_port, timeout)
             if on_progress is not None:
                 on_progress(100, "Tor circuit established")
             logger.info("tor: circuit up via %s on %s", name, client.socks_url)
@@ -234,10 +246,11 @@ async def _run_backend(
     backend: str,
     on_progress: ProgressCallback | None,
     socks_port: int | None,
+    timeout: float,
 ) -> TorClient:
     """Dispatch to a concrete backend. This is the seam tests mock."""
     if backend == "stem":
-        return await asyncio.to_thread(_launch_stem, on_progress, socks_port)
+        return await asyncio.to_thread(_launch_stem, on_progress, socks_port, timeout)
     if backend == "arti":
         return await _launch_arti(on_progress, socks_port)
     raise TorUnavailableError(f"unknown Tor backend {backend!r}")
@@ -249,14 +262,18 @@ _BOOTSTRAP_RE = re.compile(r"Bootstrapped (\d+)%")
 def _launch_stem(
     on_progress: ProgressCallback | None,
     socks_port: int | None,
+    timeout: float,
 ) -> TorClient:
     """
     Launch a system ``tor`` via stem and return a circuit handle (blocking).
 
-    Runs in a worker thread (see :func:`_run_backend`). stem reports bootstrap
-    progress as log lines we parse for the percentage. Raises
-    :class:`TorUnavailableError` if stem or the tor binary is missing, and
-    :class:`TorBootstrapError` if the daemon fails to come up.
+    Runs in a worker thread (see :func:`_run_backend`). Because that thread
+    can't be cancelled, ``timeout`` is passed to stem itself — it kills tor and
+    raises once the budget is spent, so a Tor-hostile network doesn't hang the
+    bootstrap past the caller's deadline. stem reports bootstrap progress as log
+    lines we parse for the percentage. Raises :class:`TorUnavailableError` if
+    stem or the tor binary is missing, and :class:`TorBootstrapError` if the
+    daemon fails to come up in time.
     """
     try:
         import stem.process
@@ -275,6 +292,7 @@ def _launch_stem(
         process = stem.process.launch_tor_with_config(
             config={"SocksPort": str(port), "Log": ["NOTICE stdout"]},
             tor_cmd=tor_cmd,
+            timeout=max(1, int(timeout)),
             init_msg_handler=_handler,
             take_ownership=True,
         )
