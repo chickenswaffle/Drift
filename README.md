@@ -199,7 +199,16 @@ Security issues: see [`SECURITY.md`](SECURITY.md).
 
 ## License
 
-MIT — see [`LICENSE`](LICENSE)
+**Code:** MIT — see [`LICENSE`](LICENSE). Free forever, by design: a security
+tool you can't read is a security tool you can't trust.
+
+**Names:** "DRIFT", "Drift Protocol", and the wordmark are trademarks of the
+project — the code license does not cover them. Forks are welcome; calling a
+fork "DRIFT" is not. See [`TRADEMARKS.md`](TRADEMARKS.md).
+
+**Open-core:** anything we ever charge for lives *above* the protocol
+(operated relays, monitoring, enterprise tooling) in separate repositories —
+never inside this one. See [`docs/open-core.md`](docs/open-core.md).
 
 ---
 

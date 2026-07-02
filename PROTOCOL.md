@@ -255,5 +255,6 @@ version negotiation** — negotiation is a downgrade-attack surface.
 ---
 
 *The Drift Protocol specification is © the DRIFT contributors and released
-under the repository's MIT license. "DRIFT" and "Drift Protocol" are used as
-project names; see `docs/open-core.md` for the stewardship/trademark stance.*
+under the repository's MIT license. "DRIFT", "Drift Protocol", and "DRIFT-P"
+are trademarks of the project — the code license does not cover them (see
+`TRADEMARKS.md`); stewardship stance in `docs/open-core.md`.*
