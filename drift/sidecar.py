@@ -248,6 +248,11 @@ class Sidecar:
         # Invites this process has lit: code → lookup_hash. Deliberately
         # in-memory only — a disappearing code leaves no trace on disk.
         self._live_invites: dict[str, str] = {}
+        # One shared Tor circuit for the whole process (bootstrapping is slow
+        # and per-circuit — every session reuses this). Guarded so two chat_opens
+        # can't bootstrap twice.
+        self._tor_client: Any = None
+        self._tor_lock = asyncio.Lock()
         self._handlers: dict[str, Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]] = {
             "ping": self._ping,
             "status": self._status,
@@ -265,6 +270,11 @@ class Sidecar:
             "fmd_set": self._fmd_set,
             "cover_get": self._cover_get,
             "cover_set": self._cover_set,
+            "relay_get": self._relay_get,
+            "relay_set": self._relay_set,
+            "tor_get": self._tor_get,
+            "tor_set": self._tor_set,
+            "tor_status": self._tor_status,
             "lock": self._lock,
             "unlock": self._unlock,
             "vault_create": self._vault_create,
@@ -321,11 +331,16 @@ class Sidecar:
         return {"pong": True}
 
     async def _status(self, _: dict[str, Any]) -> dict[str, Any]:
+        from drift.transport import tor
+
         return {
             "identity_exists": storage.identity_exists(),
             "vault_exists": storage.vault_exists(),
             "fmd_rate": storage.get_fmd_rate(),
-            "relay_url": DEFAULT_RELAY_URL,
+            "relay_url": storage.get_relay_url(),
+            "tor_mode": storage.get_tor_mode(),
+            "tor_available": tor.available(),
+            "tor_active": self._tor_client is not None,
         }
 
     async def _init(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -402,6 +417,13 @@ class Sidecar:
     # authority on a blind relay); expiry is the hard guarantee.
 
     @staticmethod
+    def _relay_url(params: dict[str, Any]) -> str:
+        """The relay for this call: an explicit ``relay_url`` param, else the
+        persisted setting (which itself falls back to $DRIFT_RELAY_URL /
+        localhost)."""
+        return str(params.get("relay_url") or storage.get_relay_url())
+
+    @staticmethod
     async def _relay_pubkey_or_raise(http_base: str) -> bytes:
         from drift.transport.beacon_http import fetch_relay_pubkey
 
@@ -424,7 +446,7 @@ class Sidecar:
         if not (1 <= ttl <= INVITE_MAX_TTL_SECONDS):
             raise RpcError(f"ttl_seconds must be 1..{INVITE_MAX_TTL_SECONDS}")
 
-        http_base = relay_http(str(params.get("relay_url") or DEFAULT_RELAY_URL))
+        http_base = relay_http(self._relay_url(params))
         relay_pubkey = await self._relay_pubkey_or_raise(http_base)
         invite = create_invite(identity, ttl, relay_pubkey)
         try:
@@ -459,7 +481,7 @@ class Sidecar:
         except ValueError:
             raise failure from None
 
-        http_base = relay_http(str(params.get("relay_url") or DEFAULT_RELAY_URL))
+        http_base = relay_http(self._relay_url(params))
         relay_pubkey = await self._relay_pubkey_or_raise(http_base)
         digest = beacon_lookup_hash(handle, relay_pubkey)
         encrypted = await get_beacon(http_base, digest)
@@ -485,7 +507,7 @@ class Sidecar:
         from drift.transport.beacon_http import delete_beacon, relay_http
 
         code = str(params.get("code", "")).strip()
-        http_base = relay_http(str(params.get("relay_url") or DEFAULT_RELAY_URL))
+        http_base = relay_http(self._relay_url(params))
         digest = self._live_invites.pop(code, None)
         if digest is None:
             try:
@@ -516,6 +538,81 @@ class Sidecar:
         level = str(params.get("level", "off"))
         return {"cover_level": storage.set_cover_level(level)}
 
+    # -- relay + Tor -------------------------------------------------------
+
+    async def _relay_get(self, _: dict[str, Any]) -> dict[str, Any]:
+        return {"relay_url": storage.get_relay_url()}
+
+    async def _relay_set(self, params: dict[str, Any]) -> dict[str, Any]:
+        return {"relay_url": storage.set_relay_url(str(params.get("relay_url", "")))}
+
+    async def _tor_get(self, _: dict[str, Any]) -> dict[str, Any]:
+        from drift.transport import tor
+
+        return {
+            "tor_mode": storage.get_tor_mode(),
+            "tor_available": tor.available(),
+            "tor_active": self._tor_client is not None,
+        }
+
+    async def _tor_set(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Set the Tor mode. Turning it off tears the circuit down now; turning
+        it on doesn't force a bootstrap here — the next chat_open brings the
+        circuit up (with progress events), so the setting is instant and the
+        slow part happens where the user expects a connection."""
+        mode = storage.set_tor_mode(str(params.get("mode", "off")))
+        if mode == "off":
+            await self._close_tor()
+        return await self._tor_get({})
+
+    async def _tor_status(self, _: dict[str, Any]) -> dict[str, Any]:
+        return await self._tor_get({})
+
+    async def _ensure_tor(self) -> Any:
+        """Return the shared Tor circuit for the current mode, bootstrapping it
+        once if needed. ``off`` → None (clearnet). ``prefer`` → the circuit, or
+        None if it won't bootstrap. ``require`` → the circuit, or an RpcError so
+        the caller never silently falls back to clearnet."""
+        from drift.transport import tor
+
+        mode = storage.get_tor_mode()
+        if mode == "off":
+            await self._close_tor()
+            return None
+        async with self._tor_lock:
+            if self._tor_client is not None:
+                return self._tor_client
+            if not tor.available():
+                if mode == "require":
+                    raise RpcError("Tor required but no backend is installed in this build")
+                _emit_event("tor_status", {"state": "unavailable"})
+                return None
+            _emit_event("tor_status", {"state": "bootstrapping", "pct": 0})
+
+            def _progress(pct: int, detail: str) -> None:
+                _emit_event("tor_status", {"state": "bootstrapping", "pct": pct,
+                                           "detail": detail})
+
+            try:
+                self._tor_client = await tor.bootstrap(on_progress=_progress)
+            except tor.TorError as exc:
+                _emit_event("tor_status", {"state": "failed", "detail": str(exc)})
+                if mode == "require":
+                    raise RpcError(f"Tor required but unavailable: {exc}") from None
+                return None
+            _emit_event("tor_status", {"state": "active",
+                                       "hops": self._tor_client.num_hops})
+            return self._tor_client
+
+    async def _close_tor(self) -> None:
+        if self._tor_client is not None:
+            try:
+                await self._tor_client.close()
+            except Exception:
+                logger.exception("error closing Tor circuit")
+            self._tor_client = None
+            _emit_event("tor_status", {"state": "off"})
+
     async def _panic_lock(self, _: dict[str, Any]) -> dict[str, Any]:
         """Instant, passphrase-free seal: close everything and shred the
         materialized working copy. The sealed vault.bin persists, so the next
@@ -525,6 +622,7 @@ class Sidecar:
         if not storage.vault_exists():
             raise RpcError("panic lock requires a vault — set a passphrase first")
         await self._close_all_convos()
+        await self._close_tor()
         storage.shred_working_copy()
         return {"locked": True}
 
@@ -532,8 +630,10 @@ class Sidecar:
         passphrase = params.get("passphrase")
         if not passphrase:
             raise RpcError("lock requires a passphrase")
-        # Close any live conversations first — they hold a loaded identity.
+        # Close any live conversations (and the Tor circuit) first — they hold a
+        # loaded identity.
         await self._close_all_convos()
+        await self._close_tor()
         ok = storage.lock(str(passphrase))
         return {"locked": ok}
 
@@ -558,8 +658,12 @@ class Sidecar:
         stay type-agnostic.
         """
         kind = str(params.get("kind") or "contact")
-        relay_url = str(params.get("relay_url") or DEFAULT_RELAY_URL)
+        relay_url = self._relay_url(params)
         identity = storage.load_identity()
+        # Bring the shared Tor circuit up before taking any convo lock — a
+        # bootstrap can take ~30 s and we don't want to block an unrelated
+        # conversation. Emits progress events; raises only in 'require' mode.
+        tor_client = await self._ensure_tor()
 
         if kind == "contact":
             from drift.crypto.cover import CoverLevel
@@ -590,6 +694,7 @@ class Sidecar:
                     on_event=on_event, on_burn=on_burn,
                     prekeys=storage.ensure_prekeys(identity),
                     cover=CoverLevel.parse(storage.get_cover_level()),
+                    tor_client=tor_client,
                 )
                 conversation: Any = _Conversation(convo, session, self._loop)
                 await conversation.start()
@@ -613,7 +718,8 @@ class Sidecar:
                 def on_event(k: str, d: str) -> None:
                     _emit_event("chat_event", {"convo": label, "kind": k, "detail": d})
 
-                session = RoomSession(identity, room, relay_url, on_event=on_event)
+                session = RoomSession(identity, room, relay_url, on_event=on_event,
+                                      tor_client=tor_client)
                 conversation = _RoomConversation(label, session, self._loop)
                 await conversation.start()
                 self._convos[label] = conversation
@@ -643,6 +749,7 @@ class Sidecar:
                 session = GroupSession(
                     identity, group, relay_url,
                     on_event=on_event, on_membership=on_membership,
+                    tor_client=tor_client,
                 )
                 conversation = _GroupConversation(label, session, self._loop)
                 await conversation.start()
@@ -989,6 +1096,7 @@ async def _serve() -> None:
         loop.create_task(sidecar.dispatch(req))
 
     await sidecar._close_all_convos()
+    await sidecar._close_tor()
 
 
 def main() -> None:

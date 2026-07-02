@@ -739,6 +739,55 @@ def set_fmd_rate(rate: float) -> float:
     return rate
 
 
+def get_relay_url() -> str:
+    """The relay URL to use, from settings.json. Falls back to
+    ``$DRIFT_RELAY_URL`` then the reference localhost relay."""
+    default = os.environ.get("DRIFT_RELAY_URL", "ws://127.0.0.1:8765")
+    raw = str(_load_settings().get("relay_url", "") or "").strip()
+    return raw or default
+
+
+def _valid_relay_url(url: str) -> bool:
+    return url.startswith(("ws://", "wss://")) and len(url) > len("wss://")
+
+
+def set_relay_url(url: str) -> str:
+    """Persist the relay WebSocket URL (``ws://`` or ``wss://``); returns the
+    value stored. Raises ``StorageError`` on a non-WebSocket URL."""
+    url = url.strip().rstrip("/")
+    if not _valid_relay_url(url):
+        raise StorageError("relay URL must start with ws:// or wss://")
+    settings = _load_settings()
+    settings["relay_url"] = url
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    SETTINGS_FILE.write_text(json.dumps(settings, indent=2))
+    SETTINGS_FILE.chmod(0o600)
+    return url
+
+
+def get_tor_mode() -> str:
+    """Tor routing mode: ``off`` (clearnet), ``prefer`` (Tor, fall back to
+    clearnet if it can't bootstrap), or ``require`` (refuse to connect without
+    Tor). Junk falls back to off."""
+    raw = str(_load_settings().get("tor_mode", "off")).strip().lower()
+    return raw if raw in ("off", "prefer", "require") else "off"
+
+
+def set_tor_mode(mode: str) -> str:
+    """Persist the Tor routing mode; returns the value stored. Raises
+    ``StorageError`` on anything but off/prefer/require. Applies to sessions
+    opened after the change."""
+    mode = mode.strip().lower()
+    if mode not in ("off", "prefer", "require"):
+        raise StorageError("tor mode must be off, prefer, or require")
+    settings = _load_settings()
+    settings["tor_mode"] = mode
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    SETTINGS_FILE.write_text(json.dumps(settings, indent=2))
+    SETTINGS_FILE.chmod(0o600)
+    return mode
+
+
 def get_cover_level() -> str:
     """Cover-traffic level for new 1:1 sessions: ``off`` / ``low`` / ``high``.
     Stored alongside ``fmd_rate`` in settings.json; junk falls back to off."""

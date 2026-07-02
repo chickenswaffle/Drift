@@ -3,6 +3,9 @@ export interface Status {
   vault_exists: boolean;
   fmd_rate: number;
   relay_url: string;
+  tor_mode?: "off" | "prefer" | "require";
+  tor_available?: boolean;
+  tor_active?: boolean;
 }
 
 export type Contacts = Record<string, string>; // name -> contact code

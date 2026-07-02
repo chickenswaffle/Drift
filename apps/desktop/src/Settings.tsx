@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { rpc } from "./rpc";
+import { rpc, onSidecar } from "./rpc";
 import { Updater } from "./Updater";
 import { copyText } from "./util";
 import type { Contacts, Status } from "./types";
@@ -79,6 +79,8 @@ export function Settings({
 
         <VaultSection vaultExists={status.vault_exists} onChanged={onChanged} />
         <VerifySection contacts={contacts} />
+        <RelaySection currentUrl={status.relay_url} onChanged={onChanged} />
+        <TorSection status={status} onChanged={onChanged} />
         <FmdSection currentRate={status.fmd_rate} />
         <CoverSection />
         <NotifySection />
@@ -310,6 +312,149 @@ function FmdSection({ currentRate }: { currentRate: number }) {
         ))}
       </div>
       <p className="muted small">{note}</p>
+      {err && <p className="error small">{err}</p>}
+    </section>
+  );
+}
+
+function RelaySection({
+  currentUrl,
+  onChanged,
+}: {
+  currentUrl: string;
+  onChanged?: () => void;
+}) {
+  const [url, setUrl] = useState(currentUrl);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [saved, setSaved] = useState(false);
+  const dirty = url.trim() !== currentUrl;
+
+  async function save() {
+    if (!dirty || busy) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      const res = await rpc<{ relay_url: string }>("relay_set", { relay_url: url.trim() });
+      setUrl(res.relay_url);
+      setSaved(true);
+      setTimeout(() => setSaved(false), 1500);
+      onChanged?.();
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="setting">
+      <div className="label">relay</div>
+      <p className="muted small">
+        The blind store-and-forward server your messages route through. It sees
+        only opaque, one-time-addressed blobs — never who talks to whom. Point
+        DRIFT at your own for maximum trust.
+      </p>
+      <div className="verify-row">
+        <input
+          className="lock-input"
+          placeholder="ws:// or wss:// relay URL"
+          value={url}
+          onChange={(e) => setUrl(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") void save();
+          }}
+        />
+        <button className="ghost" onClick={() => void save()} disabled={busy || !dirty}>
+          {busy ? "…" : saved ? "saved ✓" : "› save"}
+        </button>
+      </div>
+      <p className="muted small">Applies to conversations opened after the change.</p>
+      {err && <p className="error small">{err}</p>}
+    </section>
+  );
+}
+
+const TOR_STOPS = [
+  { key: "off", label: "off", note: "connect direct — your IP is visible to the relay" },
+  { key: "prefer", label: "prefer", note: "route over Tor; fall back to direct if it can't bootstrap" },
+  { key: "require", label: "require", note: "refuse to connect at all unless Tor is up — strictest" },
+] as const;
+
+function TorSection({ status, onChanged }: { status: Status; onChanged?: () => void }) {
+  const [mode, setMode] = useState<string>(status.tor_mode ?? "off");
+  const [available, setAvailable] = useState<boolean>(status.tor_available ?? false);
+  const [live, setLive] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  // Bootstrap progress + circuit state stream in as "tor_status" events.
+  useEffect(() => {
+    const un = onSidecar(({ event, data }) => {
+      if (event !== "tor_status") return;
+      const st = String(data.state);
+      if (st === "bootstrapping") setLive(`bootstrapping Tor… ${data.pct ?? 0}%`);
+      else if (st === "active") setLive(`circuit up · ${data.hops ?? 3} hops`);
+      else if (st === "failed") setLive(`failed: ${data.detail ?? "unavailable"}`);
+      else if (st === "unavailable") setLive("no Tor backend in this build");
+      else if (st === "off") setLive(null);
+    });
+    return () => {
+      void un.then((f) => f());
+    };
+  }, []);
+
+  async function pick(next: string) {
+    if (busy) return;
+    setBusy(true);
+    setErr(null);
+    const prev = mode;
+    setMode(next);
+    try {
+      const res = await rpc<{ tor_mode: string; tor_available: boolean }>("tor_set", {
+        mode: next,
+      });
+      setMode(res.tor_mode);
+      setAvailable(res.tor_available);
+      onChanged?.();
+    } catch (e) {
+      setMode(prev);
+      setErr(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const note = TOR_STOPS.find((s) => s.key === mode)?.note ?? "";
+
+  return (
+    <section className="setting">
+      <div className="label">tor</div>
+      <div className="dial">
+        {TOR_STOPS.map((s) => (
+          <button
+            key={s.key}
+            className={`dial-stop ${mode === s.key ? "on" : ""}`}
+            onClick={() => void pick(s.key)}
+            disabled={busy}
+          >
+            {s.label}
+          </button>
+        ))}
+      </div>
+      <p className="muted small">
+        {note} Tor carries only already-encrypted bytes — it hides your network
+        location, never your keys. The circuit comes up when you open the next
+        conversation.
+      </p>
+      {!available && (
+        <p className="warn small">
+          No Tor backend is bundled in this build — install the `tor` extra (arti
+          or a system tor) to enable it. &apos;require&apos; will refuse to
+          connect until then.
+        </p>
+      )}
+      {live && <p className="muted small">status: {live}</p>}
       {err && <p className="error small">{err}</p>}
     </section>
   );

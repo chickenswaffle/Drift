@@ -38,6 +38,7 @@ def store(tmp_path, monkeypatch):  # type: ignore[no-untyped-def]
     monkeypatch.setattr(storage, "PREKEYS_DIR", tmp_path / "prekeys")
     monkeypatch.setattr(storage, "VAULT_FILE", tmp_path / "vault.bin")
     monkeypatch.setattr(storage, "SETTINGS_FILE", tmp_path / "settings.json")
+    monkeypatch.delenv("DRIFT_RELAY_URL", raising=False)
     return tmp_path
 
 
@@ -216,6 +217,70 @@ class TestCover:
         assert resp["result"]["cover_level"] == "high"
         resp = await call(sc, frames, "cover_set", {"level": "maximum-overdrive"})
         assert resp["ok"] is False
+
+
+# --------------------------------------------------------------------------- #
+# Relay + Tor
+# --------------------------------------------------------------------------- #
+
+
+class TestRelayAndTor:
+    async def test_relay_roundtrip(self, store, frames) -> None:  # type: ignore[no-untyped-def]
+        sc = make_sidecar()
+        resp = await call(sc, frames, "relay_get")
+        assert resp["result"]["relay_url"] == "ws://127.0.0.1:8765"
+        resp = await call(sc, frames, "relay_set", {"relay_url": "wss://my.relay:443"})
+        assert resp["result"]["relay_url"] == "wss://my.relay:443"
+        resp = await call(sc, frames, "relay_get")
+        assert resp["result"]["relay_url"] == "wss://my.relay:443"
+
+    async def test_relay_set_rejects_bad_url(self, store, frames) -> None:  # type: ignore[no-untyped-def]
+        resp = await call(make_sidecar(), frames, "relay_set", {"relay_url": "http://nope"})
+        assert resp["ok"] is False
+
+    async def test_relay_url_flows_into_status(self, store, frames) -> None:  # type: ignore[no-untyped-def]
+        sc = make_sidecar()
+        await call(sc, frames, "relay_set", {"relay_url": "wss://r:443"})
+        resp = await call(sc, frames, "status")
+        assert resp["result"]["relay_url"] == "wss://r:443"
+
+    async def test_tor_set_roundtrip_and_status(self, store, frames, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        # Report a backend as present so the mode isn't force-clamped anywhere.
+        from drift.transport import tor
+        monkeypatch.setattr(tor, "available", lambda: True)
+        sc = make_sidecar()
+        resp = await call(sc, frames, "tor_get")
+        assert resp["result"]["tor_mode"] == "off"
+        assert resp["result"]["tor_active"] is False
+        resp = await call(sc, frames, "tor_set", {"mode": "prefer"})
+        assert resp["result"]["tor_mode"] == "prefer"
+        assert resp["result"]["tor_available"] is True
+        resp = await call(sc, frames, "tor_status")
+        assert resp["result"]["tor_mode"] == "prefer"
+
+    async def test_tor_set_rejects_junk(self, store, frames) -> None:  # type: ignore[no-untyped-def]
+        resp = await call(make_sidecar(), frames, "tor_set", {"mode": "onion-everything"})
+        assert resp["ok"] is False
+
+    async def test_ensure_tor_off_is_none(self, store, frames) -> None:  # type: ignore[no-untyped-def]
+        sc = make_sidecar()
+        assert await sc._ensure_tor() is None
+
+    async def test_ensure_tor_require_no_backend_raises(self, store, frames, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        from drift.sidecar import RpcError
+        from drift.transport import tor
+        monkeypatch.setattr(tor, "available", lambda: False)
+        sc = make_sidecar()
+        await call(sc, frames, "tor_set", {"mode": "require"})
+        with pytest.raises(RpcError):
+            await sc._ensure_tor()
+
+    async def test_ensure_tor_prefer_no_backend_ok(self, store, frames, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        from drift.transport import tor
+        monkeypatch.setattr(tor, "available", lambda: False)
+        sc = make_sidecar()
+        await call(sc, frames, "tor_set", {"mode": "prefer"})
+        assert await sc._ensure_tor() is None  # clearnet, no raise
 
 
 # --------------------------------------------------------------------------- #

@@ -179,6 +179,27 @@ async def test_two_sidecars_exchange_message(relay_url: str, two_sidecars: Any) 
 
 
 @pytest.mark.asyncio
+async def test_relay_set_routes_messages(relay_url: str, two_sidecars: Any) -> None:
+    """A relay chosen via relay_set (no per-call relay_url) actually carries a
+    message end to end — the picker is wired all the way through chat_open."""
+    a, b = two_sidecars
+    code_a = (await a.call("init"))["contact_code"]
+    code_b = (await b.call("init"))["contact_code"]
+    for sc in (a, b):
+        assert (await sc.call("relay_set", {"relay_url": relay_url}))["relay_url"] == relay_url
+    await a.call("contacts_add", {"name": "peer", "code": code_b})
+    await b.call("contacts_add", {"name": "peer", "code": code_a})
+
+    sender, receiver = _initiator_first(a, code_a, b, code_b)
+    await sender.call("chat_open", {"contact": "peer"})    # no relay_url — uses the setting
+    await receiver.call("chat_open", {"contact": "peer"})
+    await sender.call("chat_send", {"convo": "peer", "text": "via the chosen relay"})
+
+    evt = await receiver.next_event("message")
+    assert evt["data"]["text"] == "via the chosen relay"
+
+
+@pytest.mark.asyncio
 async def test_invite_flow_end_to_end(relay_url: str, two_sidecars: Any) -> None:
     """Disappearing contact code: minted by A, redeemed once by B, then gone."""
     a, b = two_sidecars

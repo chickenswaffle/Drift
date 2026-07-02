@@ -125,6 +125,16 @@ def _backend_installed(name: str) -> bool:
     return importlib.util.find_spec(name) is not None
 
 
+def available() -> bool:
+    """True if any Tor backend (arti or stem) is importable in this build.
+
+    A packaged sidecar frozen without the ``tor`` extra returns ``False`` — the
+    GUI surfaces that instead of pretending Tor is one bootstrap away. No daemon
+    or circuit check: this only reports whether the code *could* try.
+    """
+    return _backend_installed("arti") or _backend_installed("stem")
+
+
 def _resolve_backends(backend: str | None) -> tuple[str, ...]:
     """
     Decide which backends to try, in order.

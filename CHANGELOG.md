@@ -54,6 +54,36 @@ DRIFT uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.19.0] — 2026-07-01
+
+**The desktop learns to hide — Tor routing and a relay picker.** Two network
+controls the terminal client always had but the desktop didn't. No new
+cryptography: Tor is transport-only (it carries already-encrypted bytes and
+never sees keys), and the relay was already blind.
+
+### Added
+- **Tor routing, in Settings.** A three-stop dial: **off** (direct), **prefer**
+  (route over Tor, fall back to a direct connection if it can't bootstrap), and
+  **require** (refuse to connect at all unless Tor is up). The sidecar holds one
+  shared circuit for the whole process — bootstrapping is slow and per-circuit,
+  so every session reuses it — brought up on the next `chat_open` with live
+  progress events, and torn down on lock / panic / exit. Honest about its
+  limits: a packaged build without the optional `arti`/`stem` backend reports
+  Tor **unavailable** rather than pretending, and `require` refuses to connect
+  until one is installed. New `tor.available()`; sidecar `tor_get` / `tor_set`
+  / `tor_status` + `tor_status` progress events; `storage.get/set_tor_mode`.
+- **Relay picker, in Settings.** Point DRIFT at your own relay instead of the
+  baked-in default (`ws://` / `wss://`, validated). Persists in `settings.json`,
+  flows through `status`, and every conversation/invite opened afterward uses
+  it. Sidecar `relay_get` / `relay_set`; `storage.get/set_relay_url` (falls back
+  to `$DRIFT_RELAY_URL` then localhost).
+
+### Changed
+- The sidecar's relay fallback is now the persisted setting, not a module
+  constant — one source of truth for both the GUI and any per-call override.
+
+---
+
 ## [0.18.0] — 2026-07-01
 
 **Nothing lingers — disappearing contact codes, disappearing messages, panic
