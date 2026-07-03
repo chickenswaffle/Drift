@@ -57,3 +57,27 @@ jobs:
 
       - name: Run tests
         run: pytest tests/unit/ -v --tb=short --cov=drift --cov-report=term-missing
+
+  # drift-core: the shared Rust implementation (Phase 13a). It must reproduce
+  # the same tests/vectors the Python reference exports — the cross-impl parity
+  # gate in docs/app-plan.md §6. Runs on the same vectors committed to the repo.
+  rust-core:
+    name: drift-core (Rust)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: drift-core
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: rustup component add rustfmt clippy
+
+      - name: Format check
+        run: cargo fmt --all --check
+
+      - name: Clippy (deny warnings)
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Vector conformance tests
+        run: cargo test --all

@@ -10,13 +10,39 @@ DRIFT uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Planned
-- **Phase 13 — native mobile + shared Rust core (design).** The remaining
+- **Phase 13 — native mobile + shared Rust core.** The remaining
   Phase 13 scope (`docs/app-plan.md`): native iOS/Android apps and a shared Rust
   `drift-core` that the desktop app's Python sidecar is later swapped out for.
   The plan confronts the mobile threat-model tensions head-on — notably
   push-free-by-default delivery, to avoid leaking timing metadata to APNs/FCM.
+  Sub-phase **13a (core extraction) has started** — see below.
 
 ### Added
+- **Cross-implementation test vectors (`tests/vectors/`) — Phase 13a.** A
+  deterministic generator (`scripts/export_vectors.py`) exports JSON vectors
+  from the Python **reference** implementation for base58, HKDF domains, the
+  XChaCha20-Poly1305 envelope, identity/Ed25519/ECDH, stealth addressing,
+  sealed sender, a full Double Ratchet transcript (key/nonce tapes recorded for
+  bit-for-bit replay), X3DH (with/without one-time prekey, plus the ratchet
+  handoff), burn tokens, the Argon2id panic vault, and FMD. Every DRIFT-P/1
+  implementation must reproduce them bit-for-bit; `tests/unit/test_vectors.py`
+  holds the Python side to that contract. These are the parity gate
+  `docs/app-plan.md` §6 requires before a second implementation ships.
+- **`drift-core` Rust workspace — Phase 13a, first cut.** A new `drift-core/`
+  Cargo workspace whose `drift-crypto` crate is the start of the shared Rust
+  implementation the desktop sidecar and mobile apps will eventually link
+  (app-plan §2/§3). It **adds no new cryptography** — it composes vetted crates
+  only (`x25519`/`ed25519`/`curve25519-dalek`, RustCrypto
+  `chacha20poly1305`/`hkdf`/`sha2`/`hmac`/`argon2`), the iron rule inside the
+  Rust core too. Ported and proven bit-for-bit against `tests/vectors/`
+  (`drift-core/crypto/tests/vectors.rs`): base58, HKDF, the AEAD envelope,
+  identity/Ed25519/ECDH, sealed sender, the full Double Ratchet (bidirectional
+  transcript incl. out-of-order skipped keys and the H1 transactional decrypt),
+  X3DH, burn tokens, and the Argon2id vault. A new CI job runs
+  `cargo fmt`/`clippy`/`test` on it. **Still to port:** stealth addressing and
+  FMD — they need libsodium's exact `crypto_core_ed25519_from_uniform`
+  (Elligator 2 + cofactor clear), which has no bit-identical pure-Rust
+  equivalent, so they will bind libsodium; tracked as the next 13a step.
 - **Desktop app (`apps/desktop/`) — Phase 13c, first cut.** A native desktop
   client (Tauri + React) for people who don't live in a terminal. It adds **no
   cryptography**: a new `drift.sidecar` module exposes the existing, audited

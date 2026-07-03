@@ -263,15 +263,37 @@ be the thing that distinguishes DRIFT's app from every other "private" messenger
 - **Form factor:** desktop (Windows/Linux + unsigned macOS `.dmg`) and Android
   first; signed iOS later (needs the paid Apple Developer Program).
 
-**Still open (needed before 13a / the mobile targets):**
+**Decided since (13a):**
 
-- **Vector format & location** — JSON vectors under `tests/vectors/` shared by
-  both impls? (Recommended.)
+- **Vector format & location — DECIDED: JSON under `tests/vectors/`, shared by
+  both impls.** `scripts/export_vectors.py` exports them from the Python
+  reference; `tests/unit/test_vectors.py` (Python) and
+  `drift-core/crypto/tests/vectors.rs` (Rust) both assert conformance, and both
+  run in CI. Vectors are the compatibility contract — regenerated only on a
+  deliberate, reviewed protocol change.
+
+**Still open (needed before the FFI surface / the mobile targets):**
+
 - **Minimum OS targets** — iOS 16+/Android 9+ assumed for Secure Enclave /
   StrongBox and BackgroundTasks; confirm.
 - **UnifiedPush** as the Android opt-in push path (v2) — research spike needed.
+- **Stealth/FMD Elligator parity in Rust** — porting `stealth`/`fmd` needs
+  libsodium's exact `crypto_core_ed25519_from_uniform` (Elligator 2 + cofactor
+  clear); the plan is to bind libsodium (`libsodium-sys`) so the group ops are
+  byte-identical to the reference rather than hand-roll field math (which would
+  break the iron rule). This is the remaining 13a crypto work.
 
 **Done since:**
+
+- **13a — core extraction (started).** `drift-core/` Cargo workspace; the
+  `drift-crypto` crate ports base58, HKDF, the AEAD envelope,
+  identity/Ed25519/ECDH, sealed sender, the full Double Ratchet, X3DH, burn
+  tokens, and the Argon2id vault, each proven **bit-for-bit** against
+  `tests/vectors/`. It composes vetted crates only (dalek + RustCrypto +
+  argon2) — the iron rule holds inside the Rust core. Stealth + FMD remain
+  (see "Still open"). The 13a exit criterion (Rust↔Python wire interop for
+  encrypt/decrypt, X3DH, ratchet) is met for everything except stealth detect,
+  which is gated on the Elligator parity above.
 
 - **Sidecar packaging** — `drift.sidecar` is frozen with PyInstaller
   (`apps/desktop/sidecar/build_sidecar.py`) and bundled as a Tauri `externalBin`,
