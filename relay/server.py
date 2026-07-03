@@ -34,12 +34,13 @@ from contextlib import asynccontextmanager
 from typing import Any
 from uuid import uuid4
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from drift.crypto.burn import TOKEN_TTL_SECONDS, BurnTokenError, parse_burn_token
 from drift.crypto.fmd import FMDKeypair, fmd_test
 from relay.federation import ANNOUNCE_TTL, DEFAULT_DEDUP_SIZE, Federation, LRUSet
+from relay.ratelimit import TokenBucket
 from relay.witness import (
     MAX_CERTS,
     WitnessChain,
@@ -91,6 +92,70 @@ app = FastAPI(
     version="0.1.0",
     lifespan=_lifespan,
 )
+
+# ---------------------------------------------------------------------------
+# Rate limiting (see relay/ratelimit.py for the privacy stance)
+#
+# Generous per-IP budgets — Tor exit sharing means one IP is many users — plus
+# a *global* per-address budget on the OTPK-consuming prekey fetch, because a
+# drain attacker can rotate circuits for a fresh IP but cannot rotate the
+# victim's address. Tunable per deployment; DRIFT_RELAY_RATE_LIMITS=off
+# disables the whole layer (e.g. for load tests).
+# ---------------------------------------------------------------------------
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _rate_limits_on() -> bool:
+    flag = os.environ.get("DRIFT_RELAY_RATE_LIMITS", "on").strip().lower()
+    return flag not in {"off", "0", "false", "no"}
+
+
+# /send floods: 10 msg/s sustained, burst 200 — orders of magnitude above chat.
+_send_bucket = TokenBucket(
+    rate=_env_float("DRIFT_RELAY_SEND_RATE", 10.0),
+    burst=_env_float("DRIFT_RELAY_SEND_BURST", 200.0),
+)
+# /burn + prekey publish/replenish: 1/s sustained, burst 30 per IP.
+_burn_bucket = TokenBucket(
+    rate=_env_float("DRIFT_RELAY_BURN_RATE", 1.0),
+    burst=_env_float("DRIFT_RELAY_BURN_BURST", 30.0),
+)
+_prekey_write_bucket = TokenBucket(
+    rate=_env_float("DRIFT_RELAY_PREKEY_WRITE_RATE", 1.0),
+    burst=_env_float("DRIFT_RELAY_PREKEY_WRITE_BURST", 30.0),
+)
+# OTPK-consuming fetch, per (IP, target): one contact needs ~1 fetch ever.
+_prekey_fetch_ip_bucket = TokenBucket(
+    rate=_env_float("DRIFT_RELAY_PREKEY_FETCH_RATE", 1.0 / 30.0),
+    burst=_env_float("DRIFT_RELAY_PREKEY_FETCH_BURST", 20.0),
+)
+# OTPK-consuming fetch, per target address across ALL IPs (anti circuit-rotate):
+# burst 30 new conversations, then 6/min sustained — auto-replenish outpaces it.
+_prekey_fetch_addr_bucket = TokenBucket(
+    rate=_env_float("DRIFT_RELAY_PREKEY_ADDR_RATE", 0.1),
+    burst=_env_float("DRIFT_RELAY_PREKEY_ADDR_BURST", 30.0),
+)
+
+
+def _client_key(request: Request) -> str:
+    """Bucket key for the caller. In-RAM only — never logged (see ratelimit.py)."""
+    client = request.client
+    return client.host if client else "unknown"
+
+
+def _rate_limited() -> JSONResponse:
+    return JSONResponse(
+        {"error": "rate limited — slow down"},
+        status_code=429,
+        headers={"Retry-After": "30"},
+    )
+
 
 # ---------------------------------------------------------------------------
 # In-memory store (Phase 0)
@@ -463,7 +528,7 @@ async def websocket_endpoint(websocket: WebSocket, listen_addr: str) -> None:
 # ---------------------------------------------------------------------------
 
 @app.post("/send")
-async def send_message(envelope: dict[str, Any]) -> JSONResponse:
+async def send_message(envelope: dict[str, Any], request: Request) -> JSONResponse:
     """
     POST a message envelope to the relay.
 
@@ -486,6 +551,8 @@ async def send_message(envelope: dict[str, Any]) -> JSONResponse:
     We rebuild the forwarded record from known fields only, so the relay never
     re-broadcasts arbitrary client-supplied JSON to other clients.
     """
+    if _rate_limits_on() and not _send_bucket.allow(_client_key(request)):
+        return _rate_limited()
     to_addr = envelope.get("to", "")
     if not to_addr:
         return JSONResponse({"error": "missing 'to' field"}, status_code=400)
@@ -670,7 +737,9 @@ async def extinguish_beacon(lookup_hash: str) -> JSONResponse:
 # ---------------------------------------------------------------------------
 
 @app.post("/prekeys/{contact_addr}")
-async def publish_prekeys(contact_addr: str, body: dict[str, Any]) -> JSONResponse:
+async def publish_prekeys(
+    contact_addr: str, body: dict[str, Any], request: Request
+) -> JSONResponse:
     """
     Publish a public prekey bundle, indexed by the publisher's base58 scan key.
 
@@ -679,6 +748,8 @@ async def publish_prekeys(contact_addr: str, body: dict[str, Any]) -> JSONRespon
     carries an Ed25519 signature the fetcher verifies). Replaces any existing
     bundle for this address.
     """
+    if _rate_limits_on() and not _prekey_write_bucket.allow(_client_key(request)):
+        return _rate_limited()
     if not contact_addr:
         return JSONResponse({"error": "missing contact_addr"}, status_code=400)
     missing = [f for f in _PREKEY_BUNDLE_FIELDS if not body.get(f)]
@@ -694,7 +765,7 @@ async def publish_prekeys(contact_addr: str, body: dict[str, Any]) -> JSONRespon
 
 
 @app.get("/prekeys/{contact_addr}")
-async def fetch_prekeys(contact_addr: str) -> JSONResponse:
+async def fetch_prekeys(contact_addr: str, request: Request) -> JSONResponse:
     """
     Fetch a contact's bundle, consuming one one-time prekey atomically.
 
@@ -702,7 +773,18 @@ async def fetch_prekeys(contact_addr: str) -> JSONResponse:
     removed from the store so it can never be served twice. If none remain,
     ``one_time_prekey`` is ``null`` (a weaker but valid X3DH per spec). 404 if no
     bundle is published (or it has expired).
+
+    Rate limited twice over — per (IP, target) *and* per target across all IPs —
+    because each fetch consumes an OTPK: unthrottled, an attacker could drain a
+    victim's pool (rotating Tor circuits for fresh IPs) and force their future
+    handshakes onto the weaker OTPK-less path. The global per-address budget
+    (burst 30, then 6/min) is far below what auto-replenish tops back up.
     """
+    if _rate_limits_on():
+        ip_ok = _prekey_fetch_ip_bucket.allow(f"{_client_key(request)}|{contact_addr}")
+        addr_ok = _prekey_fetch_addr_bucket.allow(contact_addr)
+        if not (ip_ok and addr_ok):
+            return _rate_limited()
     _prune_prekeys()
     record = _prekeys.get(contact_addr)
     if record is None:
@@ -715,12 +797,16 @@ async def fetch_prekeys(contact_addr: str) -> JSONResponse:
 
 
 @app.post("/prekeys/{contact_addr}/replenish")
-async def replenish_prekeys(contact_addr: str, body: dict[str, Any]) -> JSONResponse:
+async def replenish_prekeys(
+    contact_addr: str, body: dict[str, Any], request: Request
+) -> JSONResponse:
     """
     Append more one-time prekeys to an existing bundle. Body:
     ``{one_time_prekeys: [{id, pub}, …]}``. 404 if no bundle is published yet
     (publish the full bundle first).
     """
+    if _rate_limits_on() and not _prekey_write_bucket.allow(_client_key(request)):
+        return _rate_limited()
     _prune_prekeys()
     record = _prekeys.get(contact_addr)
     if record is None:
@@ -752,7 +838,7 @@ _burn_nonces_seen = LRUSet(DEFAULT_DEDUP_SIZE)
 
 
 @app.post("/burn")
-async def burn_request(body: dict[str, Any]) -> JSONResponse:
+async def burn_request(body: dict[str, Any], request: Request) -> JSONResponse:
     """
     POST a burn request to erase messages from the relay buffer and notify
     connected clients via a tombstone.
@@ -788,6 +874,8 @@ async def burn_request(body: dict[str, Any]) -> JSONResponse:
     tombstone, and any blob left in the relay's buffer expires on its short
     RECENT_TTL. See DESIGN.md ("Burn requests") for the full tradeoff.
     """
+    if _rate_limits_on() and not _burn_bucket.allow(_client_key(request)):
+        return _rate_limited()
     token = body.get("token", "")
     scope = body.get("scope", "")
     channel = body.get("channel", "")
