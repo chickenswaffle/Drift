@@ -97,7 +97,7 @@ Implemented (Phase 1). Every message derives a unique one-time address via `A_on
 
 ### Relay (`relay/server.py`)
 
-Intentionally dumb: routes opaque ciphertext, never reads content. Clients subscribe over WebSocket at `/ws/{addr}` and senders POST to `/send`. There is no durable mailbox — the relay keeps a short (30s) in-memory replay buffer per channel so a late-joining socket can catch up, and Phase 4 federation gossips the same opaque blobs between relays (`relay/federation.py`). Both are RAM-only; nothing is persisted to Redis or disk.
+Intentionally dumb: routes opaque ciphertext, never reads content. Clients subscribe over WebSocket at `/ws/{addr}` and senders POST to `/send`. There is no durable mailbox — the relay keeps a short (30s) in-memory replay buffer per channel so a late-joining socket can catch up, and Phase 4 federation gossips the same opaque blobs between relays (`relay/federation.py`). Both are RAM-only; nothing is persisted to Redis or disk. The open write surface (`/send`, `/burn`, prekey publish, and especially the OTPK-consuming prekey fetch) is flood-controlled by in-memory token buckets (`relay/ratelimit.py`) — generous per-IP budgets (Tor exits are shared) plus a global per-address budget that stops OTPK-pool draining even under circuit rotation; keys live only in bounded RAM and are never logged (`DRIFT_RELAY_RATE_LIMITS=off` disables).
 
 ## Iron rules
 

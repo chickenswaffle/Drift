@@ -18,6 +18,33 @@ DRIFT uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Sub-phase **13a (core extraction) has started** — see below.
 
 ### Added
+- **Relay flood control + OTPK-drain protection (`relay/ratelimit.py`).** The
+  reference relay now enforces in-memory token-bucket budgets on its open
+  write surface: per-IP on `/send` (burst 200, then 10/s), `/burn`, and prekey
+  publish/replenish — and, on the OTPK-consuming `GET /prekeys/{addr}`, a
+  **double budget**: per `(IP, target)` *and* per target across all IPs. The
+  second one matters: a drain attacker can rotate Tor circuits for fresh IPs,
+  but cannot rotate the victim's address — so hammering a pool to force later
+  handshakes onto the weaker OTPK-less X3DH path now stalls at ~6 fetches/min,
+  far below what auto-replenish restores. Limits are deliberately generous
+  (many honest users share one Tor exit IP), tunable via `DRIFT_RELAY_*` env
+  vars, and disabled wholesale with `DRIFT_RELAY_RATE_LIMITS=off`. Privacy
+  stance unchanged: bucket keys live only in bounded RAM (LRU-evicted), are
+  never logged or persisted, and vanish on restart. 429s carry `Retry-After`
+  and never consume an OTPK.
+- **Secret zeroization in `drift-core` (`zeroize`).** Every raw secret the
+  Rust crate handles is now wiped when it leaves scope: `RatchetState` wipes
+  its root/chain/cached-message keys on drop, `ScanResult` wipes its live
+  scan-DH secret, and the X3DH DH outputs, HKDF intermediates, vault unlock
+  keys, seal keys, and signing-seed temporaries are all zeroized after use
+  (the dalek keypairs already self-wipe via their own `zeroize` support). No
+  behaviour change — all 13 vector-conformance tests still pass bit-for-bit.
+- **CI: the gauntlet + supply-chain audits now gate every build.** The
+  10-probe adversarial gauntlet (`scripts/gauntlet.py`) runs as its own CI job
+  — a unit suite can pass while a privacy invariant regresses; now it can't do
+  so silently. `pip-audit` fails the build on known-vulnerable Python
+  dependency versions, and `cargo audit` does the same for `drift-core`
+  against the RustSec advisory database.
 - **Cross-implementation test vectors (`tests/vectors/`) — Phase 13a.** A
   deterministic generator (`scripts/export_vectors.py`) exports JSON vectors
   from the Python **reference** implementation for base58, HKDF domains, the

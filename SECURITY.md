@@ -10,7 +10,7 @@ a formal independent audit has been completed and published here.
 
 **Do not open a public GitHub issue for security vulnerabilities.**
 
-Please report security issues by creating a [GitHub Security Advisory](https://github.com/YOUR_USERNAME/drift/security/advisories/new)
+Please report security issues by creating a [GitHub Security Advisory](https://github.com/chickenswaffle/Drift/security/advisories/new)
 (private, only visible to maintainers and GitHub staff).
 
 Include:
