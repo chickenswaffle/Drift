@@ -1,0 +1,13 @@
+[workspace]
+resolver = "2"
+members = ["crypto"]
+
+# drift-core — the shared Rust implementation of DRIFT-P/1 (Phase 13a).
+#
+# The Python package under ../drift stays the REFERENCE implementation and the
+# source of the cross-impl test vectors in ../tests/vectors. This workspace must
+# reproduce those vectors bit-for-bit; see ../docs/app-plan.md §6.
+
+[profile.release]
+opt-level = 3
+lto = true
