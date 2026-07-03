@@ -277,23 +277,23 @@ be the thing that distinguishes DRIFT's app from every other "private" messenger
 - **Minimum OS targets** — iOS 16+/Android 9+ assumed for Secure Enclave /
   StrongBox and BackgroundTasks; confirm.
 - **UnifiedPush** as the Android opt-in push path (v2) — research spike needed.
-- **Stealth/FMD Elligator parity in Rust** — porting `stealth`/`fmd` needs
-  libsodium's exact `crypto_core_ed25519_from_uniform` (Elligator 2 + cofactor
-  clear); the plan is to bind libsodium (`libsodium-sys`) so the group ops are
-  byte-identical to the reference rather than hand-roll field math (which would
-  break the iron rule). This is the remaining 13a crypto work.
 
 **Done since:**
 
-- **13a — core extraction (started).** `drift-core/` Cargo workspace; the
-  `drift-crypto` crate ports base58, HKDF, the AEAD envelope,
+- **13a — core extraction (crypto complete).** `drift-core/` Cargo workspace;
+  the `drift-crypto` crate ports base58, HKDF, the AEAD envelope,
   identity/Ed25519/ECDH, sealed sender, the full Double Ratchet, X3DH, burn
-  tokens, and the Argon2id vault, each proven **bit-for-bit** against
-  `tests/vectors/`. It composes vetted crates only (dalek + RustCrypto +
-  argon2) — the iron rule holds inside the Rust core. Stealth + FMD remain
-  (see "Still open"). The 13a exit criterion (Rust↔Python wire interop for
-  encrypt/decrypt, X3DH, ratchet) is met for everything except stealth detect,
-  which is gated on the Elligator parity above.
+  tokens, the Argon2id vault, **stealth addressing, and FMD** — each proven
+  **bit-for-bit** against `tests/vectors/` (Rust: `drift-core/crypto/tests/
+  vectors.rs`; Python: `tests/unit/test_vectors.py`; both in CI). It composes
+  vetted crates only — the iron rule holds inside the Rust core. Stealth + FMD
+  bind **libsodium** (`libsodium-sys-stable`, vendored) for the exact ed25519
+  group ops (`crypto_core_ed25519_from_uniform` / Elligator 2, point add, scalar
+  arithmetic), which have no bit-identical pure-Rust equivalent — the same
+  primitive the Python reference reaches through PyNaCl. The 13a exit criterion
+  (Rust↔Python interop for encrypt/decrypt, X3DH, ratchet, **stealth detect**)
+  is met at the crypto layer; the remaining 13a work is the transport/storage
+  layers and the wire-interop CI job against a live relay.
 
 - **Sidecar packaging** — `drift.sidecar` is frozen with PyInstaller
   (`apps/desktop/sidecar/build_sidecar.py`) and bundled as a Tauri `externalBin`,

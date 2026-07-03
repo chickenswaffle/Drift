@@ -14,10 +14,14 @@ use drift_crypto::aead::{decrypt, encrypt_with_nonce, NONCE_SIZE};
 use drift_crypto::base58;
 use drift_crypto::burn::{generate_burn_token, verify_burn_token};
 use drift_crypto::entropy::TapeEntropy;
+use drift_crypto::fmd::{derive_fmd_key, fmd_test, FmdKeypair};
 use drift_crypto::identity::{Identity, Keypair};
 use drift_crypto::kdf::{derive_message_key, kdf_ck, kdf_rk};
 use drift_crypto::ratchet::{init_receiver, init_sender, ratchet_decrypt, ratchet_encrypt, Header};
 use drift_crypto::sealed::{open_header, parse};
+use drift_crypto::stealth::{
+    derive_message_key_with_spend, derive_one_time_address, scan_for_message,
+};
 use drift_crypto::vault::{derive_unlock_key, try_unlock, KdfParams};
 use drift_crypto::x3dh::{
     derive_master_secret_recv, verify_prekey_bundle, PreKeyBundle, PreKeyPrivates, X3DHHeader,
@@ -240,6 +244,82 @@ fn build_privates(case: &Value) -> PreKeyPrivates {
         signed_prekey: keypair(&case["bob_signed_prekey_priv"]),
         signed_prekey_id: case["signed_prekey_id"].as_u64().unwrap() as u32,
         one_time,
+    }
+}
+
+#[test]
+fn stealth_vectors() {
+    let v = load("stealth");
+    let (addr, msg_key) = derive_one_time_address(
+        &a32(&v["ephemeral_priv"]),
+        &a32(&v["recipient_scan_pub"]),
+        &a32(&v["recipient_spend_pub"]),
+    );
+    assert_eq!(hex::encode(addr), v["one_time_address"].as_str().unwrap());
+    assert_eq!(hex::encode(msg_key), v["message_key"].as_str().unwrap());
+
+    // Receiver detects (scan key) and derives the same key (spend key).
+    let result = scan_for_message(
+        &a32(&v["ephemeral_pub"]),
+        &a32(&v["one_time_address"]),
+        &a32(&v["recipient_scan_priv"]),
+        &a32(&v["recipient_spend_pub"]),
+    )
+    .expect("recipient must detect its own message");
+    assert_eq!(
+        hex::encode(result.scan_secret),
+        v["scan_secret"].as_str().unwrap()
+    );
+    let recv_key = derive_message_key_with_spend(&result, &a32(&v["recipient_spend_priv"]));
+    assert_eq!(hex::encode(recv_key), v["message_key"].as_str().unwrap());
+
+    // A non-recipient must NOT detect it (unlinkability).
+    assert!(scan_for_message(
+        &a32(&v["ephemeral_pub"]),
+        &a32(&v["one_time_address"]),
+        &a32(&v["non_recipient_scan_priv"]),
+        &a32(&v["non_recipient_spend_pub"]),
+    )
+    .is_none());
+}
+
+#[test]
+fn fmd_vectors() {
+    let v = load("fmd");
+    let n = v["num_subkeys"].as_u64().unwrap() as usize;
+    let key = derive_fmd_key(&hx(&v["seed"]), n);
+    let want_secret: Vec<String> = v["secret_keys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s.as_str().unwrap().into())
+        .collect();
+    let want_public: Vec<String> = v["public_keys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s.as_str().unwrap().into())
+        .collect();
+    assert_eq!(
+        key.secret_keys.iter().map(hex::encode).collect::<Vec<_>>(),
+        want_secret
+    );
+    assert_eq!(
+        key.public_keys.iter().map(hex::encode).collect::<Vec<_>>(),
+        want_public
+    );
+
+    let flag = hx(&v["flag"]);
+    for t in v["tests"].as_array().unwrap() {
+        let subkeys = t["subkeys"].as_u64().unwrap() as usize;
+        let sub = FmdKeypair {
+            secret_keys: key.secret_keys[..subkeys].to_vec(),
+            public_keys: key.public_keys.clone(),
+        };
+        assert_eq!(
+            fmd_test(&flag, &sub, &hx(&t["message"])),
+            t["match"].as_bool().unwrap()
+        );
     }
 }
 

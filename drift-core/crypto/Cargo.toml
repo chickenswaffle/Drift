@@ -16,6 +16,12 @@ hmac = "0.12"
 argon2 = "0.5"                     # Argon2id — the panic-vault KDF
 subtle = "2"                       # constant-time comparison
 rand_core = "0.6"                  # OsRng for production keypair/nonce generation
+# libsodium's ed25519 group ops (Elligator `from_uniform`, point add, scalar
+# arithmetic) for stealth addressing + FMD. Binding the *same* library the
+# Python reference uses is what makes those constructions byte-identical — there
+# is no bit-exact pure-Rust equivalent of `crypto_core_ed25519_from_uniform`.
+# The `-stable` crate vendors and builds libsodium from source (no system dep).
+libsodium-sys-stable = "1.22"
 
 [dev-dependencies]
 serde = { version = "1", features = ["derive"] }

@@ -4,23 +4,27 @@
 //! `tests/` directory). The iron rule holds: this crate *composes* vetted
 //! crates (dalek, RustCrypto, argon2) and never hand-rolls a primitive.
 //!
-//! Parity scope (this milestone): base58, HKDF derivations, the XChaCha20-
-//! Poly1305 envelope, identity keys / Ed25519 / X25519 ECDH, X3DH, the Double
-//! Ratchet, sealed sender, burn tokens, and the Argon2id panic vault. Stealth
-//! addressing and FMD are **not yet ported** — they depend on libsodium's exact
-//! `crypto_core_ed25519_from_uniform` (Elligator 2 + cofactor clear), which has
-//! no bit-identical pure-Rust equivalent; porting them means binding libsodium
-//! so the group ops match the reference byte-for-byte. Tracked as the next 13a
-//! step in `docs/app-plan.md`.
+//! Parity scope: base58, HKDF derivations, the XChaCha20-Poly1305 envelope,
+//! identity keys / Ed25519 / X25519 ECDH, X3DH, the Double Ratchet, sealed
+//! sender, burn tokens, the Argon2id panic vault, **stealth addressing, and
+//! FMD** — every construction pinned to the shared vectors. Stealth and FMD need
+//! libsodium's exact ed25519 group ops (`crypto_core_ed25519_from_uniform` /
+//! Elligator 2, point add, scalar arithmetic), which have no bit-identical
+//! pure-Rust equivalent, so [`sodium`] binds the same C library the Python
+//! reference uses through PyNaCl — composing the vetted primitive, not
+//! reimplementing curve math.
 
 pub mod aead;
 pub mod base58;
 pub mod burn;
 pub mod entropy;
+pub mod fmd;
 pub mod identity;
 pub mod kdf;
 pub mod ratchet;
 pub mod sealed;
+pub mod sodium;
+pub mod stealth;
 pub mod vault;
 pub mod x3dh;
 

@@ -38,11 +38,14 @@ DRIFT uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`drift-core/crypto/tests/vectors.rs`): base58, HKDF, the AEAD envelope,
   identity/Ed25519/ECDH, sealed sender, the full Double Ratchet (bidirectional
   transcript incl. out-of-order skipped keys and the H1 transactional decrypt),
-  X3DH, burn tokens, and the Argon2id vault. A new CI job runs
-  `cargo fmt`/`clippy`/`test` on it. **Still to port:** stealth addressing and
-  FMD — they need libsodium's exact `crypto_core_ed25519_from_uniform`
-  (Elligator 2 + cofactor clear), which has no bit-identical pure-Rust
-  equivalent, so they will bind libsodium; tracked as the next 13a step.
+  X3DH, burn tokens, the Argon2id vault, **stealth addressing, and FMD**. The
+  last two bind **libsodium** (`libsodium-sys-stable`, vendored/built from
+  source — no system dependency) for the exact ed25519 group ops
+  (`crypto_core_ed25519_from_uniform` / Elligator 2, point add, scalar
+  arithmetic), which have no bit-identical pure-Rust equivalent — the same
+  library the Python side reaches through PyNaCl, so the group math matches
+  byte-for-byte. A new CI job runs `cargo fmt`/`clippy`/`test` on it. The 13a
+  crypto surface is now complete; the FFI surface (13b) is next.
 - **Desktop app (`apps/desktop/`) — Phase 13c, first cut.** A native desktop
   client (Tauri + React) for people who don't live in a terminal. It adds **no
   cryptography**: a new `drift.sidecar` module exposes the existing, audited
