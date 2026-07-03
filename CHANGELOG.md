@@ -18,6 +18,27 @@ DRIFT uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Sub-phase **13a (core extraction) has started** — see below.
 
 ### Added
+- **Hybrid post-quantum handshake — PQXDH-style, on by default.** The X3DH
+  bootstrap is now hybrid: every prekey bundle publishes an Ed25519-signed
+  **ML-KEM-768** encapsulation key (FIPS 203) alongside the X25519 prekeys,
+  the sender encapsulates against it, and the KEM shared secret is folded into
+  the master-secret KDF with the classical DH outputs
+  (`HKDF(F ‖ DH1..DH4 ‖ SS, info="drift-pqxdh-v1")`). Breaking the handshake
+  now requires breaking **both** X25519 and ML-KEM-768 — so traffic recorded
+  today can't be decrypted by a future quantum computer ("harvest now,
+  decrypt later"), and a total ML-KEM break still floors at classic X3DH.
+  Iron rule intact: ML-KEM comes from `cryptography`'s OpenSSL binding (the
+  same vetted library as our X25519/Ed25519/HKDF) — **zero new dependencies**.
+  Downgrade rules are strict: a PQ prekey with a bad/missing signature hard-
+  fails the handshake (never a silent fallback — new gauntlet probe
+  `pq-downgrade`, now 11 probes), while a genuinely pre-PQ peer gets classic
+  X3DH with a visible warning. PQ prekeys rotate with the signed prekey
+  (same 24h prev-grace); the wire header appends `pq_id(4) ‖ kem_ct(1088)`
+  under a new transport frame flag `3`; classic headers/vectors are
+  byte-unchanged. New `tests/vectors/pqxdh.json` pins the deterministic
+  receiver side (seed → decapsulate → master secret) for the Rust core.
+  Honesty (same tradeoff Signal ships): only the handshake is hybrid — the
+  ratchet's ongoing DH steps remain X25519; see DESIGN.md §4.
 - **Relay flood control + OTPK-drain protection (`relay/ratelimit.py`).** The
   reference relay now enforces in-memory token-bucket budgets on its open
   write surface: per-IP on `/send` (burst 200, then 10/s), `/burn`, and prekey
@@ -40,7 +61,7 @@ DRIFT uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (the dalek keypairs already self-wipe via their own `zeroize` support). No
   behaviour change — all 13 vector-conformance tests still pass bit-for-bit.
 - **CI: the gauntlet + supply-chain audits now gate every build.** The
-  10-probe adversarial gauntlet (`scripts/gauntlet.py`) runs as its own CI job
+  adversarial gauntlet (`scripts/gauntlet.py`) runs as its own CI job
   — a unit suite can pass while a privacy invariant regresses; now it can't do
   so silently. `pip-audit` fails the build on known-vulnerable Python
   dependency versions, and `cargo audit` does the same for `drift-core`

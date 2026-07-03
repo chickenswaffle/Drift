@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, dev]
+    branches: [main, dev, "feat/**"]
   pull_request:
     branches: [main]
 
@@ -58,12 +58,12 @@ jobs:
       - name: Run tests
         run: pytest tests/unit/ -v --tb=short --cov=drift --cov-report=term-missing
 
-  # The gauntlet: 10 red-team probes fired at the core privacy/crypto
+  # The gauntlet: 11 red-team probes fired at the core privacy/crypto
   # invariants (relay blindness, stealth unlinkability, forward secrecy, burn
   # replay, sealed-sender opacity, WITNESS chain integrity, forged-message
-  # rejection, panic isolation, OTPK consumption, FMD rate). A unit suite can
-  # pass while an invariant regresses — this job exists so it can't do so
-  # silently.
+  # rejection, panic isolation, OTPK consumption, FMD rate, PQ downgrade
+  # resistance). A unit suite can pass while an invariant regresses — this
+  # job exists so it can't do so silently.
   gauntlet:
     name: Adversarial gauntlet
     runs-on: ubuntu-latest

@@ -14,9 +14,9 @@
 [![Version](https://img.shields.io/badge/version-v0.20.0-blue)](https://github.com/chickenswaffle/Drift/releases/tag/v0.20.0)
 [![Protocol](https://img.shields.io/badge/protocol-DRIFT--P%2F1%20draft-brightgreen)](PROTOCOL.md) [![Site](https://img.shields.io/badge/site-driftmsg.io-00aa2a?style=flat&labelColor=0a0a0a)](https://chickenswaffle.github.io/DRIFT-Site/)
 
-> A terminal-first, end-to-end encrypted messenger with rotating, unlinkable receiving addresses.
+> A terminal-first, end-to-end encrypted messenger with rotating, unlinkable receiving addresses and a hybrid post-quantum handshake.
 
-No phone numbers. No accounts. No central authority that can read or hand over your messages.
+No phone numbers. No accounts. No central authority that can read or hand over your messages. Session setup is **hybrid post-quantum by default** (ML-KEM-768 + X25519, PQXDH-style) — traffic recorded today can't be decrypted by a future quantum computer.
 
 ## Try it in your browser
 
@@ -85,13 +85,34 @@ certificate — the page a surveillance request lands on. Full spec, threat mode
 and how to verify with just `openssl`/`hashlib`: [`docs/witness.md`](docs/witness.md).
 
 Want to attack it yourself? The **Gauntlet** spins up a relay in-process and
-fires 10 adversarial probes at DRIFT's privacy and crypto invariants (relay
+fires 11 adversarial probes at DRIFT's privacy and crypto invariants (relay
 blindness, stealth unlinkability, forward secrecy, sealed sender, the WITNESS
-chain, panic isolation, …) with a live pass/fail report:
+chain, panic isolation, PQ downgrade resistance, …) with a live pass/fail
+report:
 
 ```bash
 python scripts/gauntlet.py
 ```
+
+---
+
+## Security engineering
+
+Claims are cheap; gates are not. Every push runs:
+
+- **657 unit tests** plus the **11-probe adversarial gauntlet** — the red-team
+  suite is a CI job, so a privacy invariant can't regress silently.
+- **Supply-chain audits** — `pip-audit` (Python) and `cargo audit` (RustSec)
+  fail the build on known-vulnerable dependency versions.
+- **Cross-implementation test vectors** — the Rust core (`drift-core/`) must
+  reproduce the Python reference **bit-for-bit** against committed vectors
+  (`tests/vectors/`); both sides assert in CI. The Rust core zeroizes all
+  secret material on drop.
+- **No new cryptography, ever** — X25519/Ed25519/XChaCha20-Poly1305/HKDF/
+  Argon2id/ML-KEM-768 all come from vetted libraries (`cryptography`, PyNaCl/
+  libsodium, the dalek/RustCrypto crates). The relay's open endpoints are
+  rate-limited against floods and prekey-pool draining without logging a
+  single client IP.
 
 ---
 
@@ -100,6 +121,7 @@ python scripts/gauntlet.py
 - Passive network surveillance (ISP, nation-state wire-tapping)
 - A malicious, compromised, or subpoenaed relay server
 - Later device or key theft (forward secrecy + post-compromise security)
+- **"Harvest now, decrypt later"** — the handshake is hybrid ML-KEM-768 + X25519, so recorded ciphertext stays sealed even against a future quantum computer (the ongoing ratchet remains classical — same honest tradeoff as Signal's PQXDH)
 - Traffic analysis of *who talks to whom* — sealed sender + onion transport hide the social graph
 - Traffic analysis of *when and how much you send* — as of v0.15.0 (PR #15), **cover traffic** masks activity with Poisson-scheduled dummy envelopes and a uniform on-the-wire message size, on an off/low/high dial (1:1 chats today; group/room cover is future work)
 - Infrastructure takedown — no single server to kill
@@ -137,6 +159,7 @@ Being precise here is what separates a serious tool from snake oil.
 
 - **X3DH key agreement** ✅ `v0.14.0` — forward-secret handshake, eliminates deterministic bootstrap
 - **The Drift Protocol spec** ✅ `v0.20.0` — the wire protocol, versioned as [DRIFT-P/1](PROTOCOL.md)
+- **Hybrid post-quantum handshake** ✅ — PQXDH-style ML-KEM-768 + X25519, on by default, unstrippable by design ([PROTOCOL.md §5](PROTOCOL.md))
 
 **Recent additions** (`v0.20.0` — desktop):
 
@@ -177,13 +200,15 @@ Run your own relay: [`docs/relay-setup.md`](docs/relay-setup.md)
 ```
 drift/
 ├── drift/
-│   ├── crypto/        # key generation, stealth addresses, AEAD, ratchet
+│   ├── crypto/        # keys, stealth addresses, AEAD, ratchet, X3DH+ML-KEM
 │   ├── transport/     # WebSocket client, Tor bootstrap
 │   ├── relay/         # relay protocol client
 │   └── ui/            # Textual TUI
-├── relay/             # reference relay server (FastAPI + Redis)
+├── relay/             # reference relay server (FastAPI, RAM-only by design)
+├── drift-core/        # shared Rust core — bit-for-bit parity with Python
+├── apps/desktop/      # Tauri + React desktop app
 ├── docs/              # protocol specs, threat model, contributor guide
-└── tests/
+└── tests/             # unit tests + cross-implementation vectors
 ```
 
 ---

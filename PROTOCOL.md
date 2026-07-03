@@ -129,7 +129,7 @@ sealed_blob = R (32) ‖ u32_be(len) ‖ sealed_header ‖ ratchet_ciphertext
 Ratchet header: `dh(32) ‖ pn(4 BE) ‖ n(4 BE)`.
 X3DH header: `IK_A(32) ‖ EK_A(32) ‖ spk_id(4 BE) ‖ otpk_flag(1) ‖ otpk_id(4 BE)`.
 
-## 5. Content encryption — X3DH + Double Ratchet
+## 5. Content encryption — hybrid PQXDH / X3DH + Double Ratchet
 
 - **Bootstrap:** X3DH (Signal's extended triple DH) against the responder's
   published prekey bundle — identity DH key, signed prekey (Ed25519-signed),
@@ -138,9 +138,26 @@ X3DH header: `IK_A(32) ‖ EK_A(32) ‖ spk_id(4 BE) ‖ otpk_flag(1) ‖ otpk_i
   Responders replenish one-time prekeys when the relay pool runs low. Peers
   without a bundle fall back to flag-`1` legacy bootstrap (reduced forward
   secrecy for opening messages — clients MUST surface this).
+- **Hybrid post-quantum bootstrap (PQXDH-style, the default):** the bundle
+  additionally carries an **ML-KEM-768** encapsulation key (FIPS 203),
+  Ed25519-signed like the signed prekey and rotated on the same cadence. The
+  initiator encapsulates and derives
+  `SK = HKDF(F ‖ DH1 ‖ DH2 ‖ DH3 [‖ DH4] ‖ SS_pq, info="drift-pqxdh-v1")`
+  — hybrid, so the handshake is never weaker than classic X3DH, and traffic
+  recorded today cannot be decrypted by a future quantum computer. The wire
+  header appends `pq_prekey_id(4) ‖ kem_ct(1088)` to the classic X3DH header
+  (transport frame flag `3`). Rules:
+  - a bundle *offering* a PQ prekey whose signature is missing or invalid
+    MUST be rejected outright — never silently downgraded to classic;
+  - a bundle with no PQ fields at all is a pre-PQ peer: classic X3DH is
+    permitted but clients MUST surface the downgrade;
+  - hybrid and classic derivations use distinct `info` strings
+    (`drift-pqxdh-v1` / `drift-x3dh-v1`) — disjoint KDF domains.
 - **Steady state:** the Double Ratchet (DH ratchet + symmetric chains) gives
   per-message forward secrecy and post-compromise security. Message keys are
-  erased after use.
+  erased after use. **Honesty:** the ratchet's ongoing DH steps remain X25519
+  — post-compromise security against a quantum adversary is future work (the
+  same tradeoff Signal ships with PQXDH).
 - Either peer may speak first; whoever does becomes initiator.
 - A message that fails authentication is dropped *per-envelope* (with a
   tamper event) — a forged inbound MUST NOT tear down a live session.

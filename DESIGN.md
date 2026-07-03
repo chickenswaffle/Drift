@@ -138,6 +138,41 @@ So the honest one-liner: *with X3DH prekeys, forward secrecy is complete from th
 very first message; the legacy deterministic bootstrap survives only as a
 visibly-warned fallback for peers who have published no bundle.*
 
+### Hybrid post-quantum bootstrap (PQXDH-style)
+
+The handshake is **hybrid post-quantum by default**, mirroring Signal's PQXDH.
+Every prekey bundle additionally publishes an **ML-KEM-768** encapsulation key
+(FIPS 203 — via `cryptography`'s OpenSSL binding, the same vetted library that
+already supplies our X25519/Ed25519/HKDF; iron rule intact). It is
+Ed25519-signed exactly like the signed prekey and rotates on the same weekly
+cadence. The sender encapsulates against it and the KEM shared secret joins
+the KDF *alongside* the classical DH outputs:
+
+```
+root = HKDF(F ‖ DH1 ‖ DH2 ‖ DH3 [‖ DH4] ‖ SS_mlkem,  info="drift-pqxdh-v1")
+```
+
+What this buys, precisely:
+
+- **"Harvest now, decrypt later" is defeated for the handshake.** An adversary
+  recording ciphertext today must break *both* X25519 **and** ML-KEM-768 to
+  recover the opening root — including with a future quantum computer.
+- **Never weaker than classic.** The hybrid construction means a catastrophic
+  break of ML-KEM alone changes nothing: security floors at exactly classic
+  X3DH. Distinct HKDF `info` strings keep hybrid and classic derivations in
+  disjoint domains.
+- **No silent stripping.** A bundle offering a PQ prekey with a missing or
+  invalid signature is rejected outright (`gauntlet: pq-downgrade`). A
+  genuinely pre-PQ peer (no PQ fields at all) downgrades to classic X3DH with
+  a visible warning — the same amber-warning pattern as the legacy bootstrap.
+
+**The honesty section, extended:** only the *handshake* is hybrid. The Double
+Ratchet's ongoing DH steps are still X25519, so **post-compromise security
+against a quantum adversary is not provided** — a quantum attacker who also
+compromises ratchet state keeps reading until a (classical-DH) heal. This is
+the identical tradeoff Signal ships today; upgrading the ratchet itself
+(e.g. Signal's SPQR direction) is future work, not a promise.
+
 ---
 
 ## 5. Metadata privacy: the genuinely hard layer
