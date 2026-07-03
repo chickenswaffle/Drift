@@ -1,0 +1,143 @@
+{
+  "_meta": {
+    "file": "ratchet.json",
+    "generator": "scripts/export_vectors.py",
+    "contract": "Every implementation of DRIFT-P/1 must reproduce these values bit-for-bit. Regenerate only on a deliberate protocol change."
+  },
+  "shared_secret": "da2f41b2a60cfa78fdc13c920c4054994cea1c07acea00318702938eedf0ae3a",
+  "bob_initial_ratchet_priv": "382616b6f79f14a3ef20669794631422bc62b794357083ba8a4d17e250181a3e",
+  "generated_ratchet_privs": [
+    "c15f995f594c26dbbd3cf1b7a7849f9420942ac68ff89078427d3430891c0746",
+    "fb64677cd0e3d909e36e75ab551a845b659c76c2fb9929b9d0ce452abbde91ba",
+    "3036761798feda1635604f370942009fa5ff0f129c1f90125fdf788220f34c6f",
+    "a104f94b33c2b64369a45d24a4c4d8f644b019ea9d1e6726be03c5837d961f03",
+    "2128cd6d74f0a987caaba1e2726e6407373fe37187e4d06b662e44875d1a50a3"
+  ],
+  "aead_nonces": [
+    "50ea091859a610217ad98b0265671dc23d368a4cbb8f031f",
+    "d74e306373e4a7f957a8d967758d716362de39d7c289482f",
+    "f0b90a95f10e1e1d662e7fc0cc8497970806d97f92b68bf3",
+    "53e2733c55c2eb8b09fb85e273c12bb48df19a8db208ba15",
+    "eb3f25d45a8238195a89f8777cd492b2365a416bf5852110",
+    "7ef9d2ca233302a41323002d63f1ee539fe7515f620ea39e",
+    "5a795f6e2d0be5bf334d344a71143f4c2314ec17302ccd9a"
+  ],
+  "messages": [
+    {
+      "sender": "alice",
+      "plaintext": "41303a2068656c6c6f20626f62",
+      "header": "b24d49dd3a7761b772093c1e8e2e65d28b87cecc14401e06ccf3a785cd2e533d0000000000000000",
+      "ciphertext": "50ea091859a610217ad98b0265671dc23d368a4cbb8f031fa03ed6fad3445e274538fd32f58d61bda14cd869e3455aa00bdec1aed3",
+      "id": "A0"
+    },
+    {
+      "sender": "alice",
+      "plaintext": "41313a207374696c6c20616c696365",
+      "header": "b24d49dd3a7761b772093c1e8e2e65d28b87cecc14401e06ccf3a785cd2e533d0000000000000001",
+      "ciphertext": "d74e306373e4a7f957a8d967758d716362de39d7c289482f8cd60abff870d28aec71eddcfce7996fabc9fb4dbc8bb81db2c9ec6bfb21d4",
+      "id": "A1"
+    },
+    {
+      "sender": "bob",
+      "plaintext": "42303a20686920616c696365",
+      "header": "f10705265eb8c1e1936fdf44f987cfa72f5ffe72686ff5ca3dd7f77079c32b2e0000000000000000",
+      "ciphertext": "f0b90a95f10e1e1d662e7fc0cc8497970806d97f92b68bf3a2f1da48e0d7a0d248708d93a71ecdc3603a3ecdb564e9b5c1959ecc",
+      "id": "B0"
+    },
+    {
+      "sender": "bob",
+      "plaintext": "42313a20626f6220616761696e",
+      "header": "f10705265eb8c1e1936fdf44f987cfa72f5ffe72686ff5ca3dd7f77079c32b2e0000000000000001",
+      "ciphertext": "53e2733c55c2eb8b09fb85e273c12bb48df19a8db208ba152739f37aa7c081b15cf7ab5027ff767d4d1d31e023600fbd1981ce4d43",
+      "id": "B1"
+    },
+    {
+      "sender": "alice",
+      "plaintext": "41323a20726f756e642074776f",
+      "header": "a5a2848948a65f18983da638b733ab4ad466635ecd6c5ba4b085a1a83cef173c0000000200000000",
+      "ciphertext": "eb3f25d45a8238195a89f8777cd492b2365a416bf58521100e184b1c55f5c1f780dcff1770a3d553e740cfccb36c4cc8bf0c3de981",
+      "id": "A2"
+    },
+    {
+      "sender": "alice",
+      "plaintext": "41333a206f7574206f66206f726465722074657374",
+      "header": "a5a2848948a65f18983da638b733ab4ad466635ecd6c5ba4b085a1a83cef173c0000000200000001",
+      "ciphertext": "7ef9d2ca233302a41323002d63f1ee539fe7515f620ea39eddecccbfa42238ac32dc03f7f411f30175e5dcf17e23c171b69023ab919c138fe10c4ce0ff",
+      "id": "A3"
+    },
+    {
+      "sender": "bob",
+      "plaintext": "42323a2066696e616c",
+      "header": "05ae333fb19f59a6bce5be4417fc44c5c4d775639328394d1473bd92efa6c5350000000200000000",
+      "ciphertext": "5a795f6e2d0be5bf334d344a71143f4c2314ec17302ccd9adbc181ffcc522cfcaacabc83618c5532779d0ba50dd30c9a5b",
+      "id": "B2"
+    }
+  ],
+  "events": [
+    {
+      "type": "send",
+      "id": "A0"
+    },
+    {
+      "type": "recv",
+      "id": "A0"
+    },
+    {
+      "type": "send",
+      "id": "A1"
+    },
+    {
+      "type": "recv",
+      "id": "A1"
+    },
+    {
+      "type": "send",
+      "id": "B0"
+    },
+    {
+      "type": "recv",
+      "id": "B0"
+    },
+    {
+      "type": "send",
+      "id": "B1"
+    },
+    {
+      "type": "recv",
+      "id": "B1"
+    },
+    {
+      "type": "send",
+      "id": "A2"
+    },
+    {
+      "type": "send",
+      "id": "A3"
+    },
+    {
+      "type": "recv",
+      "id": "A3"
+    },
+    {
+      "type": "recv",
+      "id": "A2"
+    },
+    {
+      "type": "send",
+      "id": "B2"
+    },
+    {
+      "type": "recv",
+      "id": "B2"
+    }
+  ],
+  "delivery_order": [
+    "A0",
+    "A1",
+    "B0",
+    "B1",
+    "A3",
+    "A2",
+    "B2"
+  ]
+}

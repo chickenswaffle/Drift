@@ -1,0 +1,18 @@
+{
+  "_meta": {
+    "file": "stealth.json",
+    "generator": "scripts/export_vectors.py",
+    "contract": "Every implementation of DRIFT-P/1 must reproduce these values bit-for-bit. Regenerate only on a deliberate protocol change."
+  },
+  "recipient_scan_priv": "7636fb3b00837703f475d336012b78f04717cc0317c41eb6d9d7c646cc182e9c",
+  "recipient_scan_pub": "0bd155ec6b164e0d066f9b5807bfcd887509cd66f525502a7861093a60140b7b",
+  "recipient_spend_priv": "d1436bbc640442f0bd4ffc6d55a176b8cd7c62c5070d558a3873892007bad968",
+  "recipient_spend_pub": "42f32fa6f8136918f41d26ef1680857ae8dad90177abc47aca51fc00e15bd214",
+  "ephemeral_priv": "b8c088d87cb9c913536beb97ec3f60b5716ee2dd63fc8756e244d5f9d821a354",
+  "ephemeral_pub": "f8bae57c4e2ded5ab6a445c7bd5c25ea34c03ffaf4f7a3ed391f67d3cd10d006",
+  "one_time_address": "9e5bb4d9f3dc9f5abb133f032e3a18d802cd84cacf254219502fb1a9b7385f15",
+  "scan_secret": "97d4ae5023ea0273a23ef58270febaf0f2dceb2709e8823288d5c6c87ae69032",
+  "message_key": "c5327f183dad645b874cb77f6e97c7c7f87b4f76ed4e119dee5b0f778e47a838",
+  "non_recipient_scan_priv": "69d7ce99cbfe5a776d235c258feacab2dcf648b63a2f036c1a3019493fe44c9b",
+  "non_recipient_spend_pub": "acf87bc18ade6f369e6def0fd189b6aad468047bdb432abb08b639539dd31878"
+}

@@ -1,0 +1,25 @@
+{
+  "_meta": {
+    "file": "burn.json",
+    "generator": "scripts/export_vectors.py",
+    "contract": "Every implementation of DRIFT-P/1 must reproduce these values bit-for-bit. Regenerate only on a deliberate protocol change."
+  },
+  "vectors": [
+    {
+      "shared_secret": "026f010cf0d0d08b3a1686a160cb86ccc04a9261004de75299a0762cdb1b7bb0",
+      "scope": "conversation",
+      "message_id": null,
+      "nonce": "a66c15291ec06dca603c99ee1a9d7456",
+      "timestamp": 1750000000,
+      "token": "a66c15291ec06dca603c99ee1a9d7456.1750000000.7b9807084bbead2eb9eb6acdd137cf40de5ac2a243f444c85144df4d83c32f39"
+    },
+    {
+      "shared_secret": "026f010cf0d0d08b3a1686a160cb86ccc04a9261004de75299a0762cdb1b7bb0",
+      "scope": "message",
+      "message_id": "dGVzdC1hZGRyZXNzLWJhc2U2NA==",
+      "nonce": "a66c15291ec06dca603c99ee1a9d7456",
+      "timestamp": 1750000000,
+      "token": "a66c15291ec06dca603c99ee1a9d7456.1750000000.b4cac5f17373ae9db2847715bc94934bb7876568d400936125e6d4b549d2ed4e"
+    }
+  ]
+}

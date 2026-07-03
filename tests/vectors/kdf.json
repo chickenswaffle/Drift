@@ -1,0 +1,71 @@
+{
+  "_meta": {
+    "file": "kdf.json",
+    "generator": "scripts/export_vectors.py",
+    "contract": "Every implementation of DRIFT-P/1 must reproduce these values bit-for-bit. Regenerate only on a deliberate protocol change."
+  },
+  "vectors": [
+    {
+      "ikm": "a7ba3a32f5af786c861c3e733a52724a331dccf9d8ee265e004dfe114ebaeb5a",
+      "salt": null,
+      "info": "drift-v0-msg",
+      "length": 32,
+      "okm": "eebe810c25a30463c08952257485f823865c65e728d7debe1be05fd11e7f65f0"
+    },
+    {
+      "ikm": "a7ba3a32f5af786c861c3e733a52724a331dccf9d8ee265e004dfe114ebaeb5a",
+      "salt": null,
+      "info": "drift-v2-msg",
+      "length": 32,
+      "okm": "2798161923e4253d1e2b7aa9c34b12d98b8f4ef3f672f5c237298f4bc48ba9ac"
+    },
+    {
+      "ikm": "a7ba3a32f5af786c861c3e733a52724a331dccf9d8ee265e004dfe114ebaeb5a",
+      "salt": null,
+      "info": "drift-sealed-sender-v1",
+      "length": 32,
+      "okm": "1495b52160b9b43480a0b72c2a1886b41e9e222c45cc20a5d8c9c8fa6fcf09b9"
+    },
+    {
+      "ikm": "a7ba3a32f5af786c861c3e733a52724a331dccf9d8ee265e004dfe114ebaeb5a",
+      "salt": null,
+      "info": "drift-identity-sign-v1",
+      "length": 32,
+      "okm": "f344d76ec46a1586131cf339bf031e99caf081af371812a34e5abf8e8fcd85ce"
+    },
+    {
+      "ikm": "a7ba3a32f5af786c861c3e733a52724a331dccf9d8ee265e004dfe114ebaeb5a",
+      "salt": null,
+      "info": "drift-fmd-seed-v1",
+      "length": 32,
+      "okm": "073a28fc466ff5bc107fdff80f4f7c685aaffbe13a5ff5d0625673fdd27b5cdb"
+    },
+    {
+      "ikm": "a7ba3a32f5af786c861c3e733a52724a331dccf9d8ee265e004dfe114ebaeb5a",
+      "salt": null,
+      "info": "drift-burn-v1",
+      "length": 32,
+      "okm": "bdfdd7b025e933f0f7e41bc28fe0ba1307ef77e32f2043edca65159b392e1bfa"
+    },
+    {
+      "ikm": "a7ba3a32f5af786c861c3e733a52724a331dccf9d8ee265e004dfe114ebaeb5a",
+      "salt": "6ffcf33de124e4fe49e442ce30083c59038c9dc4498c6522756a966491cc773b",
+      "info": "drift-ratchet-v1-fs-bootstrap",
+      "length": 32,
+      "okm": "663ffd9098693930dbc4e0a8fcd52c274c914f6c8dceff27616eb44c898e7733"
+    },
+    {
+      "kind": "ratchet-rk",
+      "root_key": "dd63f1b2b764d9611f8202d9d8cc87237d33f07994fc2f154bf9add982e0f475",
+      "dh_out": "f837c7c143a4dfef5188c5c9bce1c979970d4762085da5492d62572ae3772862",
+      "new_root_key": "4e657121f89c0b5610b536f157c545d1b4c04e2cae1dd32d9181d890723c537e",
+      "chain_key": "de39ce84f6408940159ab66eff910c41d7f34b53a13a4e8e8848a57c3244f949"
+    },
+    {
+      "kind": "ratchet-ck",
+      "chain_key": "9429e2313fcb6ce6e43dad2b5aabccb45074e40b35935fc0a709352b0c49c515",
+      "next_chain_key": "7c1be0052904739a9f85232343cb17ac51c94fb733737ccf02538f0830d21a5d",
+      "message_key": "51177ea21489b2323f550689076e08e36a85c59ba6d00e9e0ba689df5bdc4d3c"
+    }
+  ]
+}

@@ -1,0 +1,53 @@
+{
+  "_meta": {
+    "file": "x3dh.json",
+    "generator": "scripts/export_vectors.py",
+    "contract": "Every implementation of DRIFT-P/1 must reproduce these values bit-for-bit. Regenerate only on a deliberate protocol change."
+  },
+  "alice_scan_priv": "1e7230ce50341a86e548ca7249610819bb66e29d692953b2a3b60abe82b216b8",
+  "alice_spend_priv": "22736ea36c8a1bbfc0e4f9274eb89707aac52857478b4e11aaa5cc1a5ef8a078",
+  "bob_scan_priv": "a9bc8f5bf6f339d793b2f76c5155bfc8de3cfc412106ec0ac33db304799fa66e",
+  "bob_spend_priv": "bebf133dc710cb67f42a5d3be457edc482c90431bf4032008aa80091c5ecab7e",
+  "cases": [
+    {
+      "name": "with-otpk",
+      "bob_signed_prekey_priv": "00c8c01fe05e6f5d6f797eeef0f9b5c5e1e60b960779f2c8e89991a24135339c",
+      "signed_prekey_id": 1001,
+      "signed_prekey_sig": "1f0d0d61071698c7c0985124fb2412be9c9f907f6753beaf6d18904808eab250d951aa54e355909fe02674aea8da726393da6f21097ecd9ec8103ae110e5b00f",
+      "alice_ephemeral_priv": "4ea5acce632a70785ba8e565c8d8c5895bdc940dab5c4d7b8129a189d89e5258",
+      "header": "e2ff4f05d2ba9a236e66bdd820d32ccfa48c2f2f6290af7c80af528f86575c1b5240f1089ae057f453ad1ff3cc410ba22110692442cfeab2b941cb41bb74ce23000003e901000007d2",
+      "master_secret": "4b50a7e4dff5fb34a568623be42a00690fa7432df9c537f1e341ee7de644cf22",
+      "one_time_prekey_priv": "8d230c6b63083f9c2390deed494537c382a557c121737c0bebb0e9d440f19e1e",
+      "one_time_prekey_id": 2002
+    },
+    {
+      "name": "without-otpk",
+      "bob_signed_prekey_priv": "f22ba89eb472b7dcf476d4a6dcd996ecec0dc9bdc4ddf202dc2b9d11c11774d6",
+      "signed_prekey_id": 1001,
+      "signed_prekey_sig": "dca8be453066bcf9a82bb2ea3247ca74e1ad696d7c24ea7242efc0f79e509bb2198e8baeca3bad2f3005db6f9e9a82789503881868e33d834ff70e7ad40a5b01",
+      "alice_ephemeral_priv": "84045c330a9e49adf44854c56d550feadcf8e69309e397c3d77414047d9ebdb9",
+      "header": "e2ff4f05d2ba9a236e66bdd820d32ccfa48c2f2f6290af7c80af528f86575c1b26831feb5719963a804e07ac93243c20aa6e3244276fff6c566f99261a088956000003e90000000000",
+      "master_secret": "0b17958739ed0bfe55812acb5cf516980f7fec52e031e5c8b6a4b74e8ef1ff35"
+    }
+  ],
+  "handoff": {
+    "bob_signed_prekey_priv": "99f33eb166f999cf5a422fc85ec0961b2765bd39edb1daaaecf0caec3529f507",
+    "signed_prekey_id": 1001,
+    "one_time_prekey_priv": "c7318cb82047d64dcfd13b0fb85b4b24ae894036f4ec92f796d580459f4f54d1",
+    "one_time_prekey_id": 2002,
+    "signed_prekey_sig": "0685dc56fb2a659c3084b7eb7f3891d4efb6678e2fee817d9b2f5d2c9f8dae9417c0a4ed4adc601976ff708a8592e4d706a4536352505a176aa12551d08b1c0a",
+    "generated_privs": [
+      "d05e4e6a2bc8a4324c2c964de31a2549cccb3b176e50424bcd1f9306dc43cc98",
+      "c867128308b8958e67c994c10b8dec2fa78acc987c19cb16c0cacd1cd10793ad",
+      "918f0d5d3e83065bb38dbad5561a28c762875a9983eefc134a1f47cbe8e63808"
+    ],
+    "aead_nonces": [
+      "121de5dbc192f7e915d7e27a478239ff543fe9eec61e8b44"
+    ],
+    "x3dh_header": "e2ff4f05d2ba9a236e66bdd820d32ccfa48c2f2f6290af7c80af528f86575c1b866fee3aed0e30d55b88e9b0368cd8c4d258f9d05b07b72e576b614406e52049000003e901000007d2",
+    "master_secret": "588920cf581062023c9bed07c27173dc2e96a5b2b034dbd8130e96c1ecbd6c98",
+    "ratchet_header": "7ac06de2abf02a905d1b2f69dce3ea81de2acd34b89c7d7f3a9b292412fc6a210000000000000000",
+    "ciphertext": "121de5dbc192f7e915d7e27a478239ff543fe9eec61e8b442eb77a73c79b9bac4514b0e2301494eed16cc79b8008c9c03c5cfbfd5460f18998891744ad8bc7cd",
+    "plaintext": "6669727374206d6573736167652061667465722078336468"
+  }
+}

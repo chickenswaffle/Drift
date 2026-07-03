@@ -1,0 +1,38 @@
+{
+  "_meta": {
+    "file": "fmd.json",
+    "generator": "scripts/export_vectors.py",
+    "contract": "Every implementation of DRIFT-P/1 must reproduce these values bit-for-bit. Regenerate only on a deliberate protocol change."
+  },
+  "seed": "fee4d18d4b657c0e0c2c7f9cd8661f261426dc14f05665455bcd41e23c86a1bc",
+  "num_subkeys": 3,
+  "secret_keys": [
+    "3df8ecf77a93acaccc61f0b7e76ec5379f5d36c61e75158d8fcb0cc9ad02dc0e",
+    "f057c80f9580d9c6c8d0cdcff0dc7b7d3170d7a8188069979c5255771f9f6400",
+    "88ee1a204b72bf3ecfb2c8538652d2fe1cc9e69220dcf8c7824eedd64b935c0e"
+  ],
+  "public_keys": [
+    "6e6f9f5e183bb6eeaeac8d2628b57527139eec85eac6b2f3ff8d80894a7dacae",
+    "024d8c17a6811e4b7bc34a05797768356e3d2e6008541b0ea3d424db698039df",
+    "f2702041d7f58a265e3206a952a9a1cfa9de14aac1c8eb775255c694e0442015"
+  ],
+  "flag_message": "666d6420766563746f72206d657373616765",
+  "flag": "f19301c8f22cdc63fbf509de0a240948a80b291e99ebf2b61cd1296bf1091f722f0b051a6e09e5af0645c08228632a9882af23a49fa1cf0454567ab26e9c700d05",
+  "tests": [
+    {
+      "message": "666d6420766563746f72206d657373616765",
+      "subkeys": 3,
+      "match": true
+    },
+    {
+      "message": "6120646966666572656e74206d657373616765",
+      "subkeys": 3,
+      "match": false
+    },
+    {
+      "message": "666d6420766563746f72206d657373616765",
+      "subkeys": 1,
+      "match": true
+    }
+  ]
+}

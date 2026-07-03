@@ -1,0 +1,13 @@
+{
+  "_meta": {
+    "file": "sealed.json",
+    "generator": "scripts/export_vectors.py",
+    "contract": "Every implementation of DRIFT-P/1 must reproduce these values bit-for-bit. Regenerate only on a deliberate protocol change."
+  },
+  "stealth_key": "92b11f4d547bee15a55e5bd9b6f6bc08505dbfb5a9d46a0d68c4b7f1ab401c7f",
+  "ephemeral_pub": "d0a5880442a3e6297a5037905d5eded2d9303804bb2d83ab0e9cfc7955442537",
+  "ratchet_header": "2c47f6502c5fba2545122fa87083d249e452faf241829c911ef5760389d273c70000000300000007",
+  "ratchet_ciphertext": "e40362ea2e4670543e222dacaa6aef2a3f305bc25b49144659b494c658be6660a9c393d3af2a11355cfed8bad446c2af270fd66ced35358052c0288bb4fcb231defe568a0ddf9c6fe0cd764759a72551",
+  "address": "4f71bdec7671c970a61124e10ff9e6ee854636639773f79816a4492bb8e6c806",
+  "blob": "d0a5880442a3e6297a5037905d5eded2d9303804bb2d83ab0e9cfc795544253700506c93f7d749d341fe6c9a4dbcd86ed9e9d1b89541a1a9d1d091ffeffbe1b415d325d578002b95a7ce32dbe3698e4bba513fff8c5f5a9c7df2c51391a0cb6adb47f7db29e91a32d35a9beff6a365881752e40362ea2e4670543e222dacaa6aef2a3f305bc25b49144659b494c658be6660a9c393d3af2a11355cfed8bad446c2af270fd66ced35358052c0288bb4fcb231defe568a0ddf9c6fe0cd764759a72551"
+}

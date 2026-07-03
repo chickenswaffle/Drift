@@ -1,0 +1,37 @@
+{
+  "_meta": {
+    "file": "base58.json",
+    "generator": "scripts/export_vectors.py",
+    "contract": "Every implementation of DRIFT-P/1 must reproduce these values bit-for-bit. Regenerate only on a deliberate protocol change."
+  },
+  "vectors": [
+    {
+      "raw": "",
+      "b58": ""
+    },
+    {
+      "raw": "00",
+      "b58": "1"
+    },
+    {
+      "raw": "000001",
+      "b58": "112"
+    },
+    {
+      "raw": "68656c6c6f20776f726c64",
+      "b58": "StV1DL6CwTryKyV"
+    },
+    {
+      "raw": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "b58": "1thX6LZfHDZZKUs92febYZhYRcXddmzfzF2NvTkPNE"
+    },
+    {
+      "raw": "f3b29a781cb28066e09c9116c6c9e066b39ca726a57ec410e9a624bfb1e54806",
+      "b58": "HQJ2eDUxoXn7Q1NxYQo5nZ7yUbS3WnFRq3X3Xs2iBGWR"
+    },
+    {
+      "raw": "00000000dbf3ac5947a5097c",
+      "b58": "1111dnote71ctZR"
+    }
+  ]
+}
