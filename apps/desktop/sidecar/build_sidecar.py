@@ -26,6 +26,7 @@ Without ``$DRIFT_TOR_BINARY`` the freeze still succeeds — the backends are
 bundled but no tor binary is, so a shipped build falls back to the user's own
 system tor (and the UI reports Tor unavailable if there is none).
 """
+
 from __future__ import annotations
 
 import os
@@ -34,9 +35,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-HERE = Path(__file__).resolve().parent          # apps/desktop/sidecar
-DESKTOP = HERE.parent                            # apps/desktop
-REPO = DESKTOP.parent.parent                     # repo root
+HERE = Path(__file__).resolve().parent  # apps/desktop/sidecar
+DESKTOP = HERE.parent  # apps/desktop
+REPO = DESKTOP.parent.parent  # repo root
 ENTRY = HERE / "drift_sidecar_entry.py"
 OUT = DESKTOP / "src-tauri" / "binaries"
 
@@ -45,7 +46,13 @@ _LIB_SUFFIXES = (".so", ".dylib", ".dll")
 
 
 def host_triple() -> str:
-    out = subprocess.run(["rustc", "-Vv"], capture_output=True, text=True, check=True).stdout
+    # rustc is resolved from PATH on the build machine, by design.
+    out = subprocess.run(
+        ["rustc", "-Vv"],  # noqa: S607
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
     for line in out.splitlines():
         if line.startswith("host:"):
             return line.split(":", 1)[1].strip()
@@ -86,26 +93,42 @@ def build_pyinstaller_args(
 ) -> list[str]:
     """The full PyInstaller command line. Split out so it can be unit-tested."""
     args = [
-        sys.executable, "-m", "PyInstaller",
-        "--onefile", "--noconfirm", "--clean",
-        "--name", "drift-sidecar",
-        "--distpath", str(dist),
-        "--workpath", str(work),
-        "--specpath", str(HERE),
+        sys.executable,
+        "-m",
+        "PyInstaller",
+        "--onefile",
+        "--noconfirm",
+        "--clean",
+        "--name",
+        "drift-sidecar",
+        "--distpath",
+        str(dist),
+        "--workpath",
+        str(work),
+        "--specpath",
+        str(HERE),
         # drift imports several modules lazily (transport.session, crypto.panic);
         # grab the whole package plus the websocket client so nothing is missed.
-        "--collect-submodules", "drift",
-        "--collect-submodules", "websockets",
-        "--hidden-import", "drift.transport.session",
-        "--hidden-import", "drift.crypto.panic",
+        "--collect-submodules",
+        "drift",
+        "--collect-submodules",
+        "websockets",
+        "--hidden-import",
+        "drift.transport.session",
+        "--hidden-import",
+        "drift.crypto.panic",
         # Tor backends: stem (drives the bundled tor binary) + the SOCKS libs
         # httpx/python-socks use to route beacon + WebSocket traffic through it.
         # Collected unconditionally so tor.available() is true in a packaged
         # build; the tor *binary* below is what makes it actually connect.
-        "--collect-submodules", "stem",
-        "--collect-submodules", "python_socks",
-        "--hidden-import", "socksio",
-        "--hidden-import", "httpx_socks",
+        "--collect-submodules",
+        "stem",
+        "--collect-submodules",
+        "python_socks",
+        "--hidden-import",
+        "socksio",
+        "--hidden-import",
+        "httpx_socks",
     ]
     args += tor_add_binary_args(tor_binary)
     # macOS universal builds: emit a fat (x86_64 + arm64) binary in one pass.
@@ -131,7 +154,7 @@ def main() -> None:
         print(f"bundling tor binary: {tor_binary}")
     else:
         print("no $DRIFT_TOR_BINARY — sidecar will rely on system tor at runtime")
-    subprocess.run(args, cwd=str(REPO), check=True)
+    subprocess.run(args, cwd=str(REPO), check=True)  # noqa: S603
     OUT.mkdir(parents=True, exist_ok=True)
     is_windows = "windows" in triple
     ext = ".exe" if is_windows else ""

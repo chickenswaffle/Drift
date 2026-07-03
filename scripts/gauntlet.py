@@ -90,6 +90,7 @@ ProbeFn = Callable[[], tuple[bool, str]]
 # Identity-material scanning helpers (used by the blindness / opacity probes)
 # --------------------------------------------------------------------------- #
 
+
 def _identity_raw_tokens(idn: Identity) -> list[bytes]:
     """Every raw key blob that would betray ``idn`` if it leaked onto the wire."""
     return [
@@ -109,9 +110,7 @@ def _identity_str_tokens(idn: Identity) -> list[str]:
     return out
 
 
-def _scan_for_identity(
-    idn: Identity, *, text: str, raw: bytes
-) -> list[str]:
+def _scan_for_identity(idn: Identity, *, text: str, raw: bytes) -> list[str]:
     """Return the labels of any of ``idn``'s tokens that appear in text/bytes."""
     found: list[str] = []
     for s_token in _identity_str_tokens(idn):
@@ -168,9 +167,7 @@ class Gauntlet:
     ) -> tuple[X3DHHeader | None, bytes | None, Header, bytes] | None:
         """Run Bob's identity-level scan+unseal over one envelope."""
         env = Envelope(to=STEALTH_CHANNEL, ciphertext=blob, one_time_addr=addr)
-        return _scan_and_unseal(
-            env, self.bob_scan_priv, self.bob_spend_pub, self.bob_spend_priv
-        )
+        return _scan_and_unseal(env, self.bob_scan_priv, self.bob_spend_pub, self.bob_spend_priv)
 
     # ===================================================================== #
     # Probe 1 — relay blindness
@@ -351,9 +348,7 @@ class Gauntlet:
             return False, "Bob could not scan his own message"
         _x3dh, fs_pub, header, ratchet_ct = parsed
         root_mix = (
-            _keypair_from_private(self.bob_spend_priv).ecdh(fs_pub)
-            if fs_pub is not None
-            else None
+            _keypair_from_private(self.bob_spend_priv).ecdh(fs_pub) if fs_pub is not None else None
         )
 
         # Forge: flip bit 7 of byte 0 of the AEAD body, decrypt → must InvalidTag.
@@ -421,17 +416,16 @@ class Gauntlet:
 
         # The real private keys must not appear anywhere in the duress payload.
         leaked = [
-            field
-            for field in ("scan_priv", "spend_priv")
-            if real_dict[field].encode() in opened
+            field for field in ("scan_priv", "spend_priv") if real_dict[field].encode() in opened
         ]
         if leaked:
             return False, f"real private key reachable via duress: {leaked}"
 
         # Sanity: the real passphrase still recovers the real identity.
         real_opened = try_unlock(vault, real_phrase)
-        if real_opened is None or json.loads(real_opened)["identity"]["scan_priv"] != (
-            real_dict["scan_priv"]
+        if (
+            real_opened is None
+            or json.loads(real_opened)["identity"]["scan_priv"] != (real_dict["scan_priv"])
         ):
             return False, "real passphrase failed to recover the real identity"
         return True, "duress unlock yields decoy; real keys unreachable"
@@ -520,6 +514,7 @@ class Gauntlet:
 # Runner
 # --------------------------------------------------------------------------- #
 
+
 def _header() -> None:
     style = "bold cyan"
     console.print()
@@ -549,20 +544,40 @@ def _summary(passed: int, total: int) -> None:
 # and --probe; the display name is the one-line attack shown in the live report.
 _PROBE_SPECS: list[tuple[str, str, str]] = [
     ("relay-blindness", "relay cannot enumerate contacts", "probe_relay_blindness"),
-    ("stealth-unlinkability", "10 messages produce 10 unlinkable addresses", "probe_stealth_unlinkability"),
-    ("forward-secrecy", "deleted message keys cannot decrypt past ciphertext", "probe_forward_secrecy"),
+    (
+        "stealth-unlinkability",
+        "10 messages produce 10 unlinkable addresses",
+        "probe_stealth_unlinkability",
+    ),
+    (
+        "forward-secrecy",
+        "deleted message keys cannot decrypt past ciphertext",
+        "probe_forward_secrecy",
+    ),
     ("burn-replay", "burn token cannot be replayed", "probe_burn_replay"),
-    ("sealed-sender-opacity", "relay stored blobs contain no sender identity", "probe_sealed_sender"),
+    (
+        "sealed-sender-opacity",
+        "relay stored blobs contain no sender identity",
+        "probe_sealed_sender",
+    ),
     ("witness-chain-integrity", "WITNESS chain is signed and hash-linked", "probe_witness_chain"),
-    ("forged-message-rejection", "tampered ciphertext raises InvalidTag, ratchet state survives", "probe_forged_message"),
-    ("panic-isolation", "duress passphrase produces unreachable real identity", "probe_panic_isolation"),
+    (
+        "forged-message-rejection",
+        "tampered ciphertext raises InvalidTag, ratchet state survives",
+        "probe_forged_message",
+    ),
+    (
+        "panic-isolation",
+        "duress passphrase produces unreachable real identity",
+        "probe_panic_isolation",
+    ),
     ("otpk-consumption", "consumed OTPK is deleted and non-reusable", "probe_otpk_consumption"),
     ("fmd-rate", "FMD rate dial controls relay-side detection probability", "probe_fmd_rate"),
 ]
 
 # Result statuses. The probes here only ever pass, fail, or error; "skip" is part
 # of the contract for invariants that cannot be tested honestly in isolation.
-STATUS_PASS = "pass"
+STATUS_PASS = "pass"  # noqa: S105 — probe status label, not a credential
 STATUS_FAIL = "fail"
 STATUS_SKIP = "skip"
 STATUS_ERROR = "error"
@@ -591,7 +606,9 @@ def _print_live(probe_id: str, display: str, result: dict[str, object]) -> None:
     if status == STATUS_PASS:
         console.print(f"[bold green]✓  PASS[/bold green]  {display}  [dim]{detail} · {ms}ms[/dim]")
     elif status == STATUS_SKIP:
-        console.print(f"[bold yellow]•  SKIP[/bold yellow]  {display}  [dim]{detail} · {ms}ms[/dim]")
+        console.print(
+            f"[bold yellow]•  SKIP[/bold yellow]  {display}  [dim]{detail} · {ms}ms[/dim]"
+        )
     else:
         badge = "✗  FAIL" if status == STATUS_FAIL else "!  ERR "
         console.print(f"[bold red]{badge}[/bold red]  {display}  [dim]{detail} · {ms}ms[/dim]")
@@ -602,7 +619,9 @@ def main(argv: list[str] | None = None) -> int:
         prog="gauntlet.py",
         description="Fire 10 adversarial probes at DRIFT's core privacy and crypto invariants.",
     )
-    parser.add_argument("--json", action="store_true", help="emit results as a JSON array to stdout")
+    parser.add_argument(
+        "--json", action="store_true", help="emit results as a JSON array to stdout"
+    )
     parser.add_argument("--probe", metavar="NAME", help="run a single probe by its id")
     args = parser.parse_args(argv)
 
