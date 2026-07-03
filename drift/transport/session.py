@@ -163,17 +163,23 @@ class _BoundedAddrSet:
 #
 #   0  header only                         (post-bootstrap, the steady state)
 #   1  FS ephemeral pub (32) || header     (legacy deterministic bootstrap, H3)
-#   2  X3DH header (73) || header          (X3DH bootstrap — the new default)
+#   2  X3DH header (73) || header          (classic X3DH bootstrap)
+#   3  PQXDH header (1165) || header       (hybrid ML-KEM bootstrap — default)
 #
 # Flag 1 is the legacy fallback kept for peers that published no prekey bundle;
-# flag 2 carries the X3DH handshake header (drift.crypto.x3dh.X3DHHeader) so the
-# responder can derive the same master secret without an extra round trip.
+# flag 2 carries the classic X3DH handshake header, kept for pre-PQ peers.
+# Flag 3 is the hybrid post-quantum bootstrap: the same X3DH header extended
+# with pq_prekey_id(4) + the ML-KEM-768 encapsulation ciphertext (1088), so the
+# responder can decapsulate and fold the KEM secret into the master-secret KDF.
 _FS_FLAG_ABSENT = 0
 _FS_FLAG_PRESENT = 1
 _FS_FLAG_X3DH = 2
+_FS_FLAG_PQXDH = 3
 _FS_PUB_LEN = 32
 # len(X3DHHeader.to_bytes()) = ik_a(32) + ek_a(32) + spk_id(4) + flag(1) + otpk_id(4)
 _X3DH_HEADER_LEN = 2 * 32 + 4 + 1 + 4
+# hybrid: classic + pq_prekey_id(4) + ML-KEM-768 ciphertext (1088)
+_PQXDH_HEADER_LEN = _X3DH_HEADER_LEN + 4 + 1088
 
 
 def _pack_inner(
@@ -182,8 +188,12 @@ def _pack_inner(
     fs_pub: bytes | None = None,
     x3dh_header: bytes | None = None,
 ) -> bytes:
-    """Frame the ratchet header (+ optional bootstrap handshake material)."""
+    """Frame the ratchet header (+ optional bootstrap handshake material).
+    The X3DH header's own length says whether it is classic (flag 2) or the
+    hybrid PQXDH form (flag 3) — both are fixed-size layouts."""
     if x3dh_header is not None:
+        if len(x3dh_header) == _PQXDH_HEADER_LEN:
+            return bytes([_FS_FLAG_PQXDH]) + x3dh_header + header_bytes
         return bytes([_FS_FLAG_X3DH]) + x3dh_header + header_bytes
     if fs_pub is not None:
         return bytes([_FS_FLAG_PRESENT]) + fs_pub + header_bytes
@@ -202,6 +212,10 @@ def _unpack_inner(blob: bytes) -> tuple[bytes | None, bytes | None, bytes]:
     if not blob:
         raise ValueError("empty sealed inner payload")
     flag = blob[0]
+    if flag == _FS_FLAG_PQXDH:
+        if len(blob) < 1 + _PQXDH_HEADER_LEN:
+            raise ValueError("sealed inner payload too short for PQXDH header")
+        return blob[1:1 + _PQXDH_HEADER_LEN], None, blob[1 + _PQXDH_HEADER_LEN:]
     if flag == _FS_FLAG_X3DH:
         if len(blob) < 1 + _X3DH_HEADER_LEN:
             raise ValueError("sealed inner payload too short for X3DH header")
@@ -848,6 +862,17 @@ class Session:
                 "⚠ Contact has no prekey bundle — using legacy bootstrap "
                 "(reduced forward secrecy for opening messages)",
             )
+        elif bundle is not None:
+            if bundle.has_pq:
+                self._emit("pq", "post-quantum hybrid handshake (ML-KEM-768 + X25519)")
+            elif not self._legacy_warned:
+                # Bundle exists but is pre-PQ: classic X3DH. Visible, once.
+                self._legacy_warned = True
+                self._emit(
+                    "pq-downgrade",
+                    "⚠ Contact's client predates the hybrid handshake — "
+                    "classic X3DH only (no post-quantum protection)",
+                )
 
     @property
     def node_count(self) -> int:

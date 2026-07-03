@@ -509,6 +509,51 @@ class Gauntlet:
             return False, f"rate≈0.1 out of band: {n_dial}/{trials}"
         return True, f"rates 0/0.1/1.0 → {n_zero}/{n_dial}/{n_all} of {trials}"
 
+    # ===================================================================== #
+    # Probe 11 — PQ downgrade resistance
+    # ===================================================================== #
+    def probe_pq_downgrade(self) -> tuple[bool, str]:
+        """The hybrid handshake must be on by default, survive the relay round
+        trip, and be *unstrippable*: a MITM (or hostile relay) that corrupts or
+        deletes just the ML-KEM prekey signature must cause a hard handshake
+        rejection — never a silent fallback to classic X3DH."""
+        bundle, privates = generate_prekey_bundle(self.bob)
+        if not bundle.has_pq:
+            return False, "freshly generated bundle carries no ML-KEM prekey"
+
+        # Round-trip the bundle through the relay; the hybrid must survive.
+        addr = self.bob.scan_keypair.public_b58()
+        pub = self.client.post(f"/prekeys/{addr}", json=privates.publish_payload(self.bob))
+        if pub.status_code != 200:
+            return False, f"publish failed ({pub.status_code})"
+        served = PreKeyBundle.from_dict(self.client.get(f"/prekeys/{addr}").json())
+        if not served.has_pq:
+            return False, "relay dropped the ML-KEM prekey from the bundle"
+        result, header = x3dh_send(self.alice, served)
+        if not (result.pq and header.is_hybrid):
+            return False, "handshake against a PQ bundle was not hybrid"
+        recv = x3dh_receive(self.bob, privates, header)
+        if recv.master_secret != result.master_secret:
+            return False, "hybrid master secrets disagree"
+
+        # Strip attack 1: corrupt the PQ signature → must hard-reject.
+        d = served.to_dict()
+        d["pq_prekey_sig"] = d["signed_prekey_sig"]
+        try:
+            x3dh_send(self.alice, PreKeyBundle.from_dict(d))
+            return False, "tampered pq_prekey_sig accepted (silent downgrade!)"
+        except X3DHError:
+            pass
+        # Strip attack 2: delete the signature but keep the PQ key → same.
+        d2 = served.to_dict()
+        d2["pq_prekey_sig"] = None
+        try:
+            x3dh_send(self.alice, PreKeyBundle.from_dict(d2))
+            return False, "unsigned pq_prekey accepted (silent downgrade!)"
+        except X3DHError:
+            pass
+        return True, "hybrid by default, survives relay, strip attempts hard-fail"
+
 
 # --------------------------------------------------------------------------- #
 # Runner
@@ -573,6 +618,11 @@ _PROBE_SPECS: list[tuple[str, str, str]] = [
     ),
     ("otpk-consumption", "consumed OTPK is deleted and non-reusable", "probe_otpk_consumption"),
     ("fmd-rate", "FMD rate dial controls relay-side detection probability", "probe_fmd_rate"),
+    (
+        "pq-downgrade",
+        "hybrid ML-KEM handshake cannot be silently stripped",
+        "probe_pq_downgrade",
+    ),
 ]
 
 # Result statuses. The probes here only ever pass, fail, or error; "skip" is part

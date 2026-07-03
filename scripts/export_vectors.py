@@ -55,6 +55,7 @@ from drift.crypto import (  # noqa: E402
 from drift.crypto.burn import generate_burn_token, verify_burn_token  # noqa: E402
 from drift.crypto.fmd import derive_fmd_key, fmd_flag, fmd_test  # noqa: E402
 from drift.crypto.panic import KDFParams, create_vault, derive_unlock_key, try_unlock  # noqa: E402
+from drift.crypto.pqkem import PQKeypair, encapsulate  # noqa: E402
 from drift.crypto.ratchet import (  # noqa: E402
     Header,
     _kdf_ck,
@@ -73,6 +74,7 @@ from drift.crypto.stealth import (  # noqa: E402
 from drift.crypto.x3dh import (  # noqa: E402
     PreKeyBundle,
     PreKeyPrivates,
+    _ed25519_private,
     _sign_signed_prekey,
     derive_master_secret_recv,
     verify_prekey_bundle,
@@ -504,6 +506,70 @@ def build_x3dh() -> dict[str, Any]:
     return out
 
 
+def build_pqxdh() -> dict[str, Any]:
+    """The hybrid post-quantum handshake (PQXDH-style).
+
+    ML-KEM **encapsulation** is randomized, so this is a transcript vector: the
+    sender-side ciphertext + master secret are recorded at export time. What
+    every implementation must then reproduce deterministically is the
+    **receiver side** — expand the ML-KEM keypair from its 64-byte seed,
+    decapsulate the recorded ciphertext, fold the shared secret into
+    ``HKDF(F || DH1..DH4 || SS, info="drift-pqxdh-v1")`` and land on the
+    recorded master secret bit-for-bit. A raw seed→decapsulation case pins the
+    KEM alone.
+    """
+    alice = didentity("pqxdh:alice")
+    bob = didentity("pqxdh:bob")
+
+    # Raw KEM pin: deterministic seed, recorded ct → deterministic ss.
+    kem = PQKeypair.from_seed(dbytes("pqxdh:kem-seed", 64))
+    ss, ct = encapsulate(kem.public_bytes())
+    assert kem.decapsulate(ct) == ss
+
+    # Full hybrid handshake with deterministic classical material.
+    bundle, privates = _build_prekey_material("pqxdh:hs", bob, otpk=True)
+    pq = PQKeypair.from_seed(dbytes("pqxdh:hs-seed", 64))
+    pq_id = 3003
+    pq_sig = _ed25519_private(bob).sign(pq.public_bytes())
+    privates.pq_prekey = pq
+    privates.pq_prekey_id = pq_id
+    privates.pq_prekey_sig = pq_sig
+    bundle.pq_prekey = pq.public_bytes()
+    bundle.pq_prekey_id = pq_id
+    bundle.pq_prekey_sig = pq_sig
+    assert verify_prekey_bundle(bundle)
+
+    with transcript_mode("pqxdh:hs") as (keys, _nonces):
+        result, header = x3dh_send(alice, bundle)
+    assert result.pq and header.is_hybrid
+    assert derive_master_secret_recv(bob, privates, header) == result.master_secret
+
+    return {
+        "kem": {
+            "seed": dbytes("pqxdh:kem-seed", 64).hex(),
+            "public_key": kem.public_bytes().hex(),
+            "ciphertext": ct.hex(),
+            "shared_secret": ss.hex(),
+        },
+        "handshake": {
+            "alice_spend_priv": alice.spend_keypair.private_bytes().hex(),
+            "bob_scan_priv": bob.scan_keypair.private_bytes().hex(),
+            "bob_spend_priv": bob.spend_keypair.private_bytes().hex(),
+            "bob_signed_prekey_priv": privates.signed_prekey.private_bytes().hex(),
+            "signed_prekey_id": privates.signed_prekey_id,
+            "signed_prekey_sig": privates.signed_prekey_sig.hex(),
+            "one_time_prekey_priv": privates.one_time[2002].private_bytes().hex(),
+            "one_time_prekey_id": 2002,
+            "pq_prekey_seed": dbytes("pqxdh:hs-seed", 64).hex(),
+            "pq_prekey_id": pq_id,
+            "pq_prekey_sig": pq_sig.hex(),
+            "alice_ephemeral_priv": keys.recorded[0],
+            "header": header.to_bytes().hex(),
+            "master_secret": result.master_secret.hex(),
+        },
+    }
+
+
 def build_burn() -> dict[str, Any]:
     shared = dbytes("burn:shared-secret")
     nonce = dbytes("burn:nonce", 16)
@@ -622,6 +688,7 @@ BUILDERS = {
     "sealed": build_sealed,
     "ratchet": build_ratchet,
     "x3dh": build_x3dh,
+    "pqxdh": build_pqxdh,
     "burn": build_burn,
     "vault": build_vault,
     "fmd": build_fmd,

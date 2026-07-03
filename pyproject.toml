@@ -22,7 +22,7 @@ classifiers = [
 ]
 
 dependencies = [
-    "cryptography>=42.0",
+    "cryptography>=49.0",  # >=49: ML-KEM-768 for the hybrid PQ handshake
     "PyNaCl>=1.5",
     "argon2-cffi>=23.1",
     "websockets>=12.0",

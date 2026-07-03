@@ -20,6 +20,7 @@ from drift.crypto import Identity, Keypair, b58encode, decrypt, derive_message_k
 from drift.crypto.burn import generate_burn_token, verify_burn_token
 from drift.crypto.fmd import FMDKeypair, derive_fmd_key, fmd_test
 from drift.crypto.panic import KDFParams, derive_unlock_key, try_unlock
+from drift.crypto.pqkem import PQKeypair
 from drift.crypto.ratchet import (
     Header,
     _kdf_ck,
@@ -283,6 +284,53 @@ class TestX3DH:
         assert pt.hex() == h["plaintext"]
 
 
+class TestPQXDH:
+    """The hybrid post-quantum handshake. ML-KEM encapsulation is randomized,
+    so the vector pins the deterministic receiver side: seed → keypair →
+    decapsulate the recorded ciphertext → the recorded master secret."""
+
+    def test_kem_decapsulation_pins(self) -> None:
+        k = load("pqxdh")["kem"]
+        kem = PQKeypair.from_seed(bytes.fromhex(k["seed"]))
+        assert kem.public_bytes().hex() == k["public_key"]
+        ss = kem.decapsulate(bytes.fromhex(k["ciphertext"]))
+        assert ss.hex() == k["shared_secret"]
+
+    def test_hybrid_receive_derives_master(self) -> None:
+        h = load("pqxdh")["handshake"]
+        bob = identity(h["bob_scan_priv"], h["bob_spend_priv"])
+        privates = PreKeyPrivates(
+            signed_prekey=keypair(h["bob_signed_prekey_priv"]),
+            signed_prekey_id=h["signed_prekey_id"],
+            signed_prekey_created=0.0,
+            signed_prekey_sig=bytes.fromhex(h["signed_prekey_sig"]),
+            one_time={h["one_time_prekey_id"]: keypair(h["one_time_prekey_priv"])},
+            pq_prekey=PQKeypair.from_seed(bytes.fromhex(h["pq_prekey_seed"])),
+            pq_prekey_id=h["pq_prekey_id"],
+            pq_prekey_sig=bytes.fromhex(h["pq_prekey_sig"]),
+        )
+        header = X3DHHeader.from_bytes(bytes.fromhex(h["header"]))
+        assert header.is_hybrid
+        master = derive_master_secret_recv(bob, privates, header)
+        assert master.hex() == h["master_secret"]
+
+    def test_pq_bundle_signature_verifies(self) -> None:
+        h = load("pqxdh")["handshake"]
+        bob = identity(h["bob_scan_priv"], h["bob_spend_priv"])
+        pq = PQKeypair.from_seed(bytes.fromhex(h["pq_prekey_seed"]))
+        bundle = PreKeyBundle(
+            identity_key=bob.verify_key_bytes(),
+            identity_dh_key=bob.spend_keypair.public_bytes(),
+            signed_prekey=keypair(h["bob_signed_prekey_priv"]).public_bytes(),
+            signed_prekey_sig=bytes.fromhex(h["signed_prekey_sig"]),
+            signed_prekey_id=h["signed_prekey_id"],
+            pq_prekey=pq.public_bytes(),
+            pq_prekey_sig=bytes.fromhex(h["pq_prekey_sig"]),
+            pq_prekey_id=h["pq_prekey_id"],
+        )
+        assert verify_prekey_bundle(bundle)
+
+
 class TestBurn:
     def test_vectors(self) -> None:
         for v in load("burn")["vectors"]:
@@ -358,6 +406,7 @@ class TestFMD:
         "sealed",
         "ratchet",
         "x3dh",
+        "pqxdh",
         "burn",
         "vault",
         "fmd",

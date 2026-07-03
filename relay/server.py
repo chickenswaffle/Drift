@@ -401,6 +401,10 @@ _PREKEY_BUNDLE_FIELDS = (
     "identity_key", "identity_dh_key", "signed_prekey",
     "signed_prekey_sig", "signed_prekey_id",
 )
+# Optional bundle fields, stored and served verbatim when present. The hybrid
+# post-quantum handshake's ML-KEM prekey travels here; the relay never
+# interprets it (the bundle stays self-authenticating end-to-end).
+_PREKEY_BUNDLE_OPTIONAL_FIELDS = ("pq_prekey", "pq_prekey_sig", "pq_prekey_id")
 
 
 def _prune_prekeys() -> None:
@@ -758,6 +762,9 @@ async def publish_prekeys(
             {"error": f"missing bundle field(s): {', '.join(missing)}"}, status_code=400
         )
     record = {f: body[f] for f in _PREKEY_BUNDLE_FIELDS}
+    for f in _PREKEY_BUNDLE_OPTIONAL_FIELDS:
+        if body.get(f) is not None:
+            record[f] = body[f]
     record["one_time"] = _clean_one_time_list(body.get("one_time_prekeys"))
     record["stored_at"] = time.time()
     _prekeys[contact_addr] = record
@@ -791,6 +798,9 @@ async def fetch_prekeys(contact_addr: str, request: Request) -> JSONResponse:
         return JSONResponse({"error": "no prekey bundle for this contact"}, status_code=404)
     otpk = record["one_time"].pop(0) if record["one_time"] else None  # atomic remove
     response = {f: record[f] for f in _PREKEY_BUNDLE_FIELDS}
+    for f in _PREKEY_BUNDLE_OPTIONAL_FIELDS:
+        if f in record:
+            response[f] = record[f]
     response["one_time_prekey"] = otpk["pub"] if otpk else None
     response["one_time_prekey_id"] = otpk["id"] if otpk else None
     return JSONResponse(response)
