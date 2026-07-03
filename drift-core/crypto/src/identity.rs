@@ -8,6 +8,7 @@
 
 use ed25519_dalek::{Signature, Signer, SigningKey};
 use x25519_dalek::{PublicKey, StaticSecret};
+use zeroize::Zeroize;
 
 use crate::base58;
 use crate::kdf::derive_message_key;
@@ -72,12 +73,19 @@ impl Identity {
     }
 
     /// The 32-byte Ed25519 seed: `HKDF(spend_priv, info="drift-identity-sign-v1")`.
+    /// The returned copy is the caller's to wipe (`zeroize`) once used.
     pub fn signing_seed(&self) -> [u8; 32] {
-        derive_message_key(&self.spend.private_bytes(), None, b"drift-identity-sign-v1")
+        let mut spend_priv = self.spend.private_bytes();
+        let seed = derive_message_key(&spend_priv, None, b"drift-identity-sign-v1");
+        spend_priv.zeroize();
+        seed
     }
 
     fn signing_key(&self) -> SigningKey {
-        SigningKey::from_bytes(&self.signing_seed())
+        let mut seed = self.signing_seed();
+        let sk = SigningKey::from_bytes(&seed);
+        seed.zeroize();
+        sk
     }
 
     /// The public Ed25519 verify key (the bundle's `identity_key`).

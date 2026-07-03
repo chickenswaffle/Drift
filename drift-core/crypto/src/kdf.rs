@@ -5,6 +5,7 @@
 
 use hkdf::Hkdf;
 use sha2::Sha256;
+use zeroize::Zeroize;
 
 /// HKDF-SHA256 → 32 bytes. `salt = None` matches the reference default (a
 /// zero-filled salt of the hash output length).
@@ -26,6 +27,7 @@ fn derive64(ikm: &[u8], salt: Option<&[u8]>, info: &[u8]) -> ([u8; 32], [u8; 32]
     let mut b = [0u8; 32];
     a.copy_from_slice(&okm[..32]);
     b.copy_from_slice(&okm[32..]);
+    okm.zeroize();
     (a, b)
 }
 

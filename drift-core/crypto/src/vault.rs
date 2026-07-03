@@ -8,6 +8,7 @@
 //! opening committed vault blobs.
 
 use argon2::{Algorithm, Argon2, Params, Version};
+use zeroize::Zeroize;
 
 use crate::aead::decrypt;
 
@@ -57,9 +58,13 @@ fn unpad(block: &[u8]) -> Option<Vec<u8>> {
 
 fn open_slot(passphrase: &str, slot: &[u8], params: &KdfParams) -> Option<Vec<u8>> {
     let (salt, sealed) = slot.split_at(SALT_LEN);
-    let key = derive_unlock_key(passphrase, salt, params);
-    let padded = decrypt(&key, sealed, b"").ok()?;
-    unpad(&padded)
+    let mut key = derive_unlock_key(passphrase, salt, params);
+    let decrypted = decrypt(&key, sealed, b"");
+    key.zeroize();
+    let mut padded = decrypted.ok()?;
+    let out = unpad(&padded);
+    padded.zeroize();
+    out
 }
 
 fn parse_vault(vault: &[u8]) -> Option<(KdfParams, &[u8], &[u8])> {

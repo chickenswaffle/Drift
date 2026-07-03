@@ -6,6 +6,7 @@
 //! initial Double Ratchet key.
 
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use zeroize::Zeroize;
 
 use crate::identity::{Identity, Keypair};
 use crate::kdf::derive_message_key;
@@ -94,7 +95,9 @@ fn kdf_master(dh_concat: &[u8]) -> [u8; 32] {
     let mut ikm = Vec::with_capacity(32 + dh_concat.len());
     ikm.extend_from_slice(&F);
     ikm.extend_from_slice(dh_concat);
-    derive_message_key(&ikm, Some(&HKDF_SALT), X3DH_INFO)
+    let master = derive_message_key(&ikm, Some(&HKDF_SALT), X3DH_INFO);
+    ikm.zeroize();
+    master
 }
 
 /// Verify the Ed25519 signature on the bundle's signed prekey.
@@ -120,21 +123,27 @@ pub fn x3dh_send(
         return Err(Error::X3dh("prekey bundle signature invalid"));
     }
     let ik_a = &my_identity.spend;
-    let dh1 = ik_a.ecdh(&their_bundle.signed_prekey);
-    let dh2 = ek.ecdh(&their_bundle.identity_dh_key);
-    let dh3 = ek.ecdh(&their_bundle.signed_prekey);
+    let mut dh1 = ik_a.ecdh(&their_bundle.signed_prekey);
+    let mut dh2 = ek.ecdh(&their_bundle.identity_dh_key);
+    let mut dh3 = ek.ecdh(&their_bundle.signed_prekey);
     let mut dh_concat = Vec::new();
     dh_concat.extend_from_slice(&dh1);
     dh_concat.extend_from_slice(&dh2);
     dh_concat.extend_from_slice(&dh3);
+    dh1.zeroize();
+    dh2.zeroize();
+    dh3.zeroize();
 
     let mut otpk_id = None;
     if let Some(otpk) = their_bundle.one_time_prekey {
-        dh_concat.extend_from_slice(&ek.ecdh(&otpk));
+        let mut dh4 = ek.ecdh(&otpk);
+        dh_concat.extend_from_slice(&dh4);
+        dh4.zeroize();
         otpk_id = their_bundle.one_time_prekey_id;
     }
 
     let master = kdf_master(&dh_concat);
+    dh_concat.zeroize();
     let header = X3DHHeader {
         ik_a: ik_a.public_bytes(),
         ek_a: ek.public_bytes(),
@@ -157,18 +166,25 @@ pub fn derive_master_secret_recv(
     }
     let spk = &privates.signed_prekey;
     let ik_b = &my_identity.spend;
-    let dh1 = spk.ecdh(&header.ik_a);
-    let dh2 = ik_b.ecdh(&header.ek_a);
-    let dh3 = spk.ecdh(&header.ek_a);
+    let mut dh1 = spk.ecdh(&header.ik_a);
+    let mut dh2 = ik_b.ecdh(&header.ek_a);
+    let mut dh3 = spk.ecdh(&header.ek_a);
     let mut dh_concat = Vec::new();
     dh_concat.extend_from_slice(&dh1);
     dh_concat.extend_from_slice(&dh2);
     dh_concat.extend_from_slice(&dh3);
+    dh1.zeroize();
+    dh2.zeroize();
+    dh3.zeroize();
 
     if let Some(otpk_id) = header.one_time_prekey_id {
         let otpk = privates.one_time_private(otpk_id)?;
-        dh_concat.extend_from_slice(&otpk.ecdh(&header.ek_a));
+        let mut dh4 = otpk.ecdh(&header.ek_a);
+        dh_concat.extend_from_slice(&dh4);
+        dh4.zeroize();
     }
 
-    Ok(kdf_master(&dh_concat))
+    let master = kdf_master(&dh_concat);
+    dh_concat.zeroize();
+    Ok(master)
 }

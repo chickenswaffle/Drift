@@ -16,6 +16,7 @@ hmac = "0.12"
 argon2 = "0.5"                     # Argon2id — the panic-vault KDF
 subtle = "2"                       # constant-time comparison
 rand_core = "0.6"                  # OsRng for production keypair/nonce generation
+zeroize = { version = "1", features = ["derive"] }  # wipe secrets on drop / after use
 # libsodium's ed25519 group ops (Elligator `from_uniform`, point add, scalar
 # arithmetic) for stealth addressing + FMD. Binding the *same* library the
 # Python reference uses is what makes those constructions byte-identical — there

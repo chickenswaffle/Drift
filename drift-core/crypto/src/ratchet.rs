@@ -8,6 +8,8 @@
 
 use std::collections::HashMap;
 
+use zeroize::Zeroize;
+
 use crate::aead::{decrypt, encrypt_with_nonce};
 use crate::entropy::Entropy;
 use crate::identity::Keypair;
@@ -58,6 +60,9 @@ impl Header {
 }
 
 /// One party's full Double Ratchet state.
+///
+/// Wipes its root/chain/cached-message keys on drop; the embedded ratchet
+/// keypair's private scalar is wiped by `x25519-dalek`'s own `zeroize` on drop.
 #[derive(Clone)]
 pub struct RatchetState {
     pub root_key: [u8; 32],
@@ -71,6 +76,26 @@ pub struct RatchetState {
     pub message_keys: HashMap<([u8; 32], u32), [u8; 32]>,
 }
 
+impl Zeroize for RatchetState {
+    fn zeroize(&mut self) {
+        self.root_key.zeroize();
+        self.sending_chain_key.zeroize();
+        self.receiving_chain_key.zeroize();
+        // Map keys are (peer ratchet pub, counter) — public. The values are
+        // cached message keys — wipe each before dropping the map's storage.
+        for mk in self.message_keys.values_mut() {
+            mk.zeroize();
+        }
+        self.message_keys.clear();
+    }
+}
+
+impl Drop for RatchetState {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+
 /// Initialise the initiator ("Alice"): generate a ratchet keypair and turn the
 /// root ratchet against the peer's initial ratchet public key, ready to send.
 pub fn init_sender(
@@ -79,8 +104,9 @@ pub fn init_sender(
     entropy: &mut impl Entropy,
 ) -> RatchetState {
     let dhs = entropy.ratchet_keypair();
-    let dh_out = dhs.ecdh(their_ratchet_pub);
+    let mut dh_out = dhs.ecdh(their_ratchet_pub);
     let (root_key, sending_chain_key) = kdf_rk(shared_secret, &dh_out);
+    dh_out.zeroize();
     RatchetState {
         root_key,
         sending_chain_key: Some(sending_chain_key),
@@ -119,7 +145,7 @@ pub fn ratchet_encrypt(
     let ck = state.sending_chain_key.ok_or(Error::Ratchet(
         "no sending chain yet — receive a message before sending",
     ))?;
-    let (next_ck, message_key) = kdf_ck(&ck);
+    let (next_ck, mut message_key) = kdf_ck(&ck);
     state.sending_chain_key = Some(next_ck);
     let header = Header {
         dh: state.ratchet_keypair.public_bytes(),
@@ -129,6 +155,7 @@ pub fn ratchet_encrypt(
     state.send_count += 1;
     let nonce = entropy.aead_nonce();
     let ct = encrypt_with_nonce(&message_key, &nonce, plaintext, &header.to_bytes());
+    message_key.zeroize();
     Ok((header, ct))
 }
 
@@ -178,10 +205,12 @@ fn decrypt_into(
     let rck = state.receiving_chain_key.ok_or(Error::Ratchet(
         "no receiving chain key — message is unrecoverable",
     ))?;
-    let (next_rck, message_key) = kdf_ck(&rck);
+    let (next_rck, mut message_key) = kdf_ck(&rck);
     state.receiving_chain_key = Some(next_rck);
     state.recv_count += 1;
-    decrypt(&message_key, ciphertext, &header.to_bytes())
+    let out = decrypt(&message_key, ciphertext, &header.to_bytes());
+    message_key.zeroize();
+    out
 }
 
 fn try_skipped_keys(
@@ -191,7 +220,11 @@ fn try_skipped_keys(
 ) -> Result<Option<Vec<u8>>> {
     let key = (header.dh, header.n);
     match state.message_keys.remove(&key) {
-        Some(mk) => Ok(Some(decrypt(&mk, ciphertext, &header.to_bytes())?)),
+        Some(mut mk) => {
+            let out = decrypt(&mk, ciphertext, &header.to_bytes());
+            mk.zeroize();
+            Ok(Some(out?))
+        }
         None => Ok(None),
     }
 }
@@ -226,14 +259,16 @@ fn dh_ratchet(state: &mut RatchetState, header: &Header, entropy: &mut impl Entr
     state.recv_count = 0;
     state.their_ratchet_pub = Some(header.dh);
 
-    let dh_out = state.ratchet_keypair.ecdh(&header.dh);
+    let mut dh_out = state.ratchet_keypair.ecdh(&header.dh);
     let (root_key, receiving_chain_key) = kdf_rk(&state.root_key, &dh_out);
+    dh_out.zeroize();
     state.root_key = root_key;
     state.receiving_chain_key = Some(receiving_chain_key);
 
     state.ratchet_keypair = entropy.ratchet_keypair();
-    let dh_out2 = state.ratchet_keypair.ecdh(&header.dh);
+    let mut dh_out2 = state.ratchet_keypair.ecdh(&header.dh);
     let (root_key2, sending_chain_key) = kdf_rk(&state.root_key, &dh_out2);
+    dh_out2.zeroize();
     state.root_key = root_key2;
     state.sending_chain_key = Some(sending_chain_key);
 }

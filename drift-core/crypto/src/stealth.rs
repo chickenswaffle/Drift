@@ -8,6 +8,7 @@
 
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::identity::Keypair;
 use crate::kdf::derive_message_key;
@@ -47,18 +48,23 @@ pub fn derive_one_time_address(
     recipient_scan_pub: &[u8; 32],
     recipient_spend_pub: &[u8; 32],
 ) -> ([u8; 32], [u8; 32]) {
-    let s_scan = ecdh(ephemeral_priv, recipient_scan_pub);
-    let s_spend = ecdh(ephemeral_priv, recipient_spend_pub);
+    let mut s_scan = ecdh(ephemeral_priv, recipient_scan_pub);
+    let mut s_spend = ecdh(ephemeral_priv, recipient_spend_pub);
     let one_time_addr = address_from_secret(&s_scan, recipient_spend_pub);
     let mut ikm = [0u8; 64];
     ikm[..32].copy_from_slice(&s_scan);
     ikm[32..].copy_from_slice(&s_spend);
+    s_scan.zeroize();
+    s_spend.zeroize();
     let message_key = derive_message_key(&ikm, None, MSG_KEY_INFO);
+    ikm.zeroize();
     (one_time_addr, message_key)
 }
 
 /// A confirmed scan-key-only detection. Insufficient to decrypt: the message key
 /// additionally needs the private spend key (see [`derive_message_key_with_spend`]).
+/// Carries the live scan-DH secret, so it wipes itself on drop.
+#[derive(Zeroize, ZeroizeOnDrop)]
 pub struct ScanResult {
     pub ephemeral_pub: [u8; 32],
     pub scan_secret: [u8; 32],
@@ -72,7 +78,7 @@ pub fn scan_for_message(
     my_scan_priv: &[u8; 32],
     my_spend_pub: &[u8; 32],
 ) -> Option<ScanResult> {
-    let s_scan = ecdh(my_scan_priv, ephemeral_pub);
+    let mut s_scan = ecdh(my_scan_priv, ephemeral_pub);
     let candidate = address_from_secret(&s_scan, my_spend_pub);
     if candidate.ct_eq(one_time_addr).into() {
         Some(ScanResult {
@@ -80,6 +86,7 @@ pub fn scan_for_message(
             scan_secret: s_scan,
         })
     } else {
+        s_scan.zeroize();
         None
     }
 }
@@ -90,9 +97,12 @@ pub fn derive_message_key_with_spend(
     scan_result: &ScanResult,
     my_spend_priv: &[u8; 32],
 ) -> [u8; 32] {
-    let s_spend = ecdh(my_spend_priv, &scan_result.ephemeral_pub);
+    let mut s_spend = ecdh(my_spend_priv, &scan_result.ephemeral_pub);
     let mut ikm = [0u8; 64];
     ikm[..32].copy_from_slice(&scan_result.scan_secret);
     ikm[32..].copy_from_slice(&s_spend);
-    derive_message_key(&ikm, None, MSG_KEY_INFO)
+    s_spend.zeroize();
+    let message_key = derive_message_key(&ikm, None, MSG_KEY_INFO);
+    ikm.zeroize();
+    message_key
 }

@@ -5,6 +5,8 @@
 //! is sealed under `HKDF(stealth_key, "drift-sealed-sender-v1")` with the
 //! recipient one-time address bound as AEAD associated data.
 
+use zeroize::Zeroize;
+
 use crate::aead::{decrypt, encrypt_with_nonce};
 use crate::kdf::derive_message_key;
 use crate::{Error, Result};
@@ -26,7 +28,9 @@ pub fn seal_with_nonce(
     ratchet_ciphertext: &[u8],
     address: &[u8],
 ) -> Vec<u8> {
-    let sealed_header = encrypt_with_nonce(&seal_key(stealth_key), nonce, ratchet_header, address);
+    let mut key = seal_key(stealth_key);
+    let sealed_header = encrypt_with_nonce(&key, nonce, ratchet_header, address);
+    key.zeroize();
     let mut out = Vec::with_capacity(EPK_LEN + 2 + sealed_header.len() + ratchet_ciphertext.len());
     out.extend_from_slice(ephemeral_pub);
     out.extend_from_slice(&(sealed_header.len() as u16).to_be_bytes());
@@ -75,5 +79,8 @@ pub fn parse(blob: &[u8]) -> Result<([u8; 32], &[u8], &[u8])> {
 
 /// Decrypt a sealed ratchet header. `Error::InvalidTag` on tampering.
 pub fn open_header(stealth_key: &[u8], sealed_header: &[u8], address: &[u8]) -> Result<Vec<u8>> {
-    decrypt(&seal_key(stealth_key), sealed_header, address)
+    let mut key = seal_key(stealth_key);
+    let out = decrypt(&key, sealed_header, address);
+    key.zeroize();
+    out
 }
