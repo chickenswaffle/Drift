@@ -188,13 +188,15 @@ class TestPrivacyTradeoff:
         assert fmd_test(true_flag, full_key, addr_t) is True
 
         # Find a false positive: a flag made for someone *else* that nonetheless
-        # passes the relay's 1-sub-key test (exists at rate 1/2).
+        # passes the relay's 1-sub-key test (exists at rate 1/2). Skip the
+        # ~2^-7 candidates that fluke past the full 8-sub-key test too — the
+        # property demonstrated below needs an FP the *recipient* rejects.
         stranger = Identity.generate().fmd_keypair(8)
         fp = None
         for _ in range(1000):
             a = os.urandom(32)
             f = fmd_flag(a, stranger.public_keys)
-            if fmd_test(f, relay_key, a):
+            if fmd_test(f, relay_key, a) and not fmd_test(f, full_key, a):
                 fp = (a, f)
                 break
         assert fp is not None, "a 1/2-rate key should yield a false positive quickly"
