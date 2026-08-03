@@ -102,6 +102,9 @@ Being precise here is what separates a serious tool from snake oil.
 
 🧪 **Alpha — Phases 0–6, 8, the WITNESS proof layer, Sovereign Rooms, and Lockdown Mode complete.** Usable end-to-end, but not yet independently audited; not ready for high-stakes production use.
 
+The next project priority is release reliability and an independently reviewable
+security baseline; see the [release and audit plan](docs/release-and-audit-plan.md).
+
 | Phase | Goal | Status |
 |-------|------|--------|
 | 0 | Basic E2E encryption — X25519 + XChaCha20 | ✅ Complete (`v0.1.0`) |
